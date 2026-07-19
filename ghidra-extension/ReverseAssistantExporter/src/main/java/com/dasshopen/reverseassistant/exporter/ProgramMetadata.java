@@ -2,6 +2,7 @@ package com.dasshopen.reverseassistant.exporter;
 
 import java.util.Objects;
 import java.util.regex.Pattern;
+import java.util.List;
 
 public record ProgramMetadata(
     String name,
@@ -10,7 +11,7 @@ public record ProgramMetadata(
     String architecture,
     String endianness,
     String imageBase,
-    String entryPoint
+    List<String> entryPoints
 ) {
 
     private static final Pattern SHA_256_PATTERN =
@@ -26,7 +27,11 @@ public record ProgramMetadata(
         architecture = requireNonBlank(architecture, "architecture");
         endianness = requireNonBlank(endianness, "endianness");
         imageBase = requireNonBlank(imageBase, "imageBase");
-        entryPoint = requireNonBlank(entryPoint, "entryPoint");
+        Objects.requireNonNull(
+            entryPoints,
+            "entryPoints must not be null"
+        );
+        entryPoints = List.copyOf(entryPoints);
 
         if (!SHA_256_PATTERN.matcher(sha256).matches()) {
             throw new IllegalArgumentException(
@@ -41,7 +46,12 @@ public record ProgramMetadata(
         }
 
         validateAddress(imageBase, "imageBase");
-        validateAddress(entryPoint, "entryPoint");
+        for (int index = 0; index < entryPoints.size(); index++) {
+            validateAddress(
+                entryPoints.get(index),
+                "entryPoints[" + index + "]"
+            );
+        }
     }
 
     private static String requireNonBlank(String value, String fieldName) {
@@ -56,10 +66,20 @@ public record ProgramMetadata(
         return value;
     }
 
-    private static void validateAddress(String value, String fieldName) {
+    private static void validateAddress(
+        String value,
+        String fieldName
+    ) {
+        Objects.requireNonNull(
+            value,
+            fieldName + " must not be null"
+        );
+
         if (!ADDRESS_PATTERN.matcher(value).matches()) {
             throw new IllegalArgumentException(
-                fieldName + " must use the format 0x followed by lowercase hexadecimal digits"
+                fieldName +
+                " must use the format 0x followed by " +
+                "lowercase hexadecimal digits"
             );
         }
     }

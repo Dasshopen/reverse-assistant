@@ -54,10 +54,13 @@ public final class GhidraExportJsonWriter {
             "image_base",
             metadata.imageBase()
         );
-        program.addProperty(
-            "entry_point",
-            metadata.entryPoint()
-        );
+        JsonArray entryPoints = new JsonArray();
+
+        for (String entryPoint : metadata.entryPoints()) {
+            entryPoints.add(entryPoint);
+        }
+
+        program.add("entry_points", entryPoints);
 
         return program;
     }

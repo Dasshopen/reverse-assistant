@@ -2,6 +2,8 @@ package com.dasshopen.reverseassistant.exporter;
 
 import java.util.Locale;
 import java.util.Objects;
+import java.util.ArrayList;
+import java.util.List;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressIterator;
@@ -21,7 +23,7 @@ public final class ProgramMetadataCollector {
                 .getLanguageDescription()),
             program.getLanguage().isBigEndian() ? "big" : "little",
             formatAddress(program.getImageBase()),
-            formatAddress(findEntryPoint(program))
+            findEntryPoints(program)
         );
     }
 
@@ -101,28 +103,26 @@ public final class ProgramMetadataCollector {
         return normalizedProcessor + "_" + bitSize;
     }
 
-    private static Address findEntryPoint(Program program) {
-        AddressIterator entryPoints = program.getSymbolTable()
+    private static List<String> findEntryPoints(
+        Program program
+    ) {
+        AddressIterator iterator = program.getSymbolTable()
             .getExternalEntryPointIterator();
 
-        Address lowestEntryPoint = null;
+        List<Address> addresses = new ArrayList<>();
 
-        while (entryPoints.hasNext()) {
-            Address candidate = entryPoints.next();
-
-            if (lowestEntryPoint == null ||
-                candidate.compareTo(lowestEntryPoint) < 0) {
-                lowestEntryPoint = candidate;
-            }
+        while (iterator.hasNext()) {
+            addresses.add(iterator.next());
         }
 
-        if (lowestEntryPoint == null) {
-            throw new IllegalStateException(
-                "Ghidra did not identify an executable entry point"
-            );
-        }
+        addresses.sort(
+            (left, right) -> left.compareTo(right)
+        );
 
-        return lowestEntryPoint;
+        return addresses.stream()
+            .map(ProgramMetadataCollector::formatAddress)
+            .distinct()
+            .toList();
     }
 
     private static String formatAddress(Address address) {
