@@ -1,0 +1,39 @@
+{
+    "schema_version": 1,
+    "program": {
+        "name": "sample.exe",
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "format": "PE",
+        "architecture": "x86_64",
+        "endianness": "little",
+        "image_base": "0x140000000",
+        "entry_points": [
+            "0x140001000"
+        ]
+    },
+    "functions": [
+        {
+            "entry_address": "0x140001150",
+            "name": "FUN_140001150",
+            "return_type": "int",
+            "parameters": [
+                {
+                    "name": "input",
+                    "data_type": "char *"
+                }
+            ],
+            "is_external": false,
+            "is_thunk": false,
+            "decompiled_code": "int FUN_140001150(char *input) {\n  return strcmp(input, \"secret\");\n}",
+            "calls": [
+                {
+                    "target_address": null,
+                    "target_name": "strcmp"
+                }
+            ],
+            "strings": [
+                "secret"
+            ]
+        }
+    ]
+}
