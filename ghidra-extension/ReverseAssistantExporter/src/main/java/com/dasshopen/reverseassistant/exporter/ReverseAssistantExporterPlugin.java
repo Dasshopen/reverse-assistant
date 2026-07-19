@@ -1,8 +1,16 @@
 package com.dasshopen.reverseassistant.exporter;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
+
 import docking.ActionContext;
 import docking.action.DockingAction;
 import docking.action.MenuData;
+import docking.widgets.OptionDialog;
+import docking.widgets.filechooser.GhidraFileChooser;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.PluginTool;
@@ -16,17 +24,22 @@ import ghidra.util.Msg;
     shortDescription = "Export Ghidra analysis for Reverse Assistant",
     description = "Exports the active Ghidra program as deterministic and versioned JSON."
 )
-public final class ReverseAssistantExporterPlugin extends ProgramPlugin {
+public final class ReverseAssistantExporterPlugin
+    extends ProgramPlugin {
 
     private static final String ACTION_OWNER =
         "Reverse Assistant Exporter";
 
     private final ProgramMetadataCollector metadataCollector;
+    private final GhidraExportJsonWriter jsonWriter;
+    private final AtomicUtf8FileWriter fileWriter;
 
     public ReverseAssistantExporterPlugin(PluginTool tool) {
         super(tool);
 
         metadataCollector = new ProgramMetadataCollector();
+        jsonWriter = new GhidraExportJsonWriter();
+        fileWriter = new AtomicUtf8FileWriter();
 
         createActions();
     }
@@ -38,11 +51,13 @@ public final class ReverseAssistantExporterPlugin extends ProgramPlugin {
         ) {
             @Override
             public void actionPerformed(ActionContext context) {
-                showProgramMetadata();
+                exportCurrentProgram();
             }
 
             @Override
-            public boolean isEnabledForContext(ActionContext context) {
+            public boolean isEnabledForContext(
+                ActionContext context
+            ) {
                 return getCurrentProgram() != null;
             }
         };
@@ -61,37 +76,120 @@ public final class ReverseAssistantExporterPlugin extends ProgramPlugin {
         tool.addAction(exportAction);
     }
 
-    private void showProgramMetadata() {
+    private void exportCurrentProgram() {
         try {
             ProgramMetadata metadata =
                 metadataCollector.collect(getCurrentProgram());
 
-            String message = String.join(
-                System.lineSeparator(),
-                "Name: " + metadata.name(),
-                "SHA-256: " + metadata.sha256(),
-                "Format: " + metadata.format(),
-                "Architecture: " + metadata.architecture(),
-                "Endianness: " + metadata.endianness(),
-                "Image base: " + metadata.imageBase(),
-                "Entry point: " + metadata.entryPoint()
-            );
+            String json = jsonWriter.write(metadata);
+
+            Path destination = chooseDestination(metadata);
+
+            if (destination == null) {
+                return;
+            }
+
+            if (Files.exists(destination) &&
+                !confirmReplacement(destination)) {
+                return;
+            }
+
+            fileWriter.write(destination, json);
 
             Msg.showInfo(
                 this,
                 tool.getToolFrame(),
-                "Reverse Assistant Program Metadata",
-                message
+                "Reverse Assistant Export Complete",
+                "The Ghidra export was written to:\n" +
+                    destination
             );
         }
-        catch (RuntimeException exception) {
+        catch (IOException | RuntimeException exception) {
             Msg.showError(
                 this,
                 tool.getToolFrame(),
                 "Reverse Assistant Export Error",
-                "Unable to collect the active program metadata.",
+                "Unable to export the active Ghidra program.",
                 exception
             );
         }
+    }
+
+    private Path chooseDestination(ProgramMetadata metadata) {
+        GhidraFileChooser chooser =
+            new GhidraFileChooser(tool.getToolFrame());
+
+        try {
+            chooser.setTitle(
+                "Export Reverse Assistant JSON"
+            );
+            chooser.setApproveButtonText("Export");
+            chooser.setApproveButtonToolTipText(
+                "Export the current Ghidra analysis as JSON"
+            );
+            chooser.setMultiSelectionEnabled(false);
+
+            File homeDirectory = new File(
+                System.getProperty("user.home")
+            );
+
+            chooser.setSelectedFile(
+                new File(
+                    homeDirectory,
+                    createSuggestedFileName(metadata.name())
+                )
+            );
+
+            File selectedFile = chooser.getSelectedFile(true);
+
+            if (selectedFile == null || chooser.wasCancelled()) {
+                return null;
+            }
+
+            return ensureJsonExtension(selectedFile.toPath());
+        }
+        finally {
+            chooser.dispose();
+        }
+    }
+
+    private boolean confirmReplacement(Path destination) {
+        int choice = OptionDialog.showYesNoDialog(
+            tool.getToolFrame(),
+            "Replace Existing Export?",
+            "The selected file already exists:\n" +
+                destination +
+                "\n\nDo you want to replace it?"
+        );
+
+        return choice == OptionDialog.YES_OPTION;
+    }
+
+    private static String createSuggestedFileName(
+        String programName
+    ) {
+        String safeName = programName
+            .replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_")
+            .replaceAll("[. ]+$", "");
+
+        if (safeName.isBlank()) {
+            safeName = "ghidra-program";
+        }
+
+        return safeName + ".reverse-assistant.json";
+    }
+
+    private static Path ensureJsonExtension(Path destination) {
+        String fileName = destination
+            .getFileName()
+            .toString();
+
+        if (fileName
+            .toLowerCase(Locale.ROOT)
+            .endsWith(".json")) {
+            return destination;
+        }
+
+        return destination.resolveSibling(fileName + ".json");
     }
 }
