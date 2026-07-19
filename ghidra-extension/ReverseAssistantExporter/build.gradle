@@ -1,0 +1,14 @@
+def ghidraInstallDir =
+    project.findProperty("GHIDRA_INSTALL_DIR") ?:
+    System.getenv("GHIDRA_INSTALL_DIR")
+
+if (!ghidraInstallDir) {
+    throw new GradleException(
+        "GHIDRA_INSTALL_DIR must point to a valid Ghidra installation"
+    )
+}
+
+apply from: new File(
+    ghidraInstallDir.toString(),
+    "support/buildExtension.gradle"
+).canonicalPath
