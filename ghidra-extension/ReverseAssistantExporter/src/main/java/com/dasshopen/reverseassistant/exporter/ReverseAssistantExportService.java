@@ -11,11 +11,13 @@ public final class ReverseAssistantExportService {
     private final ProgramMetadataCollector metadataCollector;
     private final GhidraExportJsonWriter jsonWriter;
     private final AtomicUtf8FileWriter fileWriter;
+    private final FunctionMetadataCollector functionCollector;
 
     public ReverseAssistantExportService() {
         metadataCollector = new ProgramMetadataCollector();
         jsonWriter = new GhidraExportJsonWriter();
         fileWriter = new AtomicUtf8FileWriter();
+        functionCollector = new FunctionMetadataCollector();
     }
 
     public void export(Program program, Path destination)
@@ -33,7 +35,10 @@ public final class ReverseAssistantExportService {
         ProgramMetadata metadata =
             metadataCollector.collect(program);
 
-        String json = jsonWriter.write(metadata);
+        String json = jsonWriter.write(
+            metadata,
+            functionCollector.collect(program)
+        );
 
         fileWriter.write(destination, json);
     }
