@@ -16,6 +16,7 @@ import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.util.Msg;
+import ghidra.program.model.listing.Program;
 
 @PluginInfo(
     status = PluginStatus.STABLE,
@@ -30,16 +31,12 @@ public final class ReverseAssistantExporterPlugin
     private static final String ACTION_OWNER =
         "Reverse Assistant Exporter";
 
-    private final ProgramMetadataCollector metadataCollector;
-    private final GhidraExportJsonWriter jsonWriter;
-    private final AtomicUtf8FileWriter fileWriter;
+    private final ReverseAssistantExportService exportService;
 
     public ReverseAssistantExporterPlugin(PluginTool tool) {
         super(tool);
 
-        metadataCollector = new ProgramMetadataCollector();
-        jsonWriter = new GhidraExportJsonWriter();
-        fileWriter = new AtomicUtf8FileWriter();
+        exportService = new ReverseAssistantExportService();
 
         createActions();
     }
@@ -77,45 +74,48 @@ public final class ReverseAssistantExporterPlugin
     }
 
     private void exportCurrentProgram() {
-        try {
-            ProgramMetadata metadata =
-                metadataCollector.collect(getCurrentProgram());
+    Program program = getCurrentProgram();
 
-            String json = jsonWriter.write(metadata);
-
-            Path destination = chooseDestination(metadata);
-
-            if (destination == null) {
-                return;
-            }
-
-            if (Files.exists(destination) &&
-                !confirmReplacement(destination)) {
-                return;
-            }
-
-            fileWriter.write(destination, json);
-
-            Msg.showInfo(
-                this,
-                tool.getToolFrame(),
-                "Reverse Assistant Export Complete",
-                "The Ghidra export was written to:\n" +
-                    destination
-            );
-        }
-        catch (IOException | RuntimeException exception) {
-            Msg.showError(
-                this,
-                tool.getToolFrame(),
-                "Reverse Assistant Export Error",
-                "Unable to export the active Ghidra program.",
-                exception
-            );
-        }
+    if (program == null) {
+        return;
     }
 
-    private Path chooseDestination(ProgramMetadata metadata) {
+    try {
+        Path destination = chooseDestination(
+            program.getName()
+        );
+
+        if (destination == null) {
+            return;
+        }
+
+        if (Files.exists(destination) &&
+            !confirmReplacement(destination)) {
+            return;
+        }
+
+        exportService.export(program, destination);
+
+        Msg.showInfo(
+            this,
+            tool.getToolFrame(),
+            "Reverse Assistant Export Complete",
+            "The Ghidra export was written to:\n" +
+                destination
+        );
+    }
+    catch (IOException | RuntimeException exception) {
+        Msg.showError(
+            this,
+            tool.getToolFrame(),
+            "Reverse Assistant Export Error",
+            "Unable to export the active Ghidra program.",
+            exception
+        );
+    }
+}
+
+    private Path chooseDestination(String programName) {
         GhidraFileChooser chooser =
             new GhidraFileChooser(tool.getToolFrame());
 
@@ -136,7 +136,7 @@ public final class ReverseAssistantExporterPlugin
             chooser.setSelectedFile(
                 new File(
                     homeDirectory,
-                    createSuggestedFileName(metadata.name())
+                    createSuggestedFileName(programName)
                 )
             );
 
