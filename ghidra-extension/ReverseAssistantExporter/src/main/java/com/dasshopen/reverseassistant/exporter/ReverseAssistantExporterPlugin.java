@@ -18,10 +18,16 @@ import ghidra.util.Msg;
 )
 public final class ReverseAssistantExporterPlugin extends ProgramPlugin {
 
-    private static final String ACTION_OWNER = "Reverse Assistant Exporter";
+    private static final String ACTION_OWNER =
+        "Reverse Assistant Exporter";
+
+    private final ProgramMetadataCollector metadataCollector;
 
     public ReverseAssistantExporterPlugin(PluginTool tool) {
         super(tool);
+
+        metadataCollector = new ProgramMetadataCollector();
+
         createActions();
     }
 
@@ -32,7 +38,7 @@ public final class ReverseAssistantExporterPlugin extends ProgramPlugin {
         ) {
             @Override
             public void actionPerformed(ActionContext context) {
-                showPlaceholderMessage();
+                showProgramMetadata();
             }
 
             @Override
@@ -55,12 +61,37 @@ public final class ReverseAssistantExporterPlugin extends ProgramPlugin {
         tool.addAction(exportAction);
     }
 
-    private void showPlaceholderMessage() {
-        Msg.showInfo(
-            this,
-            tool.getToolFrame(),
-            "Reverse Assistant Exporter",
-            "The export pipeline will be implemented in the next step."
-        );
+    private void showProgramMetadata() {
+        try {
+            ProgramMetadata metadata =
+                metadataCollector.collect(getCurrentProgram());
+
+            String message = String.join(
+                System.lineSeparator(),
+                "Name: " + metadata.name(),
+                "SHA-256: " + metadata.sha256(),
+                "Format: " + metadata.format(),
+                "Architecture: " + metadata.architecture(),
+                "Endianness: " + metadata.endianness(),
+                "Image base: " + metadata.imageBase(),
+                "Entry point: " + metadata.entryPoint()
+            );
+
+            Msg.showInfo(
+                this,
+                tool.getToolFrame(),
+                "Reverse Assistant Program Metadata",
+                message
+            );
+        }
+        catch (RuntimeException exception) {
+            Msg.showError(
+                this,
+                tool.getToolFrame(),
+                "Reverse Assistant Export Error",
+                "Unable to collect the active program metadata.",
+                exception
+            );
+        }
     }
 }
