@@ -13,6 +13,7 @@ import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
+import ghidra.util.task.TaskMonitor;
 
 public final class FunctionMetadataCollector {
 
@@ -112,7 +113,7 @@ public final class FunctionMetadataCollector {
             function.isExternal(),
             function.isThunk(),
             null,
-            List.of(),
+            collectCalls(function),
             List.of()
         );
     }
@@ -141,6 +142,39 @@ public final class FunctionMetadataCollector {
         }
 
         return List.copyOf(collectedParameters);
+    }
+
+    private static List<FunctionCallMetadata> collectCalls(
+        Function function
+    ) {
+        List<Function> calledFunctions = new ArrayList<>(
+            function.getCalledFunctions(TaskMonitor.DUMMY)
+    );
+
+        calledFunctions.sort(createFunctionComparator());
+
+        List<FunctionCallMetadata> calls =
+            new ArrayList<>(calledFunctions.size());
+
+        Set<String> targetAddresses = new HashSet<>();
+
+        for (Function calledFunction : calledFunctions) {
+            String targetAddress =
+                formatAddress(calledFunction);
+
+            if (!targetAddresses.add(targetAddress)) {
+                continue;
+            }
+
+            calls.add(
+                new FunctionCallMetadata(
+                    targetAddress,
+                    calledFunction.getName()
+                )
+            );
+        }
+
+        return List.copyOf(calls);
     }
 
     private static String formatDataType(DataType dataType) {
