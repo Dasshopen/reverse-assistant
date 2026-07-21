@@ -1,8 +1,9 @@
+use serde::Serialize;
 use std::{fs, path::Path};
 
 use crate::models::ghidra_export::GhidraExport;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GhidraImportSummary {
     pub function_count: usize,
     pub external_function_count: usize,
