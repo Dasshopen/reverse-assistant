@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { open } from "@tauri-apps/plugin-dialog";
 
   interface GhidraImportSummary {
     function_count: number;
@@ -17,6 +18,30 @@
 
   async function checkBackendStatus() {
     backendStatus = await invoke<string>("get_backend_status");
+  }
+
+  async function selectGhidraExport() {
+    importError = "";
+
+    try {
+      const selectedPath = await open({
+        title: "Select a Ghidra JSON export",
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Ghidra JSON export",
+            extensions: ["json"],
+          },
+        ],
+      });
+
+      if (typeof selectedPath === "string") {
+        exportPath = selectedPath;
+      }
+    } catch (error) {
+      importError = `Unable to open the file selector: ${String(error)}`;
+    }
   }
 
   async function importGhidraExport() {
@@ -72,13 +97,19 @@
     >
       <label for="export-path">Ghidra export path</label>
 
-      <input
-        id="export-path"
-        type="text"
-        bind:value={exportPath}
-        placeholder="C:\path\to\ghidra-export.json"
-        autocomplete="off"
+      <div class="path-picker">
+        <input
+          id="export-path"
+          type="text"
+          bind:value={exportPath}
+          placeholder="No Ghidra JSON export selected"
+          readonly
       />
+
+        <button type="button" class="secondary-button" onclick={selectGhidraExport}>
+          Browse...
+        </button>
+      </div>
 
       <button type="submit" disabled={isImporting}>
         {isImporting ? "Importing..." : "Import Ghidra export"}
@@ -183,6 +214,22 @@
   .import-form {
     display: grid;
     gap: 0.75rem;
+  }
+
+  .path-picker {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.75rem;
+  }
+
+  .path-picker .secondary-button {
+    white-space: nowrap;
+  }
+
+  @media (max-width: 560px) {
+    .path-picker {
+      grid-template-columns: 1fr;
+    }
   }
 
   label {
