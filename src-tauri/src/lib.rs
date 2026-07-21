@@ -21,6 +21,7 @@ fn import_ghidra_export_summary(path: String) -> Result<GhidraImportSummary, Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
             import_ghidra_export_summary
