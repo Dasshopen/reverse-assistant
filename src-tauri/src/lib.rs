@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod models;
+pub mod services;
 
 #[tauri::command]
 fn get_backend_status() -> String {

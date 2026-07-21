@@ -1,0 +1,68 @@
+{
+    "schema_version": 1,
+    "program": {
+        "name": "multiple-functions.exe",
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "format": "PE",
+        "architecture": "x86_64",
+        "endianness": "little",
+        "image_base": "0x400000",
+        "entry_points": [
+            "0x401000"
+        ]
+    },
+    "functions": [
+        {
+            "entry_address": "0x401000",
+            "name": "main",
+            "return_type": "int",
+            "parameters": [],
+            "is_external": false,
+            "is_thunk": false,
+            "decompiled_code": "int main(void) { return helper(); }",
+            "calls": [
+                {
+                    "target_address": "0x402000",
+                    "target_name": "helper"
+                },
+                {
+                    "target_address": null,
+                    "target_name": "puts"
+                }
+            ],
+            "strings": [
+                "hello",
+                "error"
+            ]
+        },
+        {
+            "entry_address": "0x402000",
+            "name": "helper",
+            "return_type": "int",
+            "parameters": [],
+            "is_external": false,
+            "is_thunk": false,
+            "decompiled_code": null,
+            "calls": [
+                {
+                    "target_address": null,
+                    "target_name": "strcmp"
+                }
+            ],
+            "strings": [
+                "secret"
+            ]
+        },
+        {
+            "entry_address": "0x403000",
+            "name": "puts",
+            "return_type": "int",
+            "parameters": [],
+            "is_external": true,
+            "is_thunk": false,
+            "decompiled_code": null,
+            "calls": [],
+            "strings": []
+        }
+    ]
+}

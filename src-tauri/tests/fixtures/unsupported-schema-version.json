@@ -1,0 +1,15 @@
+{
+    "schema_version": 5,
+    "program": {
+        "name": "sample.exe",
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "format": "PE",
+        "architecture": "x86_64",
+        "endianness": "little",
+        "image_base": "0x140000000",
+        "entry_points": [
+            "0x140001000"
+        ]
+    },
+    "functions": []
+}
