@@ -10,9 +10,53 @@
     string_count: number;
   }
 
+  interface ProgramMetadata {
+  name: string;
+  sha256: string;
+  format: string;
+  architecture: string;
+  endianness: "little" | "big";
+  image_base: string;
+  entry_points: string[];
+}
+
+interface FunctionParameter {
+  name: string;
+  data_type: string;
+}
+
+interface FunctionCall {
+  target_address: string | null;
+  target_name: string;
+}
+
+interface GhidraFunction {
+  entry_address: string;
+  name: string;
+  return_type: string;
+  parameters: FunctionParameter[];
+  is_external: boolean;
+  is_thunk: boolean;
+  decompiled_code: string | null;
+  calls: FunctionCall[];
+  strings: string[];
+}
+
+interface GhidraExport {
+  schema_version: number;
+  program: ProgramMetadata;
+  functions: GhidraFunction[];
+}
+
+interface ImportedGhidraExport {
+  export: GhidraExport;
+  summary: GhidraImportSummary;
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
+  let importedExport = $state<GhidraExport | null>(null);
   let importError = $state("");
   let isImporting = $state(false);
 
@@ -47,6 +91,7 @@
   async function importGhidraExport() {
     importError = "";
     importSummary = null;
+    importedExport = null;
 
     const path = exportPath.trim();
 
@@ -58,13 +103,16 @@
     isImporting = true;
 
     try {
-      importSummary = await invoke<GhidraImportSummary>(
-        "import_ghidra_export_summary",
+      const imported = await invoke<ImportedGhidraExport>(
+        "import_ghidra_export_details",
         { path },
       );
-    } catch (error) {
+
+      importedExport = imported.export;
+      importSummary = imported.summary;
+      } catch (error) {
       importError = String(error);
-    } finally {
+      } finally {
       isImporting = false;
     }
   }
