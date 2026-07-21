@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import docking.ActionContext;
 import docking.action.DockingAction;
@@ -17,6 +19,8 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.util.Msg;
 import ghidra.program.model.listing.Program;
+import ghidra.util.task.TaskBuilder;
+import ghidra.util.exception.CancelledException;
 
 @PluginInfo(
     status = PluginStatus.STABLE,
@@ -74,46 +78,96 @@ public final class ReverseAssistantExporterPlugin
     }
 
     private void exportCurrentProgram() {
-    Program program = getCurrentProgram();
+        Program program = getCurrentProgram();
 
-    if (program == null) {
-        return;
-    }
-
-    try {
-        Path destination = chooseDestination(
-            program.getName()
-        );
-
-        if (destination == null) {
+        if (program == null) {
             return;
         }
 
-        if (Files.exists(destination) &&
-            !confirmReplacement(destination)) {
-            return;
+        try {
+            Path destination = chooseDestination(
+                program.getName()
+            );
+
+            if (destination == null) {
+                return;
+            }
+
+            if (Files.exists(destination) &&
+                !confirmReplacement(destination)) {
+                return;
+            }
+
+            AtomicBoolean completed =
+                new AtomicBoolean(false);
+
+            AtomicReference<Exception> failure =
+                new AtomicReference<>();
+
+            new TaskBuilder(
+                "Exporting Reverse Assistant JSON",
+                monitor -> {
+                    try {
+                        exportService.export(
+                            program,
+                            destination,
+                            monitor
+                        );
+
+                        completed.set(
+                            !monitor.isCancelled()
+                        );
+                    }
+                    catch (CancelledException exception) {
+                        // Cancellation is an expected user action.
+                    }
+
+                    catch (IOException |
+                            RuntimeException exception) {
+                        failure.set(exception);
+                    }
+                }
+            )
+                .setParent(tool.getToolFrame())
+                .setCanCancel(true)
+                .setHasProgress(true)
+                .launchModal();
+
+            Exception exception = failure.get();
+
+            if (exception != null) {
+                Msg.showError(
+                    this,
+                    tool.getToolFrame(),
+                    "Reverse Assistant Export Error",
+                    "Unable to export the active Ghidra program.",
+                    exception
+                );
+                return;
+            }
+
+            if (!completed.get()) {
+                return;
+            }
+
+            Msg.showInfo(
+                this,
+                tool.getToolFrame(),
+                "Reverse Assistant Export Complete",
+                "The Ghidra export was written to:\n" +
+                    destination
+            );
         }
-
-        exportService.export(program, destination);
-
-        Msg.showInfo(
-            this,
-            tool.getToolFrame(),
-            "Reverse Assistant Export Complete",
-            "The Ghidra export was written to:\n" +
-                destination
-        );
+        catch (RuntimeException exception) {
+            Msg.showError(
+                this,
+                tool.getToolFrame(),
+                "Reverse Assistant Export Error",
+                "Unable to export the active Ghidra program.",
+             exception
+            );
+        }
     }
-    catch (IOException | RuntimeException exception) {
-        Msg.showError(
-            this,
-            tool.getToolFrame(),
-            "Reverse Assistant Export Error",
-            "Unable to export the active Ghidra program.",
-            exception
-        );
-    }
-}
 
     private Path chooseDestination(String programName) {
         GhidraFileChooser chooser =

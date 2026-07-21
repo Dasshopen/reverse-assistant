@@ -5,6 +5,8 @@ import java.nio.file.Path;
 import java.util.Objects;
 
 import ghidra.program.model.listing.Program;
+import ghidra.util.task.TaskMonitor;
+import ghidra.util.exception.CancelledException;
 
 public final class ReverseAssistantExportService {
 
@@ -20,8 +22,11 @@ public final class ReverseAssistantExportService {
         functionCollector = new FunctionMetadataCollector();
     }
 
-    public void export(Program program, Path destination)
-        throws IOException {
+    public void export(
+        Program program,
+        Path destination,
+        TaskMonitor monitor
+    ) throws IOException, CancelledException {
 
         Objects.requireNonNull(
             program,
@@ -31,13 +36,17 @@ public final class ReverseAssistantExportService {
             destination,
             "destination must not be null"
         );
+        Objects.requireNonNull(
+        monitor,
+            "monitor must not be null"
+        );
 
         ProgramMetadata metadata =
             metadataCollector.collect(program);
 
         String json = jsonWriter.write(
             metadata,
-            functionCollector.collect(program)
+            functionCollector.collect(program, monitor)
         );
 
         fileWriter.write(destination, json);

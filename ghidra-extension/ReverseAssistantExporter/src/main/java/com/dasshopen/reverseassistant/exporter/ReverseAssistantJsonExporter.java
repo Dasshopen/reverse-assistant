@@ -12,6 +12,7 @@ import ghidra.framework.model.DomainObject;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.Program;
 import ghidra.util.task.TaskMonitor;
+import ghidra.util.exception.CancelledException;
 
 public final class ReverseAssistantJsonExporter
     extends Exporter {
@@ -79,9 +80,20 @@ public final class ReverseAssistantJsonExporter
         );
 
         try {
-            exportService.export(program, file.toPath());
+            exportService.export(
+                program,
+                file.toPath(),
+                 monitor
+            );
             return true;
         }
+        catch (CancelledException exception) {
+            log.appendMsg(
+                "Reverse Assistant export was cancelled."
+            );
+            return false;
+        }
+
         catch (RuntimeException exception) {
             log.appendMsg(
                 "Reverse Assistant export failed: " +
