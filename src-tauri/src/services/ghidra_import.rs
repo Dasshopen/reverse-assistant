@@ -12,7 +12,7 @@ pub struct GhidraImportSummary {
     pub string_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ImportedGhidraExport {
     pub export: GhidraExport,
     pub summary: GhidraImportSummary,
