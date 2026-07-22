@@ -98,7 +98,7 @@ fn validate_address(value: &str, field_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_valid_address(value: &str) -> bool {
+pub(crate) fn is_valid_address(value: &str) -> bool {
     let Some(hexadecimal_part) = value.strip_prefix("0x") else {
         return false;
     };

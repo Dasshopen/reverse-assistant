@@ -53,6 +53,17 @@ interface ImportedGhidraExport {
   summary: GhidraImportSummary;
 }
 
+interface GhidraInstallation {
+  install_dir: string;
+  version_label: string;
+  extensions_dir: string;
+}
+
+type GhidraInstallationStatus =
+  | { status: "not_configured" }
+  | { status: "invalid"; install_dir: string; reason: string }
+  | { status: "valid"; installation: GhidraInstallation };
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -68,8 +79,162 @@ interface ImportedGhidraExport {
   let importError = $state("");
   let isImporting = $state(false);
 
+  let ghidraInstallationStatus = $state<GhidraInstallationStatus | null>(null);
+  let ghidraConfigError = $state("");
+  let isConfiguringGhidra = $state(false);
+  let analyzeError = $state("");
+  let isAnalyzing = $state(false);
+
+  let analysisSource = $state<"none" | "automatic" | "manual">("none");
+  let decompileCache = $state(new Map<string, string | null>());
+  let pendingDecompiles = $state(new Set<string>());
+  let decompileError = $state("");
+
+  let isDecompilingSelected = $derived(
+    selectedFunctionAddress !== null &&
+      pendingDecompiles.has(selectedFunctionAddress),
+  );
+
+  let selectedDecompiledCode = $derived.by(() => {
+    if (!selectedFunction) return null;
+    if (analysisSource !== "automatic") return selectedFunction.decompiled_code;
+    if (selectedFunction.decompiled_code !== null) {
+      return selectedFunction.decompiled_code;
+    }
+    return decompileCache.get(selectedFunction.entry_address) ?? null;
+  });
+
+  $effect(() => {
+    loadGhidraInstallationStatus();
+  });
+
+  $effect(() => {
+    const func = selectedFunction;
+
+    if (!func || analysisSource !== "automatic" || func.is_external) return;
+    if (func.decompiled_code !== null) return;
+    if (
+      decompileCache.has(func.entry_address) ||
+      pendingDecompiles.has(func.entry_address)
+    )
+      return;
+
+    requestDecompiledCode(func.entry_address);
+  });
+
+  async function requestDecompiledCode(entryAddress: string) {
+    pendingDecompiles.add(entryAddress);
+    decompileError = "";
+
+    try {
+      const code = await invoke<string | null>("decompile_function", {
+        entryAddress,
+      });
+
+      decompileCache.set(entryAddress, code);
+    } catch (error) {
+      decompileError = String(error);
+    } finally {
+      pendingDecompiles.delete(entryAddress);
+    }
+  }
+
   async function checkBackendStatus() {
     backendStatus = await invoke<string>("get_backend_status");
+  }
+
+  async function loadGhidraInstallationStatus() {
+    try {
+      ghidraInstallationStatus = await invoke<GhidraInstallationStatus>(
+        "get_ghidra_installation_status",
+      );
+    } catch (error) {
+      ghidraConfigError = String(error);
+    }
+  }
+
+  async function selectGhidraInstallDir() {
+    ghidraConfigError = "";
+
+    try {
+      const selectedPath = await open({
+        title: "Select the Ghidra install directory",
+        multiple: false,
+        directory: true,
+      });
+
+      if (typeof selectedPath === "string") {
+        await configureGhidraInstallation(selectedPath);
+      }
+    } catch (error) {
+      ghidraConfigError = `Unable to open the folder selector: ${String(error)}`;
+    }
+  }
+
+  async function configureGhidraInstallation(installDir: string) {
+    ghidraConfigError = "";
+    isConfiguringGhidra = true;
+
+    try {
+      const installation = await invoke<GhidraInstallation>(
+        "configure_ghidra_installation",
+        { installDir },
+      );
+
+      ghidraInstallationStatus = { status: "valid", installation };
+    } catch (error) {
+      ghidraConfigError = String(error);
+    } finally {
+      isConfiguringGhidra = false;
+    }
+  }
+
+  async function selectAndAnalyzeBinary() {
+    analyzeError = "";
+
+    try {
+      const selectedPath = await open({
+        title: "Select a binary to analyze",
+        multiple: false,
+        directory: false,
+      });
+
+      if (typeof selectedPath === "string") {
+        await analyzeBinary(selectedPath);
+      }
+    } catch (error) {
+      analyzeError = `Unable to open the file selector: ${String(error)}`;
+    }
+  }
+
+  async function analyzeBinary(binaryPath: string) {
+    analyzeError = "";
+    importSummary = null;
+    importedExport = null;
+    selectedFunctionAddress = null;
+    analysisSource = "none";
+    decompileCache = new Map();
+    pendingDecompiles = new Set();
+    decompileError = "";
+
+    isAnalyzing = true;
+
+    try {
+      const imported = await invoke<ImportedGhidraExport>(
+        "analyze_binary_with_ghidra",
+        { binaryPath },
+      );
+
+      importedExport = imported.export;
+      importSummary = imported.summary;
+      selectedFunctionAddress =
+        imported.export.functions[0]?.entry_address ?? null;
+      analysisSource = "automatic";
+    } catch (error) {
+      analyzeError = String(error);
+    } finally {
+      isAnalyzing = false;
+    }
   }
 
   async function selectGhidraExport() {
@@ -101,6 +266,10 @@ interface ImportedGhidraExport {
     importSummary = null;
     importedExport = null;
     selectedFunctionAddress = null;
+    analysisSource = "none";
+    decompileCache = new Map();
+    pendingDecompiles = new Set();
+    decompileError = "";
 
     const path = exportPath.trim();
 
@@ -121,6 +290,7 @@ interface ImportedGhidraExport {
       importSummary = imported.summary;
       selectedFunctionAddress =
         imported.export.functions[0]?.entry_address ?? null;
+      analysisSource = "manual";
       } catch (error) {
       importError = String(error);
       } finally {
@@ -139,13 +309,64 @@ interface ImportedGhidraExport {
 
 <main class="container">
   <section class="panel">
-    <p class="phase">Phase 5 — Tauri import command</p>
+    <p class="phase">Phase 7 — Ghidra Headless automation</p>
 
     <h1>Reverse Assistant</h1>
 
     <p class="description">
-      Import and validate a Ghidra JSON export locally.
+      Analyze a binary directly, or import an existing Ghidra JSON export.
     </p>
+
+    <section class="ghidra-setup" aria-labelledby="ghidra-setup-title">
+      <h2 id="ghidra-setup-title">Ghidra installation</h2>
+
+      {#if ghidraInstallationStatus?.status === "valid"}
+        <p class="status">
+          Configured: {ghidraInstallationStatus.installation.version_label}
+        </p>
+
+        <button
+          type="button"
+          class="secondary-button"
+          onclick={selectGhidraInstallDir}
+        >
+          Change...
+        </button>
+
+        <button
+          type="button"
+          disabled={isAnalyzing}
+          onclick={selectAndAnalyzeBinary}
+        >
+          {isAnalyzing ? "Analyse en cours..." : "Analyser un binaire"}
+        </button>
+      {:else}
+        {#if ghidraInstallationStatus?.status === "invalid"}
+          <p class="error" role="alert">
+            {ghidraInstallationStatus.reason}
+          </p>
+        {/if}
+
+        <button
+          type="button"
+          class="secondary-button"
+          disabled={isConfiguringGhidra}
+          onclick={selectGhidraInstallDir}
+        >
+          {isConfiguringGhidra ? "Configuring..." : "Configurer Ghidra"}
+        </button>
+      {/if}
+
+      {#if ghidraConfigError}
+        <p class="error" role="alert">{ghidraConfigError}</p>
+      {/if}
+
+      {#if analyzeError}
+        <p class="error" role="alert">{analyzeError}</p>
+      {/if}
+    </section>
+
+    <h2 class="manual-import-title">Manual JSON import (debug)</h2>
 
     <form
       class="import-form"
@@ -336,8 +557,12 @@ interface ImportedGhidraExport {
           <section class="function-section">
             <h4>Decompiled code</h4>
 
-            {#if selectedFunction.decompiled_code}
-              <pre><code>{selectedFunction.decompiled_code}</code></pre>
+            {#if isDecompilingSelected}
+              <p>Decompiling...</p>
+            {:else if decompileError}
+              <p class="error" role="alert">{decompileError}</p>
+            {:else if selectedDecompiledCode}
+              <pre><code>{selectedDecompiledCode}</code></pre>
             {:else}
               <p>No decompiled code is available for this function.</p>
             {/if}
@@ -515,6 +740,31 @@ interface ImportedGhidraExport {
     margin-top: 2rem;
     padding-top: 1.5rem;
     border-top: 1px solid #334155;
+  }
+
+  .ghidra-setup {
+    display: grid;
+    gap: 0.75rem;
+    margin-bottom: 2rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid #334155;
+  }
+
+  .ghidra-setup h2 {
+    margin: 0;
+    font-size: 1.25rem;
+  }
+
+  .ghidra-setup button {
+    justify-self: start;
+  }
+
+  .manual-import-title {
+    margin: 0 0 0.75rem;
+    color: #94a3b8;
+    font-size: 0.95rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 
   .secondary-button {

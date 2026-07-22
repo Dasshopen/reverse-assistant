@@ -54,7 +54,7 @@ The local path of the binary must not be exported.
 | `parameters` | array | Yes | No | Function parameters. May be empty. |
 | `is_external` | boolean | Yes | No | Whether the function comes from outside the analyzed binary. |
 | `is_thunk` | boolean | Yes | No | Whether the function mainly redirects to another function. |
-| `decompiled_code` | string or null | Yes | Yes | Pseudocode produced by Ghidra, or `null` if decompilation failed. |
+| `decompiled_code` | string or null | Yes | Yes | Pseudocode produced by Ghidra for this function, or `null` when no pseudocode is available yet. |
 | `calls` | array | Yes | No | Functions called by this function. May be empty. |
 | `strings` | array of strings | Yes | No | Unique string values referenced by the function. May be empty. |
 
@@ -73,6 +73,10 @@ The local path of the binary must not be exported.
 | `target_name` | string | Yes | No | Name of the called function known by Ghidra. |
 
 Each target should appear only once in the `calls` array of a function.
+
+## Decompilation is on-demand
+
+Decompiling every function in a program during a bulk export was, by far, the dominant cost of headless analysis, even though most functions are never inspected by a user. Reverse Assistant therefore decompiles on demand: bulk program exports normally leave every non-external function's `decompiled_code` as `null`, and pseudocode is populated later, one function at a time, only when explicitly requested (outside the scope of this export contract). A `null` value never distinguishes "not yet decompiled" from "decompilation failed" — both cases are represented identically.
 
 ## Null and empty values
 

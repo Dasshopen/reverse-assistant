@@ -21,10 +21,6 @@ import ghidra.program.model.listing.Listing;
 import ghidra.program.model.symbol.Reference;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.exception.CancelledException;
-import ghidra.app.decompiler.DecompInterface;
-import ghidra.app.decompiler.DecompileOptions;
-import ghidra.app.decompiler.DecompileResults;
-import ghidra.app.decompiler.DecompiledFunction;
 
 public final class FunctionMetadataCollector {
 
@@ -63,40 +59,25 @@ public final class FunctionMetadataCollector {
 
         Set<String> entryAddresses = new HashSet<>();
 
-        DecompInterface decompiler =
-            createDecompiler(program);
+        for (Function function : functions) {
+            monitor.checkCancelled();
 
-        try {
+            monitor.setMessage(
+                "Exporting function: " + function.getName()
+            );
 
-            for (Function function : functions) {
-                monitor.checkCancelled();
+            FunctionMetadata metadata =
+                collectFunction(program, function);
 
-                monitor.setMessage(
-                    "Exporting function: " + function.getName()
+            if (!entryAddresses.add(metadata.entryAddress())) {
+                throw new IllegalStateException(
+                    "Duplicate exported function address: " +
+                        metadata.entryAddress()
                 );
-
-                FunctionMetadata metadata =
-                    collectFunction(
-                        program,
-                        function,
-                        decompiler,
-                        monitor
-                    );
-
-                if (!entryAddresses.add(metadata.entryAddress())) {
-                    throw new IllegalStateException(
-                        "Duplicate exported function address: " +
-                            metadata.entryAddress()
-                    );
-                }
-
-                collectedFunctions.add(metadata);
-                monitor.increment();
             }
 
-        }
-        finally {
-            decompiler.dispose();
+            collectedFunctions.add(metadata);
+            monitor.increment();
         }
 
         return List.copyOf(collectedFunctions);
@@ -143,41 +124,13 @@ public final class FunctionMetadataCollector {
         };
     }
 
-    private static DecompInterface createDecompiler(
-        Program program
-    ) {
-        DecompileOptions options =
-            new DecompileOptions();
-
-        options.grabFromProgram(program);
-
-        DecompInterface decompiler =
-            new DecompInterface();
-
-        decompiler.setOptions(options);
-        decompiler.toggleCCode(true);
-        decompiler.toggleSyntaxTree(false);
-
-        if (!decompiler.openProgram(program)) {
-            String message = decompiler.getLastMessage();
-
-            decompiler.dispose();
-
-            throw new IllegalStateException(
-                "Unable to initialize Ghidra decompiler: " +
-                    message
-            );
-        }
-
-        return decompiler;
-    }
-
     private static FunctionMetadata collectFunction(
         Program program,
-        Function function,
-        DecompInterface decompiler,
-        TaskMonitor monitor
-    ) throws CancelledException {
+        Function function
+    ) {
+        // Decompiling every function during bulk export was the dominant cost of
+        // headless analysis. Pseudocode is decompiled on demand instead, via
+        // DecompileFunctionService/FunctionDecompiler, one function at a time.
         return new FunctionMetadata(
             formatAddress(function),
             function.getName(),
@@ -185,11 +138,7 @@ public final class FunctionMetadataCollector {
             collectParameters(function),
             function.isExternal(),
             function.isThunk(),
-            collectDecompiledCode(
-                function,
-                decompiler,
-                monitor
-            ),
+            null,
             collectCalls(function),
             collectStrings(program, function)
         );
@@ -219,46 +168,6 @@ public final class FunctionMetadataCollector {
         }
 
         return List.copyOf(collectedParameters);
-    }
-
-    private static String collectDecompiledCode(
-        Function function,
-        DecompInterface decompiler,
-        TaskMonitor monitor
-    ) throws CancelledException {
-        if (function.isExternal()) {
-            return null;
-        }
-
-        DecompileResults results =
-            decompiler.decompileFunction(
-                function,
-                DecompileOptions
-                    .SUGGESTED_DECOMPILE_TIMEOUT_SECS,
-                monitor
-            );
-
-        monitor.checkCancelled();
-
-        if (results == null ||
-            !results.decompileCompleted()) {
-            return null;
-        }
-
-        DecompiledFunction decompiledFunction =
-            results.getDecompiledFunction();
-
-        if (decompiledFunction == null) {
-            return null;
-        }
-
-        String code = decompiledFunction.getC();
-
-        if (code == null || code.isBlank()) {
-            return null;
-        }
-
-        return code;
     }
 
     private static List<FunctionCallMetadata> collectCalls(
