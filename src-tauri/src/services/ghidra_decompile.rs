@@ -9,7 +9,7 @@ use tauri::AppHandle;
 use crate::models::ghidra_export::is_valid_address;
 use crate::models::ghidra_installation::GhidraInstallation;
 use crate::models::ghidra_session::AnalysisSession;
-use crate::services::ghidra_headless::tail;
+use crate::services::ghidra_headless::{tail, HEADLESS_MAX_HEAP};
 use crate::services::ghidra_installation::{load_persisted_install_dir, validate_installation};
 
 const DECOMPILE_SCRIPT_NAME: &str = "DecompileFunctionJson.java";
@@ -97,6 +97,7 @@ pub fn run_decompile_function(
 
     let output = Command::new(&invocation.program)
         .args(&invocation.args)
+        .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP)
         .output()
         .map_err(|error| {
             format!(

@@ -13,6 +13,11 @@ use crate::services::ghidra_installation::{load_persisted_install_dir, validate_
 const HEADLESS_SCRIPT_NAME: &str = "ExportReverseAssistantJson.java";
 const STDERR_TAIL_BYTES: usize = 4000;
 
+// analyzeHeadless.bat defaults to a 2G JVM heap (MAXMEM_DEFAULT in the script),
+// unlike the interactive GUI launcher which sets no default cap. Large or
+// heavily optimized binaries can hit significant GC pressure under 2G.
+pub(crate) const HEADLESS_MAX_HEAP: &str = "8G";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadlessAnalysisInvocation {
     pub program: PathBuf,
@@ -143,6 +148,7 @@ pub fn run_headless_analysis(
 
     let output = Command::new(&invocation.program)
         .args(&invocation.args)
+        .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP)
         .output()
         .map_err(|error| {
             format!(
