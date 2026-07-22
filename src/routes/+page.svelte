@@ -121,11 +121,6 @@ interface ImportedGhidraExport {
       importSummary = imported.summary;
       selectedFunctionAddress =
         imported.export.functions[0]?.entry_address ?? null;
-        let selectedFunction = $derived(
-          importedExport?.functions.find(
-            (func) => func.entry_address === selectedFunctionAddress,
-          ) ?? null,
-        );
       } catch (error) {
       importError = String(error);
       } finally {
