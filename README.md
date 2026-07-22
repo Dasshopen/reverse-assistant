@@ -17,19 +17,17 @@ The project is designed to support reverse engineering workflows without requiri
 
 ## Current status
 
-Phase 1 — Application skeleton: completed.
+Phases 1 to 6 — completed.
 
 The current application provides:
 
-- A working Tauri desktop application
-- A SvelteKit and TypeScript frontend
-- A Rust backend
-- A verified TypeScript-to-Rust command
-- A minimal Reverse Assistant interface
-- Dependency auditing and controlled install-script permissions
-- A reduced Tauri permission set
+- A working Tauri desktop application (SvelteKit, TypeScript, Rust)
+- A versioned JSON contract (schema v1) between Ghidra and the Rust engine
+- A Ghidra extension (`ReverseAssistantExporter`) that exports program and function metadata as JSON
+- A Rust service that imports, validates, and summarizes a Ghidra export
+- A native file dialog and a function explorer showing parameters, calls, referenced strings, and decompiled code
 
-The reverse engineering engine and Ghidra integration are not implemented yet.
+The Ghidra export/import step is still manual: the user runs the extension inside Ghidra, then selects the resulting JSON file in Reverse Assistant. Automating this end-to-end (Ghidra Headless driven by Rust), connecting BSim for known-function recognition, and adding an AI naming agent for the remaining functions are the next phases — see the roadmap below.
 
 ## Architecture
 
@@ -99,14 +97,15 @@ Audit npm dependencies:
 
 npm audit
 Roadmap
-Phase 1: Tauri application skeleton and TypeScript-to-Rust communication
-Phase 2: Stable JSON contract
-Phase 3: Ghidra export integration
-Phase 4: Independent Rust analysis engine
-Phase 5: MVP user interface
-Phase 6: Return structured results to Ghidra
-Phase 7: Optional AI provider adapters
-Phase 8: Packaging and open-source publication
+Phase 1: Tauri application skeleton and TypeScript-to-Rust communication — completed
+Phase 2: Stable JSON contract — completed
+Phase 3: Ghidra export integration — completed
+Phase 4: Ghidra export import, validation, and summary in Rust — completed
+Phase 5: Tauri import command and import interface — completed
+Phase 6: Native file dialog and function explorer — completed
+Phase 7: Ghidra Headless automation driven by Rust (no manual export/import step)
+Phase 8: BSim integration for known-function recognition
+Phase 9: AI naming agent and validated rename back into Ghidra
 Security
 
 Reverse Assistant is intended to process reverse engineering data locally.
