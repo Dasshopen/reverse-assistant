@@ -31,7 +31,15 @@ function Import-VisualStudioX64Environment {
         throw "vcvarsall.bat was not found: $vcvarsall"
     }
 
-    $envOutput = & cmd.exe /c "`"$vcvarsall`" x64 && set"
+    # vcvarsall.bat internally shells out to a bare "vswhere.exe" that isn't
+    # necessarily on PATH; that failure is harmless to vcvarsall itself (it
+    # still finds the toolchain via its own relative paths) but PowerShell's
+    # strict mode treats any stderr from a native command as a terminating
+    # error, so relax that just for this call.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $envOutput = & cmd.exe /c "`"$vcvarsall`" x64 && set" 2>$null
+    $ErrorActionPreference = $previousErrorActionPreference
 
     foreach ($line in $envOutput) {
         if ($line -match '^([^=]+)=(.*)$') {

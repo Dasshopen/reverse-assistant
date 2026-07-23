@@ -1,7 +1,10 @@
 # Downloads a manifest-tracked source archive if not already present, and
-# verifies its SHA-256. If the manifest has no pinned hash yet for this
-# library, the hash of the first successful download is recorded so future
-# runs can detect corruption or tampering.
+# verifies its SHA-256 against the hash already pinned in the manifest.
+# A missing hash is refused rather than trusted-on-first-download: silently
+# recording whatever the first download produced would mean a single
+# compromised/MITM'd download poisons the pin nobody ever independently
+# checked. Pin the hash in manifest.json yourself (after verifying it
+# through an independent channel) before running this.
 function Get-VerifiedSource {
     [CmdletBinding()]
     param(
@@ -22,6 +25,10 @@ function Get-VerifiedSource {
         throw "No manifest entry found for library '$LibraryName' in $ManifestPath"
     }
 
+    if ([string]::IsNullOrWhiteSpace($entry.sha256)) {
+        throw "No SHA-256 is pinned for '$($entry.name)' in $ManifestPath. Pin a hash you have verified through an independent channel before downloading -- this script will not trust an unpinned first download."
+    }
+
     if (-not (Test-Path -LiteralPath $SourcesDir -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $SourcesDir | Out-Null
     }
@@ -36,17 +43,11 @@ function Get-VerifiedSource {
 
     $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-    if ([string]::IsNullOrWhiteSpace($entry.sha256)) {
-        Write-Warning "No SHA-256 pinned yet for $($entry.name); recording the hash of this download: $actualHash"
-        $entry.sha256 = $actualHash
-        $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $ManifestPath -Encoding utf8
-    }
-    elseif ($entry.sha256.ToLowerInvariant() -ne $actualHash) {
+    if ($entry.sha256.ToLowerInvariant() -ne $actualHash) {
         throw "SHA-256 mismatch for $($entry.name): expected $($entry.sha256), got $actualHash. The downloaded archive may be corrupted or tampered with."
     }
-    else {
-        Write-Host "$($entry.name) archive hash verified: $actualHash"
-    }
+
+    Write-Host "$($entry.name) archive hash verified: $actualHash"
 
     return $archivePath
 }

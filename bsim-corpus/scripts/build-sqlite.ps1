@@ -42,17 +42,32 @@ Write-Host "Compiling sqlite3.dll (x64, Release, symbols kept)..."
 
 Push-Location $buildDir
 try {
-    & cl.exe /nologo /O2 /Zi "/DSQLITE_API=__declspec(dllexport)" /c $sqliteSource
+    # cl.exe/link.exe write normal progress to stderr; PowerShell's strict
+    # mode otherwise treats that as a terminating error even on success, so
+    # relax it here and rely on $LASTEXITCODE (checked below) instead.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+
+    # /MD links the dynamic MSVC CRT (msvcrt/ucrt) instead of statically
+    # linking it into sqlite3.dll. Without it, CRT helper functions (e.g.
+    # __acrt_locale_changed) get baked into sqlite3.dll and BSim/FID would
+    # attribute them to "sqlite3" -- a real false-positive risk, confirmed
+    # by inspecting the previous build's symbol table.
+    & cl.exe /nologo /MD /O2 /Zi "/DSQLITE_API=__declspec(dllexport)" /c $sqliteSource 2>$null
 
     if ($LASTEXITCODE -ne 0) {
+        $ErrorActionPreference = $previousErrorActionPreference
         throw "cl.exe failed to compile sqlite3.c"
     }
 
-    & link.exe /nologo /DLL /DEBUG /OUT:sqlite3.dll sqlite3.obj
+    & link.exe /nologo /DLL /DEBUG /OUT:sqlite3.dll sqlite3.obj 2>$null
 
     if ($LASTEXITCODE -ne 0) {
+        $ErrorActionPreference = $previousErrorActionPreference
         throw "link.exe failed to link sqlite3.dll"
     }
+
+    $ErrorActionPreference = $previousErrorActionPreference
 }
 finally {
     Pop-Location

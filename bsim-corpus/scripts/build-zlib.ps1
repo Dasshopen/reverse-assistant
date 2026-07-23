@@ -46,8 +46,21 @@ if (-not (Get-Command nmake.exe -ErrorAction SilentlyContinue)) {
 
 Push-Location $extractedDir
 try {
-    & nmake.exe -f win32\Makefile.msc clean
-    & nmake.exe -f win32\Makefile.msc
+    # "clean" reports "Could Not Find ..." to stderr for files that don't
+    # exist yet on a fresh checkout -- harmless, but PowerShell's strict mode
+    # treats any native-command stderr as a terminating error, so relax that
+    # just for this best-effort step.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & nmake.exe -f win32\Makefile.msc clean 2>$null
+    $ErrorActionPreference = $previousErrorActionPreference
+
+    # nmake/cl/link write normal progress and non-fatal linker warnings to
+    # stderr; $LASTEXITCODE (checked below) is the real success signal, not
+    # the mere presence of stderr output.
+    $ErrorActionPreference = "Continue"
+    & nmake.exe -f win32\Makefile.msc 2>$null
+    $ErrorActionPreference = $previousErrorActionPreference
 
     if ($LASTEXITCODE -ne 0) {
         throw "nmake failed to build zlib"
