@@ -192,6 +192,13 @@ public final class GhidraExportJsonWriter {
             );
         }
 
+        if (metadata.namespace() == null) {
+            function.add("namespace", JsonNull.INSTANCE);
+        }
+        else {
+            function.addProperty("namespace", metadata.namespace());
+        }
+
         return function;
     }
 

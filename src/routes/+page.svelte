@@ -51,6 +51,7 @@ interface GhidraFunction {
   strings: string[];
   library: string | null;
   thunk_target_address: string | null;
+  namespace: string | null;
 }
 
 interface GhidraExport {
@@ -266,6 +267,46 @@ interface ProgramOverview {
   anonymous_type_count: number;
 }
 
+type MatchMethod = "symbol_name" | "same_address";
+type UnmatchedReason = "auto_generated_name" | "ambiguous_name" | "no_candidate";
+type FunctionChangeKind =
+  | "return_type"
+  | "parameters"
+  | "thunk_status"
+  | "external_status"
+  | "outgoing_call_count";
+
+interface ComparedFunctionRef {
+  entry_address: string;
+  name: string;
+  namespace: string | null;
+}
+
+interface FunctionChange {
+  kind: FunctionChangeKind;
+  before: string;
+  after: string;
+}
+
+interface FunctionMatch {
+  method: MatchMethod;
+  same_address: boolean;
+  function_a: ComparedFunctionRef;
+  function_b: ComparedFunctionRef;
+  changes: FunctionChange[];
+}
+
+interface UnmatchedFunction extends ComparedFunctionRef {
+  reason: UnmatchedReason;
+}
+
+interface ProjectComparison {
+  same_binary: boolean;
+  matches: FunctionMatch[];
+  unmatched_a: UnmatchedFunction[];
+  unmatched_b: UnmatchedFunction[];
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -296,6 +337,23 @@ interface ProgramOverview {
   let projectActionError = $state("");
   let renamingProjectId = $state<string | null>(null);
   let renameDraft = $state("");
+
+  let comparisonProjectAId = $state("");
+  let comparisonProjectBId = $state("");
+  let projectComparison = $state<ProjectComparison | null>(null);
+  let projectComparisonError = $state("");
+  let isComparingProjects = $state(false);
+  let comparisonMatchesFilter = $state<"changed" | "all">("changed");
+
+  let filteredComparisonMatches = $derived.by(() => {
+    if (!projectComparison) return [];
+    if (comparisonMatchesFilter === "all") return projectComparison.matches;
+    return projectComparison.matches.filter((match) => match.changes.length > 0);
+  });
+
+  let changedComparisonCount = $derived(
+    projectComparison?.matches.filter((match) => match.changes.length > 0).length ?? 0,
+  );
 
   let decompileCache = $state(new Map<string, DecompiledFunctionDetails>());
   let pendingDecompiles = $state(new Set<string>());
@@ -524,9 +582,72 @@ interface ProgramOverview {
         activeProjectId = null;
       }
 
+      if (
+        comparisonProjectAId === project.id ||
+        comparisonProjectBId === project.id
+      ) {
+        projectComparison = null;
+        projectComparisonError = "";
+        if (comparisonProjectAId === project.id) comparisonProjectAId = "";
+        if (comparisonProjectBId === project.id) comparisonProjectBId = "";
+      }
+
       await requestProjectList();
     } catch (error) {
       projectActionError = String(error);
+    }
+  }
+
+  async function compareSavedProjects() {
+    projectComparisonError = "";
+    projectComparison = null;
+
+    if (!comparisonProjectAId || !comparisonProjectBId) {
+      projectComparisonError = "Select two saved projects.";
+      return;
+    }
+
+    if (comparisonProjectAId === comparisonProjectBId) {
+      projectComparisonError = "Select two different saved projects.";
+      return;
+    }
+
+    isComparingProjects = true;
+
+    try {
+      projectComparison = await invoke<ProjectComparison>("compare_projects", {
+        projectAId: comparisonProjectAId,
+        projectBId: comparisonProjectBId,
+      });
+    } catch (error) {
+      projectComparisonError = String(error);
+    } finally {
+      isComparingProjects = false;
+    }
+  }
+
+  function comparisonProjectName(id: string): string {
+    return savedProjects?.find((project) => project.id === id)?.name ?? id;
+  }
+
+  function qualifiedFunctionName(functionRef: ComparedFunctionRef): string {
+    return functionRef.namespace
+      ? `${functionRef.namespace}::${functionRef.name}`
+      : functionRef.name;
+  }
+
+  function formatChangeKind(kind: FunctionChangeKind): string {
+    return kind.replaceAll("_", " ");
+  }
+
+  function formatUnmatchedReason(reason: UnmatchedReason): string {
+    switch (reason) {
+      case "auto_generated_name":
+        return "automatic Ghidra name";
+      case "ambiguous_name":
+        return "ambiguous name";
+      case "no_candidate":
+        return "no unique symbol-name candidate";
     }
   }
 
@@ -1069,6 +1190,191 @@ interface ProgramOverview {
 
       {#if projectActionError}
         <p class="error" role="alert">{projectActionError}</p>
+      {/if}
+
+      {#if savedProjects && savedProjects.length >= 2}
+        <section class="project-comparison" aria-labelledby="project-comparison-title">
+          <h3 id="project-comparison-title">Compare two saved projects</h3>
+          <p class="saved-projects-note">
+            This first comparison matches unique, meaningful symbols. Automatic Ghidra names
+            remain explicitly unmatched unless both projects are analyses of the exact same binary.
+          </p>
+
+          <div class="project-comparison-controls">
+            <label>
+              Project A
+              <select
+                bind:value={comparisonProjectAId}
+                onchange={() => {
+                  projectComparison = null;
+                  projectComparisonError = "";
+                }}
+              >
+                <option value="">Select a project...</option>
+                {#each savedProjects as project (project.id)}
+                  <option value={project.id} disabled={project.id === comparisonProjectBId}>
+                    {project.name} — {project.program_name}
+                  </option>
+                {/each}
+              </select>
+            </label>
+
+            <label>
+              Project B
+              <select
+                bind:value={comparisonProjectBId}
+                onchange={() => {
+                  projectComparison = null;
+                  projectComparisonError = "";
+                }}
+              >
+                <option value="">Select a project...</option>
+                {#each savedProjects as project (project.id)}
+                  <option value={project.id} disabled={project.id === comparisonProjectAId}>
+                    {project.name} — {project.program_name}
+                  </option>
+                {/each}
+              </select>
+            </label>
+
+            <button
+              type="button"
+              disabled={isComparingProjects}
+              onclick={compareSavedProjects}
+            >
+              {isComparingProjects ? "Comparing..." : "Compare"}
+            </button>
+          </div>
+
+          {#if projectComparisonError}
+            <p class="error" role="alert">{projectComparisonError}</p>
+          {/if}
+
+          {#if projectComparison}
+            <div class="project-comparison-result">
+              <p class="project-comparison-context">
+                <strong>{comparisonProjectName(comparisonProjectAId)}</strong>
+                versus
+                <strong>{comparisonProjectName(comparisonProjectBId)}</strong>
+                — {projectComparison.same_binary
+                  ? "exact same binary (address matching allowed)"
+                  : "different binaries (no address fallback)"}
+              </p>
+
+              <dl class="summary-grid">
+                <div>
+                  <dt>Matched functions</dt>
+                  <dd>{projectComparison.matches.length}</dd>
+                </div>
+                <div>
+                  <dt>Changed matches</dt>
+                  <dd>{changedComparisonCount}</dd>
+                </div>
+                <div>
+                  <dt>Unmatched in A</dt>
+                  <dd>{projectComparison.unmatched_a.length}</dd>
+                </div>
+                <div>
+                  <dt>Unmatched in B</dt>
+                  <dd>{projectComparison.unmatched_b.length}</dd>
+                </div>
+              </dl>
+
+              <div class="comparison-filter">
+                <label>
+                  Matched functions
+                  <select bind:value={comparisonMatchesFilter}>
+                    <option value="changed">Changed only</option>
+                    <option value="all">All matches</option>
+                  </select>
+                </label>
+                <span>{filteredComparisonMatches.length} results</span>
+              </div>
+
+              {#if filteredComparisonMatches.length === 0}
+                <p>No matched function satisfies this filter.</p>
+              {:else}
+                <ul class="comparison-list">
+                  {#each filteredComparisonMatches.slice(0, 200) as match (`${match.function_a.entry_address}-${match.function_b.entry_address}`)}
+                    <li>
+                      <div class="comparison-function-heading">
+                        <strong>{qualifiedFunctionName(match.function_a)}</strong>
+                        <span>
+                          {match.function_a.entry_address} → {match.function_b.entry_address}
+                        </span>
+                      </div>
+                      <p class="comparison-match-method">
+                        Matched by {match.method === "symbol_name" ? "unique symbol name" : "same address"}
+                        {match.same_address ? " · same address" : ""}
+                      </p>
+                      {#if match.changes.length === 0}
+                        <p class="comparison-unchanged">No detected metadata change.</p>
+                      {:else}
+                        <ul class="comparison-changes">
+                          {#each match.changes as change}
+                            <li>
+                              <strong>{formatChangeKind(change.kind)}:</strong>
+                              <code>{change.before || "(empty)"}</code>
+                              →
+                              <code>{change.after || "(empty)"}</code>
+                            </li>
+                          {/each}
+                        </ul>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+                {#if filteredComparisonMatches.length > 200}
+                  <p class="saved-projects-note">
+                    Showing the first 200 results to keep this provisional view responsive.
+                  </p>
+                {/if}
+              {/if}
+
+              <div class="comparison-unmatched-grid">
+                <section>
+                  <h4>Unmatched in {comparisonProjectName(comparisonProjectAId)}</h4>
+                  {#if projectComparison.unmatched_a.length === 0}
+                    <p>None.</p>
+                  {:else}
+                    <ul class="comparison-unmatched-list">
+                      {#each projectComparison.unmatched_a.slice(0, 200) as functionRef (functionRef.entry_address)}
+                        <li>
+                          <code>{functionRef.entry_address}</code>
+                          <strong>{qualifiedFunctionName(functionRef)}</strong>
+                          <span>{formatUnmatchedReason(functionRef.reason)}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                    {#if projectComparison.unmatched_a.length > 200}
+                      <p class="saved-projects-note">Showing the first 200 unmatched functions.</p>
+                    {/if}
+                  {/if}
+                </section>
+
+                <section>
+                  <h4>Unmatched in {comparisonProjectName(comparisonProjectBId)}</h4>
+                  {#if projectComparison.unmatched_b.length === 0}
+                    <p>None.</p>
+                  {:else}
+                    <ul class="comparison-unmatched-list">
+                      {#each projectComparison.unmatched_b.slice(0, 200) as functionRef (functionRef.entry_address)}
+                        <li>
+                          <code>{functionRef.entry_address}</code>
+                          <strong>{qualifiedFunctionName(functionRef)}</strong>
+                          <span>{formatUnmatchedReason(functionRef.reason)}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                    {#if projectComparison.unmatched_b.length > 200}
+                      <p class="saved-projects-note">Showing the first 200 unmatched functions.</p>
+                    {/if}
+                  {/if}
+                </section>
+              </div>
+            </div>
+          {/if}
+        </section>
       {/if}
     </section>
 
@@ -2152,6 +2458,140 @@ interface ProgramOverview {
     flex-wrap: wrap;
     gap: 0.5rem;
     margin-top: 0.6rem;
+  }
+
+  .project-comparison {
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid #374151;
+  }
+
+  .project-comparison h3,
+  .project-comparison h4 {
+    margin: 0 0 0.5rem;
+  }
+
+  .project-comparison-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.75rem;
+  }
+
+  .project-comparison-controls label,
+  .comparison-filter label {
+    display: grid;
+    flex: 1 1 260px;
+    gap: 0.35rem;
+    color: #94a3b8;
+    font-size: 0.85rem;
+  }
+
+  .project-comparison-controls select,
+  .comparison-filter select {
+    min-width: 0;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid #475569;
+    border-radius: 0.5rem;
+    background-color: #0f172a;
+    color: #f8fafc;
+  }
+
+  .project-comparison-result {
+    margin-top: 1rem;
+  }
+
+  .project-comparison-context {
+    color: #cbd5e1;
+  }
+
+  .comparison-filter {
+    display: flex;
+    align-items: end;
+    gap: 1rem;
+    margin: 1rem 0 0.75rem;
+  }
+
+  .comparison-filter span,
+  .comparison-match-method,
+  .comparison-unchanged {
+    color: #94a3b8;
+    font-size: 0.8rem;
+  }
+
+  .comparison-list,
+  .comparison-unmatched-list {
+    display: grid;
+    max-height: 520px;
+    margin: 0;
+    padding: 0;
+    gap: 0.5rem;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .comparison-list > li,
+  .comparison-unmatched-list li {
+    padding: 0.65rem;
+    border: 1px solid #374151;
+    border-radius: 0.5rem;
+    background-color: #111827;
+  }
+
+  .comparison-function-heading {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .comparison-function-heading span {
+    color: #93c5fd;
+    font-family: monospace;
+    font-size: 0.8rem;
+  }
+
+  .comparison-match-method,
+  .comparison-unchanged {
+    margin: 0.35rem 0 0;
+  }
+
+  .comparison-changes {
+    display: grid;
+    margin: 0.6rem 0 0;
+    padding-left: 1.2rem;
+    gap: 0.35rem;
+  }
+
+  .comparison-changes code {
+    overflow-wrap: anywhere;
+  }
+
+  .comparison-unmatched-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    margin-top: 1.25rem;
+  }
+
+  .comparison-unmatched-list li {
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .comparison-unmatched-list code {
+    color: #93c5fd;
+  }
+
+  .comparison-unmatched-list span {
+    color: #94a3b8;
+    font-size: 0.8rem;
+  }
+
+  @media (max-width: 760px) {
+    .comparison-unmatched-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .external-entry-points-controls {

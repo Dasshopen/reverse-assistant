@@ -81,6 +81,7 @@ mod tests {
             strings: Vec::new(),
             library: library.map(str::to_owned),
             thunk_target_address: None,
+            namespace: None,
         }
     }
 

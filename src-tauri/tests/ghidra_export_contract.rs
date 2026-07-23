@@ -557,6 +557,32 @@ fn missing_required_nullable_field_is_rejected() {
 }
 
 #[test]
+fn older_v2_export_without_namespace_remains_compatible() {
+    let mut json_value: serde_json::Value =
+        serde_json::from_str(V2_EXAMPLE_JSON).expect("the example JSON should be valid");
+
+    for function in json_value["functions"]
+        .as_array_mut()
+        .expect("functions should be an array")
+    {
+        function
+            .as_object_mut()
+            .expect("each function should be an object")
+            .remove("namespace");
+    }
+
+    let older_v2_json =
+        serde_json::to_string(&json_value).expect("the modified JSON should serialize");
+    let export = GhidraExport::parse_and_validate(&older_v2_json)
+        .expect("a pre-namespace v2 export should remain readable");
+
+    assert!(export
+        .functions
+        .iter()
+        .all(|function| function.namespace.is_none()));
+}
+
+#[test]
 fn missing_target_address_is_rejected() {
     let mut json_value: serde_json::Value =
         serde_json::from_str(V2_EXAMPLE_JSON).expect("the example JSON should be valid");

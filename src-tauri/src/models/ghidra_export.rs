@@ -384,6 +384,8 @@ impl From<RawExportV1> for GhidraExport {
                     library: None,
                     // v1 never captured thunk targets.
                     thunk_target_address: None,
+                    // v1 never captured a function's parent namespace.
+                    namespace: None,
                 })
                 .collect(),
             strings: Vec::new(),
@@ -495,6 +497,11 @@ struct RawFunctionV2 {
     library: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     thunk_target_address: Option<String>,
+    // Added after schema v2 was already used for local snapshots. Missing
+    // therefore means the same thing as an explicit null so those projects
+    // remain reopenable after upgrading the application.
+    #[serde(default)]
+    namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -558,6 +565,7 @@ impl From<RawExportV2> for GhidraExport {
                     strings,
                     library: raw_function.library,
                     thunk_target_address: raw_function.thunk_target_address,
+                    namespace: raw_function.namespace,
                 }
             })
             .collect();
@@ -720,6 +728,13 @@ pub struct GhidraFunction {
     // up in `calls`. May itself point at another thunk; callers that need
     // the final non-thunk target must walk the chain themselves.
     pub thunk_target_address: Option<String>,
+    // Fully qualified parent namespace (e.g. a C++ class, or a compilation
+    // unit's static-linkage namespace). `None` for the global namespace and
+    // for Ghidra's generic `<EXTERNAL>` placeholder -- neither disambiguates
+    // anything. Used by services::comparison to narrow name-based function
+    // matching between two analyses.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

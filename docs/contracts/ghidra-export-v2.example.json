@@ -43,7 +43,8 @@
                 }
             ],
             "library": null,
-            "thunk_target_address": null
+            "thunk_target_address": null,
+            "namespace": null
         },
         {
             "entry_address": "0x140002000",
@@ -55,7 +56,8 @@
             "decompiled_code": null,
             "calls": [],
             "library": "MSVCRT.DLL",
-            "thunk_target_address": null
+            "thunk_target_address": null,
+            "namespace": "MSVCRT.DLL"
         }
     ],
     "strings": [

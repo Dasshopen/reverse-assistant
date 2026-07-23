@@ -14,7 +14,8 @@ public record FunctionMetadata(
     String decompiledCode,
     List<FunctionCallMetadata> calls,
     String libraryName,
-    String thunkTargetAddress
+    String thunkTargetAddress,
+    String namespace
 ) {
 
     private static final Pattern ADDRESS_PATTERN =

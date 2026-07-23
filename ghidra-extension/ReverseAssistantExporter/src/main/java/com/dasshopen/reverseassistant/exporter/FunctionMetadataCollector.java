@@ -11,6 +11,7 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.symbol.Namespace;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.exception.CancelledException;
 
@@ -139,7 +140,8 @@ public final class FunctionMetadataCollector {
             null,
             collectCalls(function),
             collectLibraryName(function),
-            collectThunkTargetAddress(function)
+            collectThunkTargetAddress(function),
+            collectNamespace(function)
         );
     }
 
@@ -151,6 +153,23 @@ public final class FunctionMetadataCollector {
         String namespaceName = function.getParentNamespace().getName();
 
         return UNKNOWN_LIBRARY_NAMESPACE.equals(namespaceName) ? null : namespaceName;
+    }
+
+    // Fully qualified parent namespace (e.g. a C++ class or a compilation
+    // unit's static-linkage namespace), used to disambiguate same-named
+    // functions when comparing two analyses. Null for the global namespace
+    // and for Ghidra's generic external placeholder -- neither is a real,
+    // meaningful namespace to match on.
+    private static String collectNamespace(Function function) {
+        Namespace namespace = function.getParentNamespace();
+
+        if (namespace == null || namespace.isGlobal()) {
+            return null;
+        }
+
+        String qualifiedName = namespace.getName(true);
+
+        return UNKNOWN_LIBRARY_NAMESPACE.equals(qualifiedName) ? null : qualifiedName;
     }
 
     // Non-recursive: a thunk's body is often just a jump, so Ghidra's own

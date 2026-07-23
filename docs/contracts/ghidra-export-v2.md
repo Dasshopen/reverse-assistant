@@ -87,6 +87,7 @@ reflection of what the binary actually exposes.
 | `calls` | array | Yes | No | Functions called by this function. May be empty. |
 | `library` | string or null | Yes | Yes | For an external (imported) function: the real source library name when Ghidra can attribute it (reliable for PE), or `null` when it can't (always `null` for ELF imports — never guessed). Always `null` for non-external functions. |
 | `thunk_target_address` | string or null | Yes | Yes | When `is_thunk` is true: the immediate (one hop, not fully resolved) address this function redirects to, or `null` if Ghidra can't resolve it. Always `null` when `is_thunk` is false. |
+| `namespace` | string or null | Yes for new exports | Yes | Fully qualified parent namespace (e.g. a C++ class, or a compilation unit's static-linkage namespace). `null` for the global namespace and for Ghidra's generic `<EXTERNAL>` placeholder. For a PE import this is generally the same real DLL name as `library`; for an ELF import it is `null`, same as `library`. Older v2 exports created before this field was introduced are accepted as if it were `null`, so saved local projects remain compatible. |
 
 A thunk's body is typically a jump instruction rather than a call, so its own `calls` array is
 usually empty even though it genuinely redirects somewhere — `thunk_target_address` is the only

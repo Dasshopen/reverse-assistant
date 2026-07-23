@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -120,6 +121,23 @@ fn project_dir_at(root: &Path, id: &str) -> PathBuf {
     root.join(id)
 }
 
+fn require_safe_project_id(id: &str) -> Result<(), String> {
+    let mut components = Path::new(id).components();
+    let is_single_normal_component =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+        || !is_single_normal_component
+    {
+        return Err("invalid saved project id".to_owned());
+    }
+
+    Ok(())
+}
+
 fn save_project_at(
     root: &Path,
     name: &str,
@@ -218,6 +236,7 @@ fn list_projects_at(root: &Path) -> Result<Vec<ProjectSummary>, String> {
 }
 
 fn load_project_at(root: &Path, id: &str) -> Result<(GhidraExport, ProjectSummary), String> {
+    require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
 
     if !dir.is_dir() {
@@ -265,6 +284,7 @@ fn ghidra_project_files_exist(session: &AnalysisSession) -> bool {
 }
 
 fn delete_project_at(root: &Path, id: &str, managed_ghidra_root: &Path) -> Result<(), String> {
+    require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
 
     if !dir.is_dir() {
@@ -341,6 +361,7 @@ fn rename_project_at(root: &Path, id: &str, new_name: &str) -> Result<ProjectMet
         return Err("project name must not be empty".to_owned());
     }
 
+    require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
 
     if !dir.is_dir() {
@@ -401,6 +422,28 @@ mod tests {
     // `session.project_dir` lives inside this in production.
     fn isolated_managed_ghidra_root(test_name: &str) -> PathBuf {
         isolated_root(&format!("{test_name}-managed-ghidra-root"))
+    }
+
+    #[test]
+    fn project_ids_must_be_one_safe_path_component() {
+        assert!(require_safe_project_id("sample-123456").is_ok());
+
+        for unsafe_id in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "..\\outside",
+            "nested/project",
+            "nested\\project",
+            "C:\\Windows",
+        ] {
+            assert_eq!(
+                require_safe_project_id(unsafe_id),
+                Err("invalid saved project id".to_owned()),
+                "'{unsafe_id}' must not escape or add nesting below the projects root"
+            );
+        }
     }
 
     // The synthetic fixtures above exercise the storage logic itself; this

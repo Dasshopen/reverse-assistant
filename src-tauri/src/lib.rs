@@ -11,6 +11,7 @@ use models::ghidra_installation::GhidraInstallation;
 use models::ghidra_session::AnalysisSession;
 use models::project::ProjectMetadata;
 use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
+use services::comparison::{self, ProjectComparison};
 use services::ghidra_decompile::{self, DecompiledFunctionDetails};
 use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
@@ -282,6 +283,24 @@ fn rename_project(app: AppHandle, id: String, new_name: String) -> Result<Projec
     project_storage::rename_project(&app, &id, &new_name)
 }
 
+#[tauri::command]
+fn compare_projects(
+    app: AppHandle,
+    project_a_id: String,
+    project_b_id: String,
+) -> Result<ProjectComparison, String> {
+    if project_a_id == project_b_id {
+        return Err("Select two different saved projects to compare.".to_owned());
+    }
+
+    // Comparison is deliberately read-only: loading either side here must
+    // not replace the analysis currently open in the explorer.
+    let (project_a, _) = project_storage::load_project(&app, &project_a_id)?;
+    let (project_b, _) = project_storage::load_project(&app, &project_b_id)?;
+
+    Ok(comparison::compare_projects(&project_a, &project_b))
+}
+
 #[tauri::command(async)]
 fn decompile_function(
     app: AppHandle,
@@ -352,7 +371,8 @@ pub fn run() {
             list_projects,
             open_project,
             delete_project,
-            rename_project
+            rename_project,
+            compare_projects
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

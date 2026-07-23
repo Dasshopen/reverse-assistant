@@ -277,6 +277,7 @@ mod tests {
             strings: Vec::new(),
             library: None,
             thunk_target_address: None,
+            namespace: None,
         }
     }
 
