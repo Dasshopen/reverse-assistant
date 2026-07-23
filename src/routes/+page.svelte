@@ -64,6 +64,33 @@ interface ImportedGhidraExport {
   summary: GhidraImportSummary;
 }
 
+interface AnalysisSession {
+  project_dir: string;
+  project_name: string;
+  program_path_in_project: string;
+}
+
+interface ProjectMetadata {
+  id: string;
+  name: string;
+  created_at_unix_seconds: number;
+  // Present for a "live" project (an automatic analysis whose original
+  // Ghidra project files are still on disk, so on-demand decompilation
+  // still works after reopening it); null for a snapshot-only project
+  // (a manual JSON import, or a live project whose Ghidra files went
+  // missing since it was saved).
+  session: AnalysisSession | null;
+  program_name: string;
+  program_format: string;
+  program_architecture: string;
+  function_count: number;
+}
+
+interface LoadedProject {
+  export: GhidraExport;
+  metadata: ProjectMetadata;
+}
+
 interface GhidraInstallation {
   install_dir: string;
   version_label: string;
@@ -252,6 +279,15 @@ interface ProgramOverview {
   let isAnalyzing = $state(false);
 
   let analysisSource = $state<"none" | "automatic" | "manual">("none");
+  let activeProjectId = $state<string | null>(null);
+
+  let savedProjects = $state<ProjectMetadata[] | null>(null);
+  let savedProjectsError = $state("");
+  let isLoadingSavedProjects = $state(false);
+  let projectActionError = $state("");
+  let renamingProjectId = $state<string | null>(null);
+  let renameDraft = $state("");
+
   let decompileCache = $state(new Map<string, DecompiledFunctionDetails>());
   let pendingDecompiles = $state(new Set<string>());
   let decompileErrors = $state(new Map<string, string>());
@@ -413,6 +449,97 @@ interface ProgramOverview {
   });
 
   $effect(() => {
+    requestProjectList();
+  });
+
+  async function requestProjectList() {
+    isLoadingSavedProjects = true;
+    savedProjectsError = "";
+
+    try {
+      savedProjects = await invoke<ProjectMetadata[]>("list_projects");
+    } catch (error) {
+      savedProjects = null;
+      savedProjectsError = String(error);
+    } finally {
+      isLoadingSavedProjects = false;
+    }
+  }
+
+  async function openProject(id: string) {
+    projectActionError = "";
+    importError = "";
+    analyzeError = "";
+    importSummary = null;
+    importedExport = null;
+    selectedFunctionAddress = null;
+    analysisSource = "none";
+    activeProjectId = null;
+    decompileCache = new Map();
+    pendingDecompiles = new Set();
+    decompileErrors = new Map();
+    identifications = new Map();
+
+    try {
+      const loaded = await invoke<LoadedProject>("open_project", { id });
+
+      importedExport = loaded.export;
+      selectedFunctionAddress = loaded.export.functions[0]?.entry_address ?? null;
+      // A live session (still-present Ghidra project files) keeps on-demand
+      // decompilation working, exactly like a fresh automatic analysis. A
+      // downgraded/snapshot-only project behaves like a manual import.
+      analysisSource = loaded.metadata.session ? "automatic" : "manual";
+      activeProjectId = loaded.metadata.id;
+    } catch (error) {
+      projectActionError = String(error);
+    }
+  }
+
+  async function deleteProject(id: string) {
+    if (!confirm("Delete this saved project? This cannot be undone.")) {
+      return;
+    }
+
+    projectActionError = "";
+
+    try {
+      await invoke("delete_project", { id });
+
+      if (activeProjectId === id) {
+        activeProjectId = null;
+      }
+
+      await requestProjectList();
+    } catch (error) {
+      projectActionError = String(error);
+    }
+  }
+
+  function startRenamingProject(project: ProjectMetadata) {
+    renamingProjectId = project.id;
+    renameDraft = project.name;
+  }
+
+  async function confirmRenameProject(id: string) {
+    const newName = renameDraft.trim();
+
+    if (!newName) {
+      projectActionError = "Project name must not be empty.";
+      return;
+    }
+
+    projectActionError = "";
+
+    try {
+      await invoke("rename_project", { id, newName });
+      renamingProjectId = null;
+      await requestProjectList();
+    } catch (error) {
+      projectActionError = String(error);
+    }
+  }
+
+  $effect(() => {
     if (!importedExport) {
       globalStrings = null;
       globalStringsError = "";
@@ -513,6 +640,10 @@ interface ProgramOverview {
   function formatTypeSize(size: number | null): string {
     if (size === null) return "size unknown";
     return size === 1 ? "1 byte" : `${size} bytes`;
+  }
+
+  function formatProjectDate(createdAtUnixSeconds: number): string {
+    return new Date(createdAtUnixSeconds * 1000).toLocaleString();
   }
 
   $effect(() => {
@@ -721,12 +852,16 @@ interface ProgramOverview {
       selectedFunctionAddress =
         result.imported.export.functions[0]?.entry_address ?? null;
       analysisSource = "automatic";
+      activeProjectId = null;
       identifications = new Map(
         result.identifications.map((identification) => [
           identification.entry_address,
           identification.candidates,
         ]),
       );
+      // The backend auto-saves every completed analysis as a local
+      // project -- refresh the list so it shows up right away.
+      requestProjectList();
     } catch (error) {
       analyzeError = String(error);
     } finally {
@@ -789,6 +924,8 @@ interface ProgramOverview {
       selectedFunctionAddress =
         imported.export.functions[0]?.entry_address ?? null;
       analysisSource = "manual";
+      activeProjectId = null;
+      requestProjectList();
       } catch (error) {
       importError = String(error);
       } finally {
@@ -814,6 +951,103 @@ interface ProgramOverview {
     <p class="description">
       Analyze a binary directly, or import an existing Ghidra JSON export.
     </p>
+
+    <section class="saved-projects" aria-labelledby="saved-projects-title">
+      <h2 id="saved-projects-title">Saved projects (local)</h2>
+
+      <p class="saved-projects-note">
+        Every completed analysis or import is saved here automatically. A "live" project
+        keeps on-demand decompilation working after reopening it (its original Ghidra
+        project is still on disk); a "snapshot" project shows the same data read-only.
+        Nothing here is ever synced or uploaded.
+      </p>
+
+      {#if isLoadingSavedProjects}
+        <p>Loading projects...</p>
+      {:else if savedProjectsError}
+        <p class="error" role="alert">{savedProjectsError}</p>
+      {:else if savedProjects}
+        {#if savedProjects.length === 0}
+          <p>No saved projects yet — analyze or import a binary to create one.</p>
+        {:else}
+          <ul class="saved-projects-list">
+            {#each savedProjects as project (project.id)}
+              <li class:active={project.id === activeProjectId}>
+                <div class="saved-projects-entry-header">
+                  {#if renamingProjectId === project.id}
+                    <input
+                      type="text"
+                      class="global-strings-search"
+                      bind:value={renameDraft}
+                    />
+                    <button
+                      type="button"
+                      onclick={() => confirmRenameProject(project.id)}
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      class="secondary-button"
+                      onclick={() => (renamingProjectId = null)}
+                    >
+                      Cancel
+                    </button>
+                  {:else}
+                    <strong>{project.name}</strong>
+                    <span class="global-strings-count">
+                      {project.session ? "live" : "snapshot"}
+                    </span>
+                    {#if project.id === activeProjectId}
+                      <span class="global-strings-count">currently open</span>
+                    {/if}
+                  {/if}
+                </div>
+
+                <p class="saved-projects-meta">
+                  {project.program_name} — {project.program_format}/{project.program_architecture},
+                  {project.function_count} functions — saved {formatProjectDate(
+                    project.created_at_unix_seconds,
+                  )}
+                </p>
+
+                <div class="saved-projects-actions">
+                  <button
+                    type="button"
+                    disabled={project.id === activeProjectId}
+                    onclick={() => openProject(project.id)}
+                  >
+                    Open
+                  </button>
+
+                  {#if renamingProjectId !== project.id}
+                    <button
+                      type="button"
+                      class="secondary-button"
+                      onclick={() => startRenamingProject(project)}
+                    >
+                      Rename
+                    </button>
+                  {/if}
+
+                  <button
+                    type="button"
+                    class="secondary-button"
+                    onclick={() => deleteProject(project.id)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
+
+      {#if projectActionError}
+        <p class="error" role="alert">{projectActionError}</p>
+      {/if}
+    </section>
 
     <section class="ghidra-setup" aria-labelledby="ghidra-setup-title">
       <h2 id="ghidra-setup-title">Ghidra installation</h2>
@@ -1837,6 +2071,64 @@ interface ProgramOverview {
     color: #f9fafb;
     cursor: default;
     opacity: 1;
+  }
+
+  .saved-projects {
+    margin-bottom: 1.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid #374151;
+  }
+
+  .saved-projects h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1.25rem;
+  }
+
+  .saved-projects-note {
+    margin: 0 0 0.75rem;
+    color: #94a3b8;
+    font-size: 0.85rem;
+  }
+
+  .saved-projects-list {
+    display: grid;
+    max-height: 420px;
+    margin: 0;
+    padding: 0;
+    gap: 0.5rem;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .saved-projects-list li {
+    padding: 0.65rem;
+    border: 1px solid #374151;
+    border-radius: 0.5rem;
+    background-color: #1f2937;
+  }
+
+  .saved-projects-list li.active {
+    border-color: #3b82f6;
+  }
+
+  .saved-projects-entry-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .saved-projects-meta {
+    margin: 0.35rem 0 0;
+    color: #94a3b8;
+    font-size: 0.8rem;
+  }
+
+  .saved-projects-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
   }
 
   .external-entry-points-controls {

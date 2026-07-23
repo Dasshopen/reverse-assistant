@@ -7,3 +7,4 @@ pub mod ghidra_installation;
 pub mod global_strings;
 pub mod imports_exports;
 pub mod program_overview;
+pub mod project_storage;

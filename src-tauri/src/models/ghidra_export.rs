@@ -22,7 +22,16 @@ where
 // versions exist -- everything downstream (services, Tauri commands,
 // Svelte) works against this shape regardless of which version a given
 // export file was written in.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+//
+// Deserialize is derived here too, but only for services::project_storage's
+// own internal cache round-trip (Rust writing this exact shape to disk and
+// reading its own file back) -- never for a real Ghidra-produced export
+// file, which must always go through `parse_and_validate` for version
+// dispatch and semantic validation. The canonical shape is a strict
+// superset of the v2 wire contract (e.g. a function's derived `strings`
+// isn't part of the wire format), so deserializing it via the versioned
+// Raw types would reject fields the wire format never expected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GhidraExport {
     pub schema_version: u32,
     pub program: ProgramMetadata,
@@ -44,7 +53,7 @@ pub struct GhidraExport {
 // this second way -- it isn't fabricated as "used by" its referencing
 // type, since that relationship is already visible through the referencing
 // type's own `fields`/`target_type_name`.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DetectedType {
     pub name: String,
     pub kind: DetectedTypeKind,
@@ -81,7 +90,7 @@ pub enum DetectedTypeKind {
 // `[]`), matching the existing convention for `FunctionParameter.data_type`
 // -- consumers resolve it against another `DetectedType.name` themselves
 // rather than this contract pre-resolving it.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeField {
     // `None` for a field Ghidra never assigned a name (e.g. an anonymous
     // nested union), not a fabricated placeholder.
@@ -90,7 +99,7 @@ pub struct TypeField {
     pub offset: u32,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnumValue {
     pub name: String,
     pub value: i64,
@@ -108,7 +117,7 @@ pub enum TypeUsageKind {
 // `function_address`/`function_name` for FunctionParameter/FunctionReturn
 // (plus `parameter_name` for FunctionParameter only), `data_address`/
 // `data_label` for GlobalData. Never all populated at once.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeUsage {
     pub kind: TypeUsageKind,
     pub function_address: Option<String>,
@@ -118,14 +127,14 @@ pub struct TypeUsage {
     pub data_label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalString {
     pub address: String,
     pub value: String,
     pub references: Vec<StringReference>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StringReference {
     pub instruction_address: String,
     pub function_address: Option<String>,
@@ -137,7 +146,7 @@ pub struct StringReference {
 // on a plain ELF executable this set is broader/noisier than a real DLL's
 // export table (mostly its global symbol table), so the name matches what
 // Ghidra itself means by it rather than overclaiming.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExternalEntryPoint {
     pub address: String,
     pub name: Option<String>,
@@ -669,7 +678,7 @@ pub(crate) fn is_valid_address(value: &str) -> bool {
             .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProgramMetadata {
     pub name: String,
     pub sha256: String,
@@ -688,7 +697,7 @@ pub enum Endianness {
     Big,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GhidraFunction {
     pub entry_address: String,
     pub name: String,
