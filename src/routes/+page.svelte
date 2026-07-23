@@ -663,6 +663,8 @@ interface ApplyRenamesResult {
   let globalStringsError = $state("");
   let isLoadingGlobalStrings = $state(false);
   let globalStringsSearch = $state("");
+  let globalStringsPage = $state(1);
+  const globalStringsPageSize = 12;
 
   let filteredGlobalStrings = $derived.by(() => {
     if (!globalStrings) return [];
@@ -680,11 +682,26 @@ interface ApplyRenamesResult {
       .sort((a, b) => b.reference_count - a.reference_count)
       .slice(0, 5),
   );
+  let globalStringsPageCount = $derived(
+    Math.max(1, Math.ceil(filteredGlobalStrings.length / globalStringsPageSize)),
+  );
+  let currentGlobalStringsPage = $derived(
+    Math.min(globalStringsPage, globalStringsPageCount),
+  );
+  let paginatedGlobalStrings = $derived(
+    filteredGlobalStrings.slice(
+      (currentGlobalStringsPage - 1) * globalStringsPageSize,
+      currentGlobalStringsPage * globalStringsPageSize,
+    ),
+  );
 
   let imports = $state<ImportView[] | null>(null);
   let importsError = $state("");
   let isLoadingImports = $state(false);
   let importsSearch = $state("");
+  let importsPage = $state(1);
+  let ioWorkspaceTab = $state<"imports" | "exports" | "libraries">("imports");
+  const ioPageSize = 12;
 
   let filteredImports = $derived.by(() => {
     if (!imports) return [];
@@ -698,12 +715,23 @@ interface ApplyRenamesResult {
         (entry.library ?? "").toLowerCase().includes(query),
     );
   });
+  let importsPageCount = $derived(
+    Math.max(1, Math.ceil(filteredImports.length / ioPageSize)),
+  );
+  let currentImportsPage = $derived(Math.min(importsPage, importsPageCount));
+  let paginatedImports = $derived(
+    filteredImports.slice(
+      (currentImportsPage - 1) * ioPageSize,
+      currentImportsPage * ioPageSize,
+    ),
+  );
 
   let externalEntryPoints = $state<ExternalEntryPoint[] | null>(null);
   let externalEntryPointsError = $state("");
   let isLoadingExternalEntryPoints = $state(false);
   let externalEntryPointsSearch = $state("");
   let externalEntryPointsFunctionsOnly = $state(true);
+  let externalEntryPointsPage = $state(1);
 
   let filteredExternalEntryPoints = $derived.by(() => {
     if (!externalEntryPoints) return [];
@@ -720,6 +748,18 @@ interface ApplyRenamesResult {
       return (entry.name ?? "").toLowerCase().includes(query);
     });
   });
+  let externalEntryPointsPageCount = $derived(
+    Math.max(1, Math.ceil(filteredExternalEntryPoints.length / ioPageSize)),
+  );
+  let currentExternalEntryPointsPage = $derived(
+    Math.min(externalEntryPointsPage, externalEntryPointsPageCount),
+  );
+  let paginatedExternalEntryPoints = $derived(
+    filteredExternalEntryPoints.slice(
+      (currentExternalEntryPointsPage - 1) * ioPageSize,
+      currentExternalEntryPointsPage * ioPageSize,
+    ),
+  );
 
   let detectedTypes = $state<DetectedType[] | null>(null);
   let detectedTypesError = $state("");
@@ -727,6 +767,8 @@ interface ApplyRenamesResult {
   let detectedTypesSearch = $state("");
   let detectedTypesKindFilter = $state<DetectedTypeKind | "all">("all");
   let expandedDetectedTypeKey = $state<string | null>(null);
+  let detectedTypesPage = $state(1);
+  const detectedTypesPageSize = 10;
 
   let filteredDetectedTypes = $derived.by(() => {
     if (!detectedTypes) return [];
@@ -743,6 +785,23 @@ interface ApplyRenamesResult {
       return type.name.toLowerCase().includes(query);
     });
   });
+  let detectedTypesPageCount = $derived(
+    Math.max(1, Math.ceil(filteredDetectedTypes.length / detectedTypesPageSize)),
+  );
+  let currentDetectedTypesPage = $derived(
+    Math.min(detectedTypesPage, detectedTypesPageCount),
+  );
+  let paginatedDetectedTypes = $derived(
+    filteredDetectedTypes.slice(
+      (currentDetectedTypesPage - 1) * detectedTypesPageSize,
+      currentDetectedTypesPage * detectedTypesPageSize,
+    ),
+  );
+  let selectedDetectedType = $derived(
+    filteredDetectedTypes.find(
+      (type) => `${type.category}|${type.name}` === expandedDetectedTypeKey,
+    ) ?? paginatedDetectedTypes[0] ?? null,
+  );
 
   let programOverview = $state<ProgramOverview | null>(null);
   let programOverviewError = $state("");
@@ -2532,59 +2591,65 @@ interface ApplyRenamesResult {
       </section>
 
       <section
-        class="global-strings"
+        class="data-workspace strings-workspace"
         class:view-hidden={activeWorkspaceView !== "strings"}
         aria-labelledby="global-strings-title"
       >
-        <h2 id="global-strings-title">Strings (global)</h2>
+        <header class="data-workspace-header">
+          <div><p class="detail-label">Analyse globale</p><h2 id="global-strings-title">Chaînes de caractères</h2><span>Texte détecté dans le programme et fonctions qui le référencent.</span></div>
+          <dl>
+            <div><dt>Chaînes</dt><dd>{globalStrings?.length ?? 0}</dd></div>
+            <div><dt>Références</dt><dd>{programOverview?.total_string_reference_count ?? 0}</dd></div>
+            <div><dt>Plus référencée</dt><dd>{programOverview?.most_referenced_string?.reference_count ?? 0}</dd></div>
+          </dl>
+        </header>
 
-        <input
-          type="text"
-          class="global-strings-search"
-          placeholder="Filter by string content..."
-          bind:value={globalStringsSearch}
-        />
+        <div class="data-toolbar">
+          <input
+            type="search"
+            placeholder="Rechercher dans le contenu d'une chaîne…"
+            bind:value={globalStringsSearch}
+            oninput={() => (globalStringsPage = 1)}
+          />
+          <span>{filteredGlobalStrings.length} résultat(s)</span>
+        </div>
 
         {#if isLoadingGlobalStrings}
           <p>Loading strings...</p>
         {:else if globalStringsError}
           <p class="error" role="alert">{globalStringsError}</p>
         {:else if globalStrings}
-          <p class="global-strings-stats">
-            {filteredGlobalStrings.length} of {globalStrings.length} strings
-          </p>
-
           {#if filteredGlobalStrings.length === 0}
-            <p>No string matches this filter.</p>
+            <p class="data-empty">Aucune chaîne ne correspond à cette recherche.</p>
           {:else}
-            <ul class="global-strings-list">
-              {#each filteredGlobalStrings as entry (entry.address)}
-                <li>
-                  <div class="global-strings-entry-header">
-                    <code>{entry.address}</code>
-                    <span class="global-strings-value">{entry.value}</span>
-                    <span class="global-strings-count">
-                      {entry.reference_count}
-                      {entry.reference_count === 1 ? "reference" : "references"}
-                    </span>
-                  </div>
-
-                  {#if entry.referencing_functions.length > 0}
-                    <div class="global-strings-functions">
-                      {#each entry.referencing_functions as fn (fn.entry_address)}
-                        <button
-                          type="button"
-                          class="global-strings-function"
-                          onclick={() => openFunction(fn.entry_address)}
-                        >
-                          {fn.name}
-                        </button>
-                      {/each}
-                    </div>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
+            <div class="data-table-card">
+              <table class="strings-table">
+                <thead><tr><th>Adresse</th><th>Contenu</th><th>Références</th><th>Fonctions</th></tr></thead>
+                <tbody>
+                  {#each paginatedGlobalStrings as entry (entry.address)}
+                    <tr>
+                      <td><code>{entry.address}</code></td>
+                      <td><span title={entry.value}>{entry.value}</span></td>
+                      <td><strong>{entry.reference_count}</strong></td>
+                      <td>
+                        <div class="data-function-chips">
+                          {#each entry.referencing_functions.slice(0, 3) as fn (fn.entry_address)}
+                            <button type="button" onclick={() => openFunction(fn.entry_address)}>{fn.name}</button>
+                          {/each}
+                          {#if entry.referencing_functions.length > 3}<em>+{entry.referencing_functions.length - 3}</em>{/if}
+                          {#if entry.referencing_functions.length === 0}<span>Non attribuée</span>{/if}
+                        </div>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              <nav class="data-pagination" aria-label="Pages des chaînes">
+                <button type="button" disabled={currentGlobalStringsPage === 1} onclick={() => (globalStringsPage = Math.max(1, currentGlobalStringsPage - 1))}>← Précédente</button>
+                <span>Page {currentGlobalStringsPage} sur {globalStringsPageCount}</span>
+                <button type="button" disabled={currentGlobalStringsPage === globalStringsPageCount} onclick={() => (globalStringsPage = Math.min(globalStringsPageCount, currentGlobalStringsPage + 1))}>Suivante →</button>
+              </nav>
+            </div>
           {/if}
         {/if}
       </section>
@@ -2592,158 +2657,81 @@ interface ApplyRenamesResult {
 
     {#if importedExport}
       <section
-        class="global-strings"
+        class="data-workspace io-workspace"
         class:view-hidden={activeWorkspaceView !== "imports"}
         aria-labelledby="imports-title"
       >
-        <h2 id="imports-title">Imports (global)</h2>
+        <header class="data-workspace-header">
+          <div><p class="detail-label">Frontières du programme</p><h2 id="imports-title">Imports, exports et bibliothèques</h2><span>Fonctions externes utilisées, points d'entrée exposés et dépendances déclarées.</span></div>
+          <dl>
+            <div><dt>Imports</dt><dd>{imports?.length ?? 0}</dd></div>
+            <div><dt>Exports</dt><dd>{externalEntryPoints?.length ?? 0}</dd></div>
+            <div><dt>Bibliothèques</dt><dd>{importedExport.program.required_libraries.length}</dd></div>
+          </dl>
+        </header>
 
-        <input
-          type="text"
-          class="global-strings-search"
-          placeholder="Filter by name or library..."
-          bind:value={importsSearch}
-        />
+        <nav class="data-subtabs" aria-label="Sections des imports et exports">
+          <button type="button" class:active={ioWorkspaceTab === "imports"} onclick={() => (ioWorkspaceTab = "imports")}>Imports <span>{imports?.length ?? 0}</span></button>
+          <button type="button" class:active={ioWorkspaceTab === "exports"} onclick={() => (ioWorkspaceTab = "exports")}>Exports <span>{externalEntryPoints?.length ?? 0}</span></button>
+          <button type="button" class:active={ioWorkspaceTab === "libraries"} onclick={() => (ioWorkspaceTab = "libraries")}>Bibliothèques <span>{importedExport.program.required_libraries.length}</span></button>
+        </nav>
 
-        {#if isLoadingImports}
-          <p>Loading imports...</p>
-        {:else if importsError}
-          <p class="error" role="alert">{importsError}</p>
-        {:else if imports}
-          <p class="global-strings-stats">
-            {filteredImports.length} of {imports.length} imports
-          </p>
-
-          {#if filteredImports.length === 0}
-            <p>No import matches this filter.</p>
-          {:else}
-            <ul class="global-strings-list">
-              {#each filteredImports as entry (entry.entry_address)}
-                <li>
-                  <div class="global-strings-entry-header">
-                    <code>{entry.entry_address}</code>
-                    <span class="global-strings-value">
-                      {entry.name}
-                      <em>({entry.library ?? "unknown library"})</em>
-                    </span>
-                    <span class="global-strings-count">
-                      used by {entry.used_by_function_count}
-                      {entry.used_by_function_count === 1 ? "function" : "functions"}
-                    </span>
-                  </div>
-
-                  <div class="global-strings-functions">
-                    <button
-                      type="button"
-                      class="global-strings-function"
-                      onclick={() => openFunction(entry.entry_address)}
-                    >
-                      Select function
-                    </button>
-                  </div>
-                </li>
-              {/each}
-            </ul>
+        {#if ioWorkspaceTab === "imports"}
+          <div class="data-toolbar"><input type="search" placeholder="Rechercher un import ou une bibliothèque…" bind:value={importsSearch} oninput={() => (importsPage = 1)} /><span>{filteredImports.length} résultat(s)</span></div>
+          {#if isLoadingImports}<p>Chargement des imports…</p>{:else if importsError}<p class="error" role="alert">{importsError}</p>{:else if filteredImports.length === 0}<p class="data-empty">Aucun import ne correspond à cette recherche.</p>{:else}
+            <div class="data-table-card">
+              <table class="io-table"><thead><tr><th>Adresse</th><th>Fonction</th><th>Bibliothèque</th><th>Utilisée par</th><th></th></tr></thead><tbody>
+                {#each paginatedImports as entry (entry.entry_address)}<tr><td><code>{entry.entry_address}</code></td><td><strong>{entry.name}</strong></td><td>{entry.library ?? "Non attribuée"}</td><td><span>{entry.used_by_function_count} fonction(s)</span></td><td><button type="button" onclick={() => openFunction(entry.entry_address)}>Ouvrir</button></td></tr>{/each}
+              </tbody></table>
+              <nav class="data-pagination"><button type="button" disabled={currentImportsPage === 1} onclick={() => (importsPage = Math.max(1, currentImportsPage - 1))}>← Précédente</button><span>Page {currentImportsPage} sur {importsPageCount}</span><button type="button" disabled={currentImportsPage === importsPageCount} onclick={() => (importsPage = Math.min(importsPageCount, currentImportsPage + 1))}>Suivante →</button></nav>
+            </div>
           {/if}
+        {:else if ioWorkspaceTab === "exports"}
+          <div class="data-toolbar">
+            <input type="search" placeholder="Rechercher un point d'entrée…" bind:value={externalEntryPointsSearch} oninput={() => (externalEntryPointsPage = 1)} />
+            <label><input type="checkbox" bind:checked={externalEntryPointsFunctionsOnly} onchange={() => (externalEntryPointsPage = 1)} /> Fonctions uniquement</label>
+          </div>
+          {#if isLoadingExternalEntryPoints}<p>Chargement des exports…</p>{:else if externalEntryPointsError}<p class="error" role="alert">{externalEntryPointsError}</p>{:else if filteredExternalEntryPoints.length === 0}<p class="data-empty">Aucun point d'entrée ne correspond.</p>{:else}
+            <div class="data-table-card">
+              <table class="io-table exports-table"><thead><tr><th>Adresse</th><th>Nom</th><th>Type</th><th></th></tr></thead><tbody>
+                {#each paginatedExternalEntryPoints as entry (entry.address)}<tr><td><code>{entry.address}</code></td><td><strong>{entry.name ?? "(anonyme)"}</strong></td><td><span class="data-kind-badge">{entry.kind === "function" ? "Fonction" : entry.kind === "data" ? "Donnée" : "Inconnu"}</span></td><td>{#if entry.kind === "function"}<button type="button" onclick={() => openFunction(entry.address)}>Ouvrir</button>{/if}</td></tr>{/each}
+              </tbody></table>
+              <nav class="data-pagination"><button type="button" disabled={currentExternalEntryPointsPage === 1} onclick={() => (externalEntryPointsPage = Math.max(1, currentExternalEntryPointsPage - 1))}>← Précédente</button><span>Page {currentExternalEntryPointsPage} sur {externalEntryPointsPageCount}</span><button type="button" disabled={currentExternalEntryPointsPage === externalEntryPointsPageCount} onclick={() => (externalEntryPointsPage = Math.min(externalEntryPointsPageCount, currentExternalEntryPointsPage + 1))}>Suivante →</button></nav>
+            </div>
+          {/if}
+        {:else}
+          <div class="libraries-grid">
+            {#if importedExport.program.required_libraries.length === 0}<p class="data-empty">Aucune bibliothèque requise n'est déclarée dans ce binaire.</p>{:else}
+              {#each importedExport.program.required_libraries as library (library)}
+                <article><span aria-hidden="true">◇</span><div><strong>{library}</strong><small>{imports?.filter((entry) => entry.library?.toLowerCase() === library.toLowerCase()).length ?? 0} import(s) attribué(s) directement</small></div></article>
+              {/each}
+            {/if}
+          </div>
         {/if}
       </section>
     {/if}
 
     {#if importedExport}
       <section
-        class="global-strings"
-        class:view-hidden={activeWorkspaceView !== "imports"}
-        aria-labelledby="external-entry-points-title"
-      >
-        <h2 id="external-entry-points-title">External entry points (exports)</h2>
-
-        <p class="global-strings-stats">
-          On a real library/DLL this is a clean export table; on a plain executable it is
-          broader and noisier (closer to every globally-visible symbol).
-        </p>
-
-        <div class="external-entry-points-controls">
-          <input
-            type="text"
-            class="global-strings-search"
-            placeholder="Filter by name..."
-            bind:value={externalEntryPointsSearch}
-          />
-
-          <label class="external-entry-points-toggle">
-            <input type="checkbox" bind:checked={externalEntryPointsFunctionsOnly} />
-            Functions only
-          </label>
-        </div>
-
-        {#if isLoadingExternalEntryPoints}
-          <p>Loading external entry points...</p>
-        {:else if externalEntryPointsError}
-          <p class="error" role="alert">{externalEntryPointsError}</p>
-        {:else if externalEntryPoints}
-          <p class="global-strings-stats">
-            {filteredExternalEntryPoints.length} of {externalEntryPoints.length} entries
-          </p>
-
-          {#if filteredExternalEntryPoints.length === 0}
-            <p>No entry matches this filter.</p>
-          {:else}
-            <ul class="global-strings-list">
-              {#each filteredExternalEntryPoints as entry (entry.address)}
-                <li>
-                  <div class="global-strings-entry-header">
-                    <code>{entry.address}</code>
-                    <span class="global-strings-value">{entry.name ?? "(anonymous)"}</span>
-                    <span class="global-strings-count">{entry.kind}</span>
-                  </div>
-
-                  {#if entry.kind === "function"}
-                    <div class="global-strings-functions">
-                      <button
-                        type="button"
-                        class="global-strings-function"
-                        onclick={() => openFunction(entry.address)}
-                      >
-                        Select function
-                      </button>
-                    </div>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        {/if}
-      </section>
-
-      <section
-        class="global-strings"
+        class="data-workspace types-workspace"
         class:view-hidden={activeWorkspaceView !== "types"}
         aria-labelledby="detected-types-title"
       >
-        <h2 id="detected-types-title">Detected structures/types</h2>
+        <header class="data-workspace-header">
+          <div><p class="detail-label">Modèle de données</p><h2 id="detected-types-title">Structures et types détectés</h2><span>Types réellement utilisés par les signatures ou les données globales.</span></div>
+          <dl>
+            <div><dt>Structures</dt><dd>{programOverview?.struct_count ?? 0}</dd></div>
+            <div><dt>Enums</dt><dd>{programOverview?.enum_count ?? 0}</dd></div>
+            <div><dt>Opaques</dt><dd>{programOverview?.opaque_type_count ?? 0}</dd></div>
+          </dl>
+        </header>
 
-        <p class="global-strings-stats">
-          Structures, unions, enums and typedefs actually used by a function signature or
-          global data, plus the types they themselves reference (struct fields, a typedef's
-          target). A type only reached that second way has no usages listed here -- that
-          relationship is already visible in the referencing type's fields.
-        </p>
-
-        <div class="external-entry-points-controls">
-          <input
-            type="text"
-            class="global-strings-search"
-            placeholder="Filter by name..."
-            bind:value={detectedTypesSearch}
-          />
-
-          <select bind:value={detectedTypesKindFilter}>
-            <option value="all">All kinds</option>
-            <option value="struct">Struct</option>
-            <option value="union">Union</option>
-            <option value="enum">Enum</option>
-            <option value="typedef">Typedef</option>
+        <div class="data-toolbar">
+          <input type="search" placeholder="Rechercher un type…" bind:value={detectedTypesSearch} oninput={() => { detectedTypesPage = 1; expandedDetectedTypeKey = null; }} />
+          <select bind:value={detectedTypesKindFilter} onchange={() => { detectedTypesPage = 1; expandedDetectedTypeKey = null; }}>
+            <option value="all">Tous les types</option><option value="struct">Structures</option><option value="union">Unions</option><option value="enum">Enums</option><option value="typedef">Typedefs</option>
           </select>
+          <span>{filteredDetectedTypes.length} résultat(s)</span>
         </div>
 
         {#if isLoadingDetectedTypes}
@@ -2751,92 +2739,37 @@ interface ApplyRenamesResult {
         {:else if detectedTypesError}
           <p class="error" role="alert">{detectedTypesError}</p>
         {:else if detectedTypes}
-          <p class="global-strings-stats">
-            {filteredDetectedTypes.length} of {detectedTypes.length} types
-          </p>
-
           {#if filteredDetectedTypes.length === 0}
-            <p>No type matches this filter.</p>
+            <p class="data-empty">Aucun type ne correspond à ces filtres.</p>
           {:else}
-            <ul class="global-strings-list">
-              {#each filteredDetectedTypes as type (type.category + "|" + type.name)}
-                {@const typeKey = type.category + "|" + type.name}
-                <li>
-                  <div class="global-strings-entry-header">
-                    <span class="global-strings-count">{type.kind}</span>
-                    <span class="global-strings-value">{type.name}</span>
-                    {#if type.is_opaque}<em>(opaque)</em>{/if}
-                    {#if type.is_anonymous}<em>(anonymous)</em>{/if}
-                    <span class="global-strings-count">
-                      {formatTypeSize(type.size)}
-                    </span>
-                    <span class="global-strings-count">{type.usages.length} usages</span>
-                    <button
-                      type="button"
-                      class="global-strings-function"
-                      onclick={() => {
-                        expandedDetectedTypeKey =
-                          expandedDetectedTypeKey === typeKey ? null : typeKey;
-                      }}
-                    >
-                      {expandedDetectedTypeKey === typeKey ? "Hide details" : "Show details"}
-                    </button>
+            <div class="types-layout">
+              <aside class="types-list-card">
+                <ul>
+                  {#each paginatedDetectedTypes as type (`${type.category}|${type.name}`)}
+                    {@const typeKey = `${type.category}|${type.name}`}
+                    <li><button type="button" class:active={selectedDetectedType === type} onclick={() => (expandedDetectedTypeKey = typeKey)}><span><small>{type.kind}</small><strong>{type.name}</strong></span><span><b>{formatTypeSize(type.size)}</b><em>{type.usages.length} usage(s)</em></span></button></li>
+                  {/each}
+                </ul>
+                <nav class="data-pagination compact"><button type="button" disabled={currentDetectedTypesPage === 1} onclick={() => { detectedTypesPage = Math.max(1, currentDetectedTypesPage - 1); expandedDetectedTypeKey = null; }}>←</button><span>{currentDetectedTypesPage} / {detectedTypesPageCount}</span><button type="button" disabled={currentDetectedTypesPage === detectedTypesPageCount} onclick={() => { detectedTypesPage = Math.min(detectedTypesPageCount, currentDetectedTypesPage + 1); expandedDetectedTypeKey = null; }}>→</button></nav>
+              </aside>
+
+              {#if selectedDetectedType}
+                <article class="type-detail-card">
+                  <header><div><span class="data-kind-badge">{selectedDetectedType.kind}</span><h3>{selectedDetectedType.name}</h3><code>{selectedDetectedType.category}</code></div><dl><div><dt>Taille</dt><dd>{formatTypeSize(selectedDetectedType.size)}</dd></div><div><dt>Champs</dt><dd>{selectedDetectedType.fields.length}</dd></div><div><dt>Usages</dt><dd>{selectedDetectedType.usages.length}</dd></div></dl></header>
+                  <div class="type-detail-grid">
+                    <section><h4>Définition</h4>
+                      {#if selectedDetectedType.kind === "typedef"}<p>Alias de <code>{selectedDetectedType.target_type_name}</code></p>
+                      {:else if selectedDetectedType.kind === "enum"}<table><thead><tr><th>Nom</th><th>Valeur</th></tr></thead><tbody>{#each selectedDetectedType.enum_values as value (value.name)}<tr><td><code>{value.name}</code></td><td>{value.value}</td></tr>{/each}</tbody></table>
+                      {:else if selectedDetectedType.fields.length > 0}<table><thead><tr><th>Offset</th><th>Champ</th><th>Type</th></tr></thead><tbody>{#each selectedDetectedType.fields as field (`${field.offset}-${field.name}`)}<tr><td>+{field.offset}</td><td><code>{field.name ?? "(anonyme)"}</code></td><td>{field.data_type}</td></tr>{/each}</tbody></table>
+                      {:else}<p>{selectedDetectedType.is_opaque ? "Type opaque : sa définition interne n'est pas disponible." : "Aucun champ connu."}</p>{/if}
+                    </section>
+                    <section><h4>Utilisé dans</h4>
+                      {#if selectedDetectedType.usages.length === 0}<p>Aucun usage direct : type inclus par dépendance.</p>{:else}<ul class="type-usage-list">{#each selectedDetectedType.usages.slice(0, 20) as usage, index (index)}<li>{#if usage.kind === "global_data"}<span>Donnée globale</span><code>{usage.data_label ?? usage.data_address}</code>{:else}<span>{usage.kind === "function_parameter" ? `Paramètre ${usage.parameter_name ?? ""}` : "Type de retour"}</span><button type="button" onclick={() => openFunction(usage.function_address)}>{usage.function_name}</button>{/if}</li>{/each}</ul>{/if}
+                    </section>
                   </div>
-
-                  {#if expandedDetectedTypeKey === typeKey}
-                    <div class="global-strings-functions">
-                      {#if type.kind === "typedef"}
-                        <p>Alias for <code>{type.target_type_name}</code></p>
-                      {:else if type.kind === "enum"}
-                        <ul>
-                          {#each type.enum_values as enumValue (enumValue.name)}
-                            <li><code>{enumValue.name}</code> = {enumValue.value}</li>
-                          {/each}
-                        </ul>
-                      {:else if type.fields.length > 0}
-                        <ul>
-                          {#each type.fields as field (field.offset + (field.name ?? ""))}
-                            <li>
-                              +{field.offset}
-                              <code>{field.name ?? "(anonymous)"}</code>:
-                              <code>{field.data_type}</code>
-                            </li>
-                          {/each}
-                        </ul>
-                      {:else}
-                        <p>No known fields (opaque).</p>
-                      {/if}
-
-                      {#if type.usages.length > 0}
-                        <p class="global-strings-stats">Usages</p>
-                        <ul>
-                          {#each type.usages as usage, index (index)}
-                            <li>
-                              {#if usage.kind === "global_data"}
-                                global data <code>{usage.data_address}</code>
-                                {usage.data_label ? `(${usage.data_label})` : ""}
-                              {:else}
-                                {usage.kind === "function_parameter"
-                                  ? `parameter "${usage.parameter_name}" of`
-                                  : "return type of"}
-                                <code>{usage.function_name}</code>
-                                <button
-                                  type="button"
-                                  class="global-strings-function"
-                                  onclick={() => openFunction(usage.function_address)}
-                                >
-                                  Select function
-                                </button>
-                              {/if}
-                            </li>
-                          {/each}
-                        </ul>
-                      {/if}
-                    </div>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
+                </article>
+              {/if}
+            </div>
           {/if}
         {/if}
       </section>
@@ -3678,66 +3611,8 @@ interface ApplyRenamesResult {
     font-weight: 700;
   }
 
-  .global-strings {
-    margin-top: 2rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #374151;
-  }
-
-  .global-strings h2 {
-    margin: 0 0 1rem;
-    font-size: 1.25rem;
-  }
-
   .global-strings-search {
     margin-bottom: 0.75rem;
-  }
-
-  .global-strings-stats {
-    margin: 0 0 0.75rem;
-    color: #94a3b8;
-    font-size: 0.85rem;
-  }
-
-  .global-strings-list {
-    display: grid;
-    max-height: 480px;
-    margin: 0;
-    padding: 0;
-    gap: 0.5rem;
-    overflow-y: auto;
-    list-style: none;
-  }
-
-  .global-strings-list li {
-    padding: 0.65rem;
-    border: 1px solid #374151;
-    border-radius: 0.5rem;
-    background-color: #1f2937;
-  }
-
-  .global-strings-entry-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .global-strings-entry-header code {
-    flex-shrink: 0;
-    color: #93c5fd;
-  }
-
-  .global-strings-value {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .global-strings-value em {
-    margin-left: 0.35rem;
-    color: #94a3b8;
-    font-style: normal;
   }
 
   .global-strings-count {
@@ -3745,35 +3620,6 @@ interface ApplyRenamesResult {
     color: #94a3b8;
     font-size: 0.8rem;
     white-space: nowrap;
-  }
-
-  .global-strings-functions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 0.6rem;
-  }
-
-  .global-strings-function {
-    padding: 0.3rem 0.6rem;
-    border: 1px solid #3b82f6;
-    border-radius: 999px;
-    background-color: #172554;
-    color: #bfdbfe;
-    font-size: 0.8rem;
-    font-weight: 400;
-    cursor: pointer;
-  }
-
-  .global-strings-function:hover:not(:disabled) {
-    background-color: #1e3a8a;
-  }
-
-  .global-strings-function:disabled {
-    background-color: #1e3a5f;
-    color: #f9fafb;
-    cursor: default;
-    opacity: 1;
   }
 
   .saved-projects {
@@ -3980,28 +3826,6 @@ interface ApplyRenamesResult {
     .comparison-unmatched-grid {
       grid-template-columns: 1fr;
     }
-  }
-
-  .external-entry-points-controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .external-entry-points-controls .global-strings-search {
-    flex: 1 1 auto;
-    margin-bottom: 0;
-  }
-
-  .external-entry-points-toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    color: #94a3b8;
-    font-size: 0.85rem;
-    white-space: nowrap;
   }
 
   .backend-check {
@@ -4652,7 +4476,6 @@ interface ApplyRenamesResult {
   .saved-projects,
   .ghidra-setup,
   .summary,
-  .global-strings,
   .function-explorer {
     margin-top: 0;
   }
@@ -6224,6 +6047,148 @@ interface ApplyRenamesResult {
   .identification-complete h3 { margin: 0.8rem 0 0.2rem; }
   .identification-complete p { margin: 0; color: #8292ad; font-size: 0.72rem; }
 
+  /* Shared presentation for strings, types, and imports/exports. */
+  .data-workspace {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .data-workspace-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .data-workspace-header h2 { margin: 0.18rem 0; font-size: 1.22rem; }
+  .data-workspace-header > div > span { color: #8292ad; font-size: 0.68rem; }
+  .data-workspace-header dl { display: flex; margin: 0; gap: 0.45rem; }
+  .data-workspace-header dl div { min-width: 88px; padding: 0.45rem 0.6rem; border: 1px solid #263750; border-radius: 7px; background: #0e1a2d; }
+  .data-workspace-header dt { color: #8292ad; font-size: 0.56rem; }
+  .data-workspace-header dd { margin: 0.12rem 0 0; color: #67e8f9; font-size: 0.96rem; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .data-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.6rem;
+    border: 1px solid #22324a;
+    border-radius: 8px;
+    background: #0b1423;
+  }
+
+  .data-toolbar > input[type="search"] { min-width: 260px; flex: 1 1 auto; padding: 0.48rem 0.65rem; font-size: 0.68rem; }
+  .data-toolbar select { padding: 0.48rem 0.65rem; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #e2e8f0; font-size: 0.66rem; }
+  .data-toolbar > span,
+  .data-toolbar label { color: #8292ad; font-size: 0.62rem; white-space: nowrap; }
+  .data-toolbar label { display: flex; align-items: center; gap: 0.35rem; }
+
+  .data-table-card {
+    border: 1px solid #22324a;
+    border-radius: 8px;
+    background: #0b1423;
+    overflow: hidden;
+  }
+
+  .data-table-card table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .data-table-card th { padding: 0.52rem 0.7rem; background: #101d30; color: #8292ad; font-size: 0.58rem; font-weight: 700; text-align: left; text-transform: uppercase; letter-spacing: 0.035em; }
+  .data-table-card td { height: 37px; padding: 0.45rem 0.7rem; border-top: 1px solid #1d2a40; color: #dbe5f2; font-size: 0.66rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .data-table-card tbody tr:hover { background: #101d30; }
+  .data-table-card td code { color: #7db7e8; font-size: 0.6rem; }
+  .data-table-card td strong { color: #f1f5f9; }
+  .data-table-card td > button { padding: 0.3rem 0.55rem; border: 1px solid #4c3a83; background: #211845; color: #ddd6fe; font-size: 0.58rem; }
+  .data-table-card td > button:hover:not(:disabled) { background: #352267; }
+
+  .strings-table th:nth-child(1) { width: 14%; }
+  .strings-table th:nth-child(2) { width: 42%; }
+  .strings-table th:nth-child(3) { width: 12%; text-align: center; }
+  .strings-table th:nth-child(4) { width: 32%; }
+  .strings-table td:nth-child(2) span { display: block; overflow: hidden; text-overflow: ellipsis; }
+  .strings-table td:nth-child(3) { color: #67e8f9; text-align: center; }
+
+  .data-function-chips { display: flex; align-items: center; gap: 0.28rem; overflow: hidden; }
+  .data-function-chips button { max-width: 110px; padding: 0.25rem 0.45rem; border: 1px solid #315da0; border-radius: 999px; background: #102447; color: #bfdbfe; font-size: 0.55rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .data-function-chips button:hover:not(:disabled) { background: #1e3a8a; }
+  .data-function-chips em,
+  .data-function-chips span { color: #71819a; font-size: 0.56rem; font-style: normal; }
+
+  .data-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.5rem 0.65rem;
+    border-top: 1px solid #22324a;
+  }
+  .data-pagination.compact { justify-content: center; }
+  .data-pagination button { padding: 0.32rem 0.55rem; border: 1px solid #354765; background: #111e31; color: #d6e0ee; font-size: 0.58rem; }
+  .data-pagination button:hover:not(:disabled) { border-color: #8b5cf6; background: #211845; }
+  .data-pagination button:disabled { cursor: default; opacity: 0.3; }
+  .data-pagination span { color: #8292ad; font-size: 0.6rem; }
+  .data-empty { display: grid; min-height: 280px; place-items: center; margin: 0; color: #8292ad; font-size: 0.72rem; text-align: center; }
+
+  .data-subtabs { display: flex; gap: 0.3rem; padding-bottom: 0.45rem; border-bottom: 1px solid #22324a; }
+  .data-subtabs button { display: flex; align-items: center; gap: 0.4rem; padding: 0.45rem 0.65rem; border-bottom: 2px solid transparent; border-radius: 5px 5px 0 0; background: transparent; color: #8292ad; font-size: 0.66rem; }
+  .data-subtabs button span { padding: 0.1rem 0.35rem; border-radius: 999px; background: #1b2940; font-size: 0.52rem; }
+  .data-subtabs button:hover:not(:disabled) { background: #111e31; color: #e2e8f0; }
+  .data-subtabs button.active { border-bottom-color: #8b5cf6; background: #211845; color: #ede9fe; }
+
+  .io-table th:nth-child(1) { width: 15%; }
+  .io-table th:nth-child(2) { width: 27%; }
+  .io-table th:nth-child(3) { width: 28%; }
+  .io-table th:nth-child(4) { width: 18%; }
+  .io-table th:nth-child(5) { width: 12%; }
+  .exports-table th:nth-child(1) { width: 20%; }
+  .exports-table th:nth-child(2) { width: 45%; }
+  .exports-table th:nth-child(3) { width: 20%; }
+  .exports-table th:nth-child(4) { width: 15%; }
+  .data-kind-badge { display: inline-flex; padding: 0.18rem 0.42rem; border: 1px solid #315da0; border-radius: 999px; background: #102447; color: #bfdbfe; font-size: 0.54rem; }
+
+  .libraries-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.65rem; }
+  .libraries-grid article { display: flex; align-items: center; gap: 0.7rem; padding: 0.8rem; border: 1px solid #263750; border-radius: 8px; background: #0e1a2d; }
+  .libraries-grid article > span { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border-radius: 7px; background: #211845; color: #c4b5fd; }
+  .libraries-grid article div { display: grid; min-width: 0; gap: 0.15rem; }
+  .libraries-grid strong { overflow: hidden; color: #e5edf8; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+  .libraries-grid small { color: #8292ad; font-size: 0.56rem; }
+
+  .types-layout { display: grid; grid-template-columns: minmax(280px, 0.7fr) minmax(620px, 2.3fr); gap: 0.7rem; align-items: start; }
+  .types-list-card,
+  .type-detail-card { border: 1px solid #22324a; border-radius: 8px; background: #0b1423; overflow: hidden; }
+  .types-list-card ul { display: grid; margin: 0; padding: 0; list-style: none; }
+  .types-list-card li { border-bottom: 1px solid #1d2a40; }
+  .types-list-card li > button { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.52rem 0.65rem; border-radius: 0; background: transparent; color: #e2e8f0; text-align: left; }
+  .types-list-card li > button:hover:not(:disabled) { background: #13243a; }
+  .types-list-card li > button.active { box-shadow: inset 3px 0 #8b5cf6; background: #172746; }
+  .types-list-card li > button span { display: grid; min-width: 0; gap: 0.08rem; }
+  .types-list-card li > button span:last-child { text-align: right; }
+  .types-list-card small { color: #a78bfa; font-size: 0.5rem; text-transform: uppercase; }
+  .types-list-card strong { overflow: hidden; font-size: 0.67rem; text-overflow: ellipsis; white-space: nowrap; }
+  .types-list-card b,
+  .types-list-card em { color: #8292ad; font-size: 0.54rem; font-style: normal; font-weight: 400; }
+
+  .type-detail-card > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.7rem 0.8rem; border-bottom: 1px solid #22324a; }
+  .type-detail-card > header > div { min-width: 0; }
+  .type-detail-card h3 { margin: 0.25rem 0 0.12rem; font-size: 1rem; overflow-wrap: anywhere; }
+  .type-detail-card > header code { color: #7db7e8; font-size: 0.55rem; }
+  .type-detail-card > header dl { display: flex; margin: 0; gap: 0.35rem; }
+  .type-detail-card > header dl div { min-width: 65px; padding: 0.35rem 0.45rem; border: 1px solid #293a55; border-radius: 6px; background: #101d30; }
+  .type-detail-card dt { color: #8292ad; font-size: 0.5rem; }
+  .type-detail-card dd { margin: 0.1rem 0 0; color: #e5edf8; font-size: 0.65rem; }
+  .type-detail-grid { display: grid; grid-template-columns: minmax(360px, 1.25fr) minmax(260px, 0.75fr); min-height: 410px; }
+  .type-detail-grid > section { min-width: 0; padding: 0.75rem; }
+  .type-detail-grid > section + section { border-left: 1px solid #22324a; }
+  .type-detail-grid h4 { margin: 0 0 0.55rem; color: #c4b5fd; font-size: 0.72rem; }
+  .type-detail-grid p { color: #8292ad; font-size: 0.65rem; }
+  .type-detail-grid table { width: 100%; border-collapse: collapse; font-size: 0.61rem; }
+  .type-detail-grid th { padding: 0.4rem; border-bottom: 1px solid #293a55; color: #8292ad; text-align: left; }
+  .type-detail-grid td { padding: 0.42rem; border-bottom: 1px solid #1d2a40; color: #dbe5f2; overflow-wrap: anywhere; }
+  .type-detail-grid td code { color: #93c5fd; }
+  .type-usage-list { display: grid; margin: 0; padding: 0; gap: 0.35rem; list-style: none; }
+  .type-usage-list li { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.42rem 0.5rem; border: 1px solid #293a55; border-radius: 6px; background: #101d30; }
+  .type-usage-list span { color: #8292ad; font-size: 0.56rem; }
+  .type-usage-list button { max-width: 150px; padding: 0; background: transparent; color: #93c5fd; font-size: 0.6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .type-usage-list button:hover:not(:disabled) { background: transparent; color: #67e8f9; }
+
   @media (max-width: 1320px) {
     .function-explorer { grid-template-columns: minmax(370px, 0.9fr) minmax(580px, 2fr); }
     .function-overview-grid { grid-template-columns: 1fr; }
@@ -6231,6 +6196,10 @@ interface ApplyRenamesResult {
     .identification-layout { grid-template-columns: minmax(260px, 0.7fr) minmax(560px, 2fr); }
     .identification-review-grid { grid-template-columns: 1fr; }
     .identification-code { border-top: 1px solid #22324a; border-left: 0; }
+    .types-layout { grid-template-columns: minmax(250px, 0.75fr) minmax(500px, 2fr); }
+    .type-detail-grid { grid-template-columns: 1fr; }
+    .type-detail-grid > section + section { border-top: 1px solid #22324a; border-left: 0; }
+    .libraries-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 
   @media (max-width: 980px) {
@@ -6241,6 +6210,10 @@ interface ApplyRenamesResult {
     .identification-header { align-items: flex-start; flex-direction: column; }
     .identification-layout { grid-template-columns: 1fr; }
     .identification-actions { grid-template-columns: 1fr; }
+    .data-workspace-header { align-items: flex-start; flex-direction: column; }
+    .data-toolbar { align-items: stretch; flex-direction: column; }
+    .types-layout { grid-template-columns: 1fr; }
+    .libraries-grid { grid-template-columns: 1fr; }
   }
 
 
