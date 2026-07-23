@@ -340,6 +340,9 @@ interface ApplyRenamesResult {
   const functionPageSize = 15;
   let identificationPage = $state(1);
   const identificationPageSize = 10;
+  let automaticIdentificationMode = $state(false);
+  let automaticIdentificationPage = $state(1);
+  const automaticIdentificationPageSize = 12;
   let ignoredIdentificationAddresses = $state(new Set<string>());
   let isApplyingAutomaticRenames = $state(false);
   let automaticRenameError = $state("");
@@ -473,10 +476,27 @@ interface ApplyRenamesResult {
   let automaticRenameCandidates = $derived.by(() =>
     unidentifiedFunctions.flatMap((func) => {
       const candidates = identifications.get(func.entry_address) ?? [];
-      const uniqueNames = [...new Set(candidates.map((candidate) => candidate.name))];
-      if (uniqueNames.length !== 1 || candidates.length === 0) return [];
-      return [{ func, candidate: candidates[0] }];
+      const rankedCandidates = [...candidates]
+        .filter((candidate) => !isGeneratedFunctionName(candidate.name))
+        .sort((a, b) => b.overall_score - a.overall_score);
+      if (rankedCandidates.length === 0) return [];
+      return [{ func, candidate: rankedCandidates[0], alternativeCount: rankedCandidates.length - 1 }];
     }),
+  );
+  let automaticIdentificationPageCount = $derived(
+    Math.max(
+      1,
+      Math.ceil(automaticRenameCandidates.length / automaticIdentificationPageSize),
+    ),
+  );
+  let currentAutomaticIdentificationPage = $derived(
+    Math.min(automaticIdentificationPage, automaticIdentificationPageCount),
+  );
+  let paginatedAutomaticRenameCandidates = $derived(
+    automaticRenameCandidates.slice(
+      (currentAutomaticIdentificationPage - 1) * automaticIdentificationPageSize,
+      currentAutomaticIdentificationPage * automaticIdentificationPageSize,
+    ),
   );
 
   let selectedIdentificationCandidates = $derived(
@@ -852,6 +872,8 @@ interface ApplyRenamesResult {
       identificationProgramSha = currentProgramSha;
       ignoredIdentificationAddresses = new Set();
       identificationPage = 1;
+      automaticIdentificationMode = false;
+      automaticIdentificationPage = 1;
       automaticRenameError = "";
       automaticRenameSuccess = "";
     }
@@ -1360,7 +1382,7 @@ interface ApplyRenamesResult {
     const batch = automaticRenameCandidates.slice(0, 500);
     if (batch.length === 0) return;
     if (!window.confirm(
-      `Appliquer ${batch.length} renommage(s) dans Ghidra ? Seules les fonctions avec un nom FunctionID unique sont incluses.`,
+      `Appliquer ${batch.length} renommage(s) dans Ghidra ? Pour chaque fonction, le candidat FunctionID ayant le score le plus élevé sera utilisé.`,
     )) return;
 
     automaticRenameError = "";
@@ -2799,24 +2821,70 @@ interface ApplyRenamesResult {
           </dl>
         </header>
 
-        <section class="automatic-rename-panel">
+        <section class="identification-mode-switch">
           <div>
-            <strong>Renommage automatique contrôlé</strong>
-            <span>
-              {automaticRenameCandidates.length} proposition(s) prête(s). Règle actuelle : un seul nom
-              FunctionID possible pour la fonction. Aucun choix ambigu n'est inclus.
-            </span>
+            <strong>{automaticIdentificationMode ? "Choix automatique activé" : "Validation manuelle activée"}</strong>
+            <span>{automaticIdentificationMode ? "L'application retient le meilleur score FunctionID et prépare le lot." : "Tu examines et confirmes chaque fonction une par une."}</span>
           </div>
           <button
             type="button"
-            disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
-            onclick={applyAutomaticFunctionRenames}
-          >{isApplyingAutomaticRenames ? "Application en cours…" : `Vérifier et appliquer (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
+            role="switch"
+            aria-checked={automaticIdentificationMode}
+            class:active={automaticIdentificationMode}
+            onclick={() => {
+              automaticIdentificationMode = !automaticIdentificationMode;
+              automaticIdentificationPage = 1;
+            }}
+          ><span></span><b>Choix automatique</b></button>
         </section>
-        {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
-        {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
 
-        {#if identificationQueue.length === 0}
+        {#if automaticIdentificationMode}
+          <section class="automatic-rename-panel">
+            <div>
+              <strong>{automaticRenameCandidates.length} nom(s) peuvent être choisis automatiquement</strong>
+              <span>
+                Pour chaque fonction, l'application retient le candidat FunctionID ayant le score le plus élevé.
+                Les fonctions sans correspondance restent non renommées et retournent dans le mode manuel.
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
+              onclick={applyAutomaticFunctionRenames}
+            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les meilleurs noms (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
+          </section>
+          {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
+          {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
+
+          <section class="automatic-choice-preview">
+            <header>
+              <div><h3>Choix préparés</h3><span>Chaque ligne conserve la preuve utilisée avant l'écriture dans Ghidra.</span></div>
+              <small>Page {currentAutomaticIdentificationPage} sur {automaticIdentificationPageCount}</small>
+            </header>
+            {#if paginatedAutomaticRenameCandidates.length > 0}
+              <table>
+                <thead><tr><th>Fonction actuelle</th><th>Nom choisi</th><th>Preuve</th><th>Autres choix</th></tr></thead>
+                <tbody>
+                  {#each paginatedAutomaticRenameCandidates as item (item.func.entry_address)}
+                    <tr>
+                      <td><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></td>
+                      <td>{item.candidate.name}</td>
+                      <td><span>FunctionID · score {item.candidate.overall_score.toFixed(1)}</span><small>{item.candidate.library_family} {item.candidate.library_version} · {item.candidate.match_mode}</small></td>
+                      <td>{item.alternativeCount === 0 ? "Aucun" : `${item.alternativeCount} moins bien classé(s)`}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {:else}
+              <div class="no-automatic-choice"><strong>Aucun nom automatique disponible</strong><span>Repasse en validation manuelle pour examiner le pseudocode des fonctions restantes.</span></div>
+            {/if}
+            <nav class="identification-pagination" aria-label="Pages des choix automatiques">
+              <button type="button" disabled={currentAutomaticIdentificationPage === 1} onclick={() => (automaticIdentificationPage = Math.max(1, currentAutomaticIdentificationPage - 1))}>←</button>
+              <span>{currentAutomaticIdentificationPage} / {automaticIdentificationPageCount}</span>
+              <button type="button" disabled={currentAutomaticIdentificationPage === automaticIdentificationPageCount} onclick={() => (automaticIdentificationPage = Math.min(automaticIdentificationPageCount, currentAutomaticIdentificationPage + 1))}>→</button>
+            </nav>
+          </section>
+        {:else if identificationQueue.length === 0}
           <div class="identification-complete">
             <span aria-hidden="true">✓</span>
             <h3>La file est terminée</h3>
@@ -5871,6 +5939,58 @@ interface ApplyRenamesResult {
   .identification-header dt { color: #8292ad; font-size: 0.58rem; }
   .identification-header dd { margin: 0.12rem 0 0; color: #67e8f9; font-size: 1rem; font-weight: 800; }
 
+  .identification-mode-switch {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid #293a55;
+    border-radius: 8px;
+    background: #0d182a;
+  }
+
+  .identification-mode-switch > div { display: grid; gap: 0.15rem; }
+  .identification-mode-switch strong { color: #e5edf8; font-size: 0.75rem; }
+  .identification-mode-switch > div span { color: #8292ad; font-size: 0.62rem; }
+  .identification-mode-switch > button {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid #3a4b68;
+    background: #111e31;
+    color: #cbd5e1;
+    font-size: 0.64rem;
+  }
+
+  .identification-mode-switch > button > span {
+    position: relative;
+    width: 30px;
+    height: 16px;
+    border-radius: 999px;
+    background: #334155;
+    transition: background 140ms ease;
+  }
+
+  .identification-mode-switch > button > span::after {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #e2e8f0;
+    content: "";
+    transition: transform 140ms ease;
+  }
+
+  .identification-mode-switch > button.active { border-color: #8b5cf6; background: #241b48; color: #ede9fe; }
+  .identification-mode-switch > button.active > span { background: #7c3aed; }
+  .identification-mode-switch > button.active > span::after { transform: translateX(14px); }
+  .identification-mode-switch > button:hover:not(:disabled) { background: #1c2a40; }
+
   .automatic-rename-panel {
     display: flex;
     align-items: center;
@@ -5887,6 +6007,45 @@ interface ApplyRenamesResult {
   .automatic-rename-panel span { color: #91a0b8; font-size: 0.64rem; }
   .automatic-rename-panel button { flex: 0 0 auto; padding: 0.5rem 0.7rem; background: #6d28d9; color: white; font-size: 0.66rem; }
   .automatic-rename-panel button:hover:not(:disabled) { background: #7c3aed; }
+
+  .automatic-choice-preview {
+    border: 1px solid #22324a;
+    border-radius: 8px;
+    background: #0b1423;
+    overflow: hidden;
+  }
+
+  .automatic-choice-preview > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0.75rem;
+    border-bottom: 1px solid #22324a;
+  }
+
+  .automatic-choice-preview > header div { display: grid; gap: 0.12rem; }
+  .automatic-choice-preview h3 { margin: 0; font-size: 0.8rem; }
+  .automatic-choice-preview header span,
+  .automatic-choice-preview header small { color: #8292ad; font-size: 0.58rem; }
+  .automatic-choice-preview table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .automatic-choice-preview th { padding: 0.5rem 0.65rem; background: #101d30; color: #8292ad; font-size: 0.58rem; text-align: left; }
+  .automatic-choice-preview th:nth-child(1) { width: 24%; }
+  .automatic-choice-preview th:nth-child(2) { width: 23%; }
+  .automatic-choice-preview th:nth-child(3) { width: 35%; }
+  .automatic-choice-preview th:nth-child(4) { width: 18%; }
+  .automatic-choice-preview td { padding: 0.55rem 0.65rem; border-top: 1px solid #1d2a40; color: #dbe5f2; font-size: 0.66rem; overflow: hidden; text-overflow: ellipsis; }
+  .automatic-choice-preview td:first-child,
+  .automatic-choice-preview td:nth-child(3) { display: grid; gap: 0.12rem; }
+  .automatic-choice-preview td strong,
+  .automatic-choice-preview td:nth-child(2) { color: #f1f5f9; font-weight: 700; }
+  .automatic-choice-preview td:nth-child(2) { color: #86efac; }
+  .automatic-choice-preview td code { color: #7db7e8; font-size: 0.56rem; }
+  .automatic-choice-preview td span { color: #a7f3d0; }
+  .automatic-choice-preview td small { color: #8292ad; font-size: 0.55rem; }
+  .no-automatic-choice { display: grid; place-items: center; min-height: 270px; align-content: center; gap: 0.25rem; color: #8292ad; text-align: center; }
+  .no-automatic-choice strong { color: #cbd5e1; font-size: 0.78rem; }
+  .no-automatic-choice span { font-size: 0.65rem; }
 
   .identification-layout {
     display: grid;
