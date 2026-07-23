@@ -336,6 +336,8 @@ interface ApplyRenamesResult {
   let importedExport = $state<GhidraExport | null>(null);
   let selectedFunctionAddress = $state<string | null>(null);
   let functionSearch = $state("");
+  let functionPage = $state(1);
+  const functionPageSize = 15;
   let graphNavigationHistory = $state<string[]>([]);
   let graphHistoryProgramSha: string | null = null;
 
@@ -355,6 +357,17 @@ interface ApplyRenamesResult {
         func.entry_address.toLowerCase().includes(query),
     );
   });
+
+  let functionPageCount = $derived(
+    Math.max(1, Math.ceil(filteredFunctions.length / functionPageSize)),
+  );
+  let currentFunctionPage = $derived(Math.min(functionPage, functionPageCount));
+  let paginatedFunctions = $derived(
+    filteredFunctions.slice(
+      (currentFunctionPage - 1) * functionPageSize,
+      currentFunctionPage * functionPageSize,
+    ),
+  );
 
   let importError = $state("");
   let isImporting = $state(false);
@@ -651,7 +664,7 @@ interface ApplyRenamesResult {
   const detailTabs: { id: DetailTab; label: string }[] = [
     { id: "overview", label: "Aperçu" },
     { id: "code", label: "Code décompilé" },
-    { id: "evidence", label: "Preuves" },
+    { id: "evidence", label: "Preuves & renommage" },
     { id: "strings", label: "Chaînes" },
     { id: "calls", label: "Appels" },
   ];
@@ -2766,14 +2779,20 @@ interface ApplyRenamesResult {
             <h2 id="functions-title">Fonctions</h2>
             <span>{filteredFunctions.length.toLocaleString()} sur {importedExport.functions.length.toLocaleString()}</span>
           </div>
-          <input type="search" placeholder="Rechercher une fonction…" bind:value={functionSearch} />
+          <input
+            type="search"
+            placeholder="Rechercher une fonction…"
+            bind:value={functionSearch}
+            oninput={() => (functionPage = 1)}
+          />
         </header>
 
         {#if importedExport.functions.length === 0}
           <p>No functions were found in this export.</p>
         {:else}
-          <div class="function-table-wrap">
-            <table class="function-table">
+          <div class="function-list-column">
+            <div class="function-table-wrap">
+              <table class="function-table">
               <thead>
                 <tr>
                   <th scope="col">Nom</th>
@@ -2784,7 +2803,7 @@ interface ApplyRenamesResult {
                 </tr>
               </thead>
               <tbody>
-                {#each filteredFunctions as func (func.entry_address)}
+                {#each paginatedFunctions as func (func.entry_address)}
                   {@const topCandidate = topIdentificationFor(func.entry_address)}
                   <tr
                     class:active={func.entry_address === selectedFunctionAddress}
@@ -2815,7 +2834,22 @@ interface ApplyRenamesResult {
                   </tr>
                 {/each}
               </tbody>
-            </table>
+              </table>
+            </div>
+
+            <nav class="function-pagination" aria-label="Pages de fonctions">
+              <button
+                type="button"
+                disabled={currentFunctionPage === 1}
+                onclick={() => (functionPage = Math.max(1, currentFunctionPage - 1))}
+              >← Précédente</button>
+              <span>Page {currentFunctionPage} sur {functionPageCount}</span>
+              <button
+                type="button"
+                disabled={currentFunctionPage === functionPageCount}
+                onclick={() => (functionPage = Math.min(functionPageCount, currentFunctionPage + 1))}
+              >Suivante →</button>
+            </nav>
           </div>
 
         {#if selectedFunction}
@@ -2900,6 +2934,52 @@ interface ApplyRenamesResult {
                       </ul>
                     {/if}
                   </section>
+
+                  <section class="function-section primary-identification-card">
+                    <div class="function-section-heading">
+                      <div>
+                        <h4>Preuves et renommage</h4>
+                        <span>FunctionID et BSim, sans renommage automatique</span>
+                      </div>
+                      <button type="button" onclick={() => (activeDetailTab = "evidence")}>Toutes les preuves →</button>
+                    </div>
+
+                    {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
+                      <div class="primary-rename-row">
+                        <input type="text" maxlength="512" aria-label="Nom de fonction à appliquer" bind:value={functionRenameDraft} />
+                        <button
+                          type="button"
+                          disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
+                          onclick={applySelectedFunctionRename}
+                        >{isApplyingFunctionRename ? "Application…" : "Appliquer dans Ghidra"}</button>
+                      </div>
+                      {#if functionRenameError}<p class="error" role="alert">{functionRenameError}</p>{/if}
+                      {#if functionRenameSuccess}<p class="status">{functionRenameSuccess}</p>{/if}
+                    {:else}
+                      <p class="rename-unavailable">Le renommage demande un projet Ghidra local actif et une fonction interne.</p>
+                    {/if}
+
+                    <div class="primary-evidence-list">
+                      {#each selectedIdentificationCandidates.slice(0, 2) as candidate}
+                        <button type="button" onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
+                          <span><strong>{candidate.name}</strong><small>FunctionID · {candidate.library_family} {candidate.library_version}</small></span>
+                          <code>score {candidate.overall_score.toFixed(1)}</code>
+                        </button>
+                      {/each}
+                      {#if selectedBsimResult?.status === "available"}
+                        {#each selectedBsimResult.matches.slice(0, 2) as candidate}
+                          <button type="button" onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
+                            <span><strong>{candidate.name}</strong><small>BSim · {candidate.executable}</small></span>
+                            <code>{candidate.similarity.toFixed(3)}</code>
+                          </button>
+                        {/each}
+                      {/if}
+                    </div>
+
+                    {#if selectedIdentificationCandidates.length === 0 && (selectedBsimResult?.matches.length ?? 0) === 0}
+                      <p class="no-primary-evidence">Aucune correspondance suffisamment fiable n'a été trouvée.</p>
+                    {/if}
+                  </section>
                 </div>
 
                 <section class="function-section function-graph-preview">
@@ -2970,24 +3050,6 @@ interface ApplyRenamesResult {
             </div>
 
             <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "evidence"}>
-              {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
-                <section class="function-section ghidra-rename-control compact-rename-control">
-                  <div class="rename-heading">
-                    <div><h4>Nom à appliquer dans Ghidra</h4><p>Sélectionne une preuve ci-dessous ou saisis un nom, puis confirme.</p></div>
-                  </div>
-                  <div>
-                    <input type="text" maxlength="512" bind:value={functionRenameDraft} />
-                    <button
-                      type="button"
-                      disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
-                      onclick={applySelectedFunctionRename}
-                    >{isApplyingFunctionRename ? "Application…" : "Appliquer le nom"}</button>
-                  </div>
-                  {#if functionRenameError}<p class="error" role="alert">{functionRenameError}</p>{/if}
-                  {#if functionRenameSuccess}<p class="status">{functionRenameSuccess}</p>{/if}
-                </section>
-              {/if}
-
               {#if selectedIdentificationCandidates.length === 0 && !selectedBsimResult}
                 <p class="detail-label">Aucune preuve disponible pour cette fonction.</p>
               {/if}
@@ -3868,21 +3930,6 @@ interface ApplyRenamesResult {
 
   .function-section .bsim-error {
     color: #fca5a5;
-  }
-
-  .ghidra-rename-control > div {
-    display: flex;
-    gap: 0.6rem;
-  }
-
-  .ghidra-rename-control input {
-    min-width: 0;
-    flex: 1 1 auto;
-    padding: 0.55rem 0.7rem;
-    border: 1px solid #475569;
-    border-radius: 0.5rem;
-    background-color: #0f172a;
-    color: #f8fafc;
   }
 
   .call-graph-controls {
@@ -5501,17 +5548,143 @@ interface ApplyRenamesResult {
     background: transparent;
   }
 
-  .compact-rename-control {
-    padding: 0.75rem;
-    border: 1px solid #283954;
+  .function-list-column {
+    min-width: 0;
+  }
+
+  .function-list-column .function-table-wrap {
+    max-height: none;
+    overflow: hidden;
+  }
+
+  .function-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.55rem 0.2rem 0;
+  }
+
+  .function-pagination span {
+    color: #8292ad;
+    font-size: 0.68rem;
+    white-space: nowrap;
+  }
+
+  .function-pagination button {
+    padding: 0.38rem 0.55rem;
+    border: 1px solid #334765;
+    background: #111e31;
+    color: #cbd8ea;
+    font-size: 0.66rem;
+  }
+
+  .function-pagination button:hover:not(:disabled) {
+    border-color: #8b5cf6;
+    background: #211845;
+    color: #fff;
+  }
+
+  .function-pagination button:disabled {
+    cursor: default;
+    opacity: 0.35;
+  }
+
+  .function-table-name:hover:not(:disabled),
+  .function-table-name:focus-visible {
+    background: transparent;
+    color: #67e8f9;
+    outline: none;
+    text-decoration-color: currentColor;
+  }
+
+  .function-table tbody tr.active .function-table-name {
+    color: #ffffff;
+  }
+
+  .primary-identification-card {
+    padding: 0.7rem;
+    border: 1px solid #30415f;
     border-radius: 7px;
     background: #0e1a2d;
   }
 
-  .compact-rename-control .rename-heading h4 { margin-bottom: 0.15rem; }
-  .compact-rename-control .rename-heading p { margin: 0 0 0.6rem; font-size: 0.7rem; }
-  .compact-rename-control input { font-size: 0.75rem; }
-  .compact-rename-control button { flex: 0 0 auto; padding: 0.5rem 0.75rem; font-size: 0.7rem; }
+  .primary-rename-row {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.65rem;
+  }
+
+  .primary-rename-row input {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding: 0.48rem 0.6rem;
+    border: 1px solid #3a4c69;
+    border-radius: 6px;
+    background: #091423;
+    color: #f8fafc;
+    font-size: 0.7rem;
+  }
+
+  .primary-rename-row button {
+    flex: 0 0 auto;
+    padding: 0.48rem 0.6rem;
+    background: #6d28d9;
+    color: #fff;
+    font-size: 0.66rem;
+  }
+
+  .primary-rename-row button:hover:not(:disabled) { background: #7c3aed; }
+
+  .primary-evidence-list {
+    display: grid;
+    gap: 0.35rem;
+    margin-top: 0.55rem;
+  }
+
+  .primary-evidence-list button {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid #293a55;
+    background: #101d30;
+    color: #e8eef8;
+    text-align: left;
+  }
+
+  .primary-evidence-list button:hover:not(:disabled) {
+    border-color: #22d3ee;
+    background: #13283b;
+  }
+
+  .primary-evidence-list button span {
+    display: grid;
+    min-width: 0;
+    gap: 0.1rem;
+  }
+
+  .primary-evidence-list strong {
+    overflow: hidden;
+    font-size: 0.7rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .primary-evidence-list small,
+  .primary-evidence-list code {
+    color: #8fa1bd;
+    font-size: 0.58rem;
+  }
+
+  .rename-unavailable,
+  .no-primary-evidence {
+    margin: 0.55rem 0 0;
+    color: #7f90aa;
+    font-size: 0.66rem;
+  }
 
   @media (max-width: 1320px) {
     .function-explorer { grid-template-columns: minmax(370px, 0.9fr) minmax(580px, 2fr); }
