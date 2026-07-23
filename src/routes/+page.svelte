@@ -150,6 +150,15 @@ interface FunctionIdentification {
   candidates: FidCandidate[];
 }
 
+interface AutomaticRenameChoice {
+  func: GhidraFunction;
+  name: string;
+  source: "function_id" | "bsim";
+  scoreLabel: string;
+  evidenceLabel: string;
+  alternativeCount: number;
+}
+
 type CallGraphDirection = "outgoing" | "incoming" | "both";
 
 interface CallGraphNode {
@@ -473,16 +482,47 @@ interface ApplyRenamesResult {
   let functionRenameSuccess = $state("");
   let renameDraftAddress: string | null = null;
 
-  let automaticRenameCandidates = $derived.by(() =>
-    unidentifiedFunctions.flatMap((func) => {
-      const candidates = identifications.get(func.entry_address) ?? [];
-      const rankedCandidates = [...candidates]
+  let automaticRenameCandidates = $derived.by<AutomaticRenameChoice[]>(() => {
+    const choices: AutomaticRenameChoice[] = [];
+    for (const func of unidentifiedFunctions) {
+      const fidCandidates = identifications.get(func.entry_address) ?? [];
+      const rankedFidCandidates = [...fidCandidates]
         .filter((candidate) => !isGeneratedFunctionName(candidate.name))
         .sort((a, b) => b.overall_score - a.overall_score);
-      if (rankedCandidates.length === 0) return [];
-      return [{ func, candidate: rankedCandidates[0], alternativeCount: rankedCandidates.length - 1 }];
-    }),
-  );
+      if (rankedFidCandidates.length > 0) {
+        const candidate = rankedFidCandidates[0];
+        choices.push({
+          func,
+          name: candidate.name,
+          source: "function_id",
+          scoreLabel: `score ${candidate.overall_score.toFixed(1)}`,
+          evidenceLabel: `${candidate.library_family} ${candidate.library_version} · ${candidate.match_mode}`,
+          alternativeCount: rankedFidCandidates.length - 1,
+        });
+        continue;
+      }
+
+      const bsim = decompileCache.get(func.entry_address)?.bsim;
+      if (bsim?.status !== "available") continue;
+      const rankedBsimCandidates = [...bsim.matches]
+        .filter((candidate) => !isGeneratedFunctionName(candidate.name))
+        .sort(
+          (a, b) =>
+            b.similarity - a.similarity || b.significance - a.significance,
+        );
+      if (rankedBsimCandidates.length === 0) continue;
+      const candidate = rankedBsimCandidates[0];
+      choices.push({
+        func,
+        name: candidate.name,
+        source: "bsim",
+        scoreLabel: `similarité ${candidate.similarity.toFixed(3)}`,
+        evidenceLabel: `${candidate.executable} · significativité ${candidate.significance.toFixed(1)}`,
+        alternativeCount: rankedBsimCandidates.length - 1,
+      });
+    }
+    return choices;
+  });
   let automaticIdentificationPageCount = $derived(
     Math.max(
       1,
@@ -1382,7 +1422,7 @@ interface ApplyRenamesResult {
     const batch = automaticRenameCandidates.slice(0, 500);
     if (batch.length === 0) return;
     if (!window.confirm(
-      `Appliquer ${batch.length} renommage(s) dans Ghidra ? Pour chaque fonction, le candidat FunctionID ayant le score le plus élevé sera utilisé.`,
+      `Appliquer ${batch.length} renommage(s) dans Ghidra ? FunctionID est prioritaire ; lorsqu'il ne trouve rien, la meilleure correspondance BSim déjà disponible est utilisée.`,
     )) return;
 
     automaticRenameError = "";
@@ -1391,9 +1431,9 @@ interface ApplyRenamesResult {
     try {
       const result = await invoke<ApplyRenamesResult>("apply_function_renames", {
         projectId: activeProjectId,
-        renames: batch.map(({ func, candidate }) => ({
+        renames: batch.map(({ func, name }) => ({
           entry_address: func.entry_address,
-          new_name: candidate.name,
+          new_name: name,
         })),
       });
       importedExport = result.imported.export;
@@ -2824,7 +2864,7 @@ interface ApplyRenamesResult {
         <section class="identification-mode-switch">
           <div>
             <strong>{automaticIdentificationMode ? "Choix automatique activé" : "Validation manuelle activée"}</strong>
-            <span>{automaticIdentificationMode ? "L'application retient le meilleur score FunctionID et prépare le lot." : "Tu examines et confirmes chaque fonction une par une."}</span>
+            <span>{automaticIdentificationMode ? "L'application retient la meilleure preuve disponible et prépare le lot." : "Tu examines et confirmes chaque fonction une par une."}</span>
           </div>
           <button
             type="button"
@@ -2843,8 +2883,8 @@ interface ApplyRenamesResult {
             <div>
               <strong>{automaticRenameCandidates.length} nom(s) peuvent être choisis automatiquement</strong>
               <span>
-                Pour chaque fonction, l'application retient le candidat FunctionID ayant le score le plus élevé.
-                Les fonctions sans correspondance restent non renommées et retournent dans le mode manuel.
+                FunctionID est prioritaire. S'il ne trouve rien, l'application utilise la meilleure correspondance
+                BSim déjà calculée. Sans preuve, aucun nom n'est inventé.
               </span>
             </div>
             <button
@@ -2868,8 +2908,8 @@ interface ApplyRenamesResult {
                   {#each paginatedAutomaticRenameCandidates as item (item.func.entry_address)}
                     <tr>
                       <td><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></td>
-                      <td>{item.candidate.name}</td>
-                      <td><span>FunctionID · score {item.candidate.overall_score.toFixed(1)}</span><small>{item.candidate.library_family} {item.candidate.library_version} · {item.candidate.match_mode}</small></td>
+                      <td>{item.name}</td>
+                      <td><span>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small></td>
                       <td>{item.alternativeCount === 0 ? "Aucun" : `${item.alternativeCount} moins bien classé(s)`}</td>
                     </tr>
                   {/each}
