@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import SetupAssistant from "$lib/SetupAssistant.svelte";
+  import ProgressRing from "$lib/ProgressRing.svelte";
 
   interface GhidraImportSummary {
     function_count: number;
@@ -333,12 +334,24 @@ interface ApplyRenamesResult {
   let importSummary = $state<GhidraImportSummary | null>(null);
   let importedExport = $state<GhidraExport | null>(null);
   let selectedFunctionAddress = $state<string | null>(null);
+  let functionSearch = $state("");
 
   let selectedFunction = $derived(
     importedExport?.functions.find(
       (func) => func.entry_address === selectedFunctionAddress,
     ) ?? null,
   );
+
+  let filteredFunctions = $derived.by(() => {
+    if (!importedExport) return [];
+    const query = functionSearch.trim().toLowerCase();
+    if (!query) return importedExport.functions;
+    return importedExport.functions.filter(
+      (func) =>
+        func.name.toLowerCase().includes(query) ||
+        func.entry_address.toLowerCase().includes(query),
+    );
+  });
 
   let importError = $state("");
   let isImporting = $state(false);
@@ -414,6 +427,36 @@ interface ApplyRenamesResult {
       ? (identifications.get(selectedFunctionAddress) ?? [])
       : [],
   );
+
+  // Real, honest stand-in for "functions identified": how many internal
+  // (non-external) functions have at least one FunctionID candidate, out of
+  // how many internal functions exist. Deliberately not a blended
+  // confidence score -- FunctionID's own scores are shown per-candidate
+  // where a function is selected, never averaged into one number here.
+  let identifiedFunctionStats = $derived.by(() => {
+    if (!importedExport) return null;
+    if (identifications.size === 0) return null;
+
+    const internalFunctions = importedExport.functions.filter(
+      (func) => !func.is_external,
+    );
+    const identifiedCount = internalFunctions.filter(
+      (func) => (identifications.get(func.entry_address)?.length ?? 0) > 0,
+    ).length;
+
+    return {
+      identifiedCount,
+      totalCount: internalFunctions.length,
+      percentage:
+        internalFunctions.length === 0
+          ? 0
+          : Math.round((identifiedCount / internalFunctions.length) * 100),
+    };
+  });
+
+  function topIdentificationFor(entryAddress: string): FidCandidate | null {
+    return identifications.get(entryAddress)?.[0] ?? null;
+  }
 
   let globalStrings = $state<GlobalStringView[] | null>(null);
   let globalStringsError = $state("");
@@ -501,6 +544,26 @@ interface ApplyRenamesResult {
   let pdfReportError = $state("");
   let pdfReportResult = $state<PdfReportResult | null>(null);
 
+  // Real on-demand decompilation progress (not a confidence/quality score):
+  // how many functions have been decompiled so far this session, out of how
+  // many exist. Reused as the overview's progress ring.
+  let decompiledProgress = $derived.by(() => {
+    if (!programOverview || programOverview.function_count === 0) return 0;
+    return Math.round(
+      (programOverview.decompiled_function_count / programOverview.function_count) * 100,
+    );
+  });
+
+  type DetailTab = "overview" | "code" | "evidence" | "strings" | "calls";
+  let activeDetailTab = $state<DetailTab>("overview");
+  const detailTabs: { id: DetailTab; label: string }[] = [
+    { id: "overview", label: "Aperçu" },
+    { id: "code", label: "Code décompilé" },
+    { id: "evidence", label: "Preuves" },
+    { id: "strings", label: "Chaînes" },
+    { id: "calls", label: "Appels" },
+  ];
+
   let callGraphDirection = $state<CallGraphDirection>("outgoing");
   let callGraphDepth = $state(3);
   let callGraphResult = $state<CallGraphNeighborhood | null>(null);
@@ -525,6 +588,38 @@ interface ApplyRenamesResult {
 
     return groups;
   });
+
+  const graphCanvasWidth = 1120;
+  const graphNodeWidth = 184;
+  const graphNodeHeight = 62;
+
+  let callGraphLayout = $derived.by(() => {
+    if (!callGraphResult) return { nodes: [], height: 360 };
+
+    const depthGroups = new Map<number, CallGraphNode[]>();
+    for (const node of callGraphResult.nodes) {
+      const group = depthGroups.get(node.depth) ?? [];
+      group.push(node);
+      depthGroups.set(node.depth, group);
+    }
+
+    const nodes = [...depthGroups.entries()].flatMap(([depth, group]) =>
+      group.map((node, index) => ({
+        ...node,
+        x: Math.round(((index + 1) * graphCanvasWidth) / (group.length + 1) - graphNodeWidth / 2),
+        y: 38 + depth * 142,
+      })),
+    );
+
+    return {
+      nodes,
+      height: Math.max(330, 138 + callGraphResult.depth_reached * 142),
+    };
+  });
+
+  let graphNodePosition = $derived(
+    new Map(callGraphLayout.nodes.map((node) => [node.entry_address, node])),
+  );
 
   let isDecompilingSelected = $derived(
     selectedFunctionAddress !== null &&
@@ -571,6 +666,7 @@ interface ApplyRenamesResult {
     functionRenameDraft = func?.name ?? "";
     functionRenameError = "";
     functionRenameSuccess = "";
+    activeDetailTab = "overview";
   });
 
   $effect(() => {
@@ -1725,7 +1821,7 @@ interface ApplyRenamesResult {
 
     {#if importSummary}
       <section
-        class="summary"
+        class="summary import-summary"
         class:view-hidden={activeWorkspaceView !== "overview"}
         aria-labelledby="summary-title"
       >
@@ -1752,6 +1848,55 @@ interface ApplyRenamesResult {
             <dd>{importSummary.string_count}</dd>
           </div>
         </dl>
+      </section>
+    {/if}
+
+    {#if importedExport && programOverview}
+      <section
+        class="kpi-row"
+        class:view-hidden={activeWorkspaceView !== "overview"}
+        aria-label="Indicateurs clés de l'analyse"
+      >
+        <article class="kpi-card">
+          <p class="detail-label">Fonctions</p>
+          <strong>{programOverview.function_count.toLocaleString()}</strong>
+          <span>
+            {programOverview.internal_function_count.toLocaleString()} internes ·
+            {programOverview.external_function_count.toLocaleString()} externes ·
+            {programOverview.thunk_function_count.toLocaleString()} thunks
+          </span>
+        </article>
+
+        <article class="kpi-card">
+          <p class="detail-label">Fonctions identifiées (FunctionID)</p>
+          {#if identifiedFunctionStats}
+            <strong>{identifiedFunctionStats.identifiedCount.toLocaleString()} / {identifiedFunctionStats.totalCount.toLocaleString()}</strong>
+            <span>{identifiedFunctionStats.percentage}% des fonctions internes ont au moins une candidature</span>
+          {:else}
+            <strong>—</strong>
+            <span>Non disponible pour cette session (import manuel ou projet rouvert)</span>
+          {/if}
+        </article>
+
+        <article class="kpi-card">
+          <p class="detail-label">Chaînes de caractères</p>
+          <strong>{programOverview.string_count.toLocaleString()}</strong>
+          <span>{programOverview.total_string_reference_count.toLocaleString()} références</span>
+        </article>
+
+        <article class="kpi-card">
+          <p class="detail-label">Bibliothèques requises</p>
+          <strong>{programOverview.required_library_count.toLocaleString()}</strong>
+          <span>{programOverview.external_function_count.toLocaleString()} imports</span>
+        </article>
+
+        <article class="kpi-card kpi-card-ring">
+          <ProgressRing
+            percentage={decompiledProgress}
+            label="décompilées"
+            sublabel={`${programOverview.decompiled_function_count} / ${programOverview.function_count} fonctions`}
+          />
+        </article>
       </section>
     {/if}
 
@@ -1849,6 +1994,53 @@ interface ApplyRenamesResult {
             </div>
           </dl>
         {/if}
+      </section>
+
+      <section
+        class="dashboard-insights"
+        class:view-hidden={activeWorkspaceView !== "overview"}
+        aria-label="Informations principales de l’analyse"
+      >
+        <article>
+          <header><h3>Chaînes de caractères</h3><button type="button" onclick={() => (activeWorkspaceView = "strings")}>Voir tout</button></header>
+          {#if globalStrings && globalStrings.length > 0}
+            <ul>
+              {#each globalStrings.slice(0, 5) as entry (entry.address)}
+                <li><code>{entry.address}</code><span title={entry.value}>{entry.value}</span><strong>{entry.reference_count}</strong></li>
+              {/each}
+            </ul>
+          {:else}<p>Aucune chaîne chargée.</p>{/if}
+        </article>
+        <article>
+          <header><h3>Structures détectées</h3><button type="button" onclick={() => (activeWorkspaceView = "types")}>Voir tout</button></header>
+          {#if detectedTypes && detectedTypes.length > 0}
+            <ul>
+              {#each detectedTypes.slice(0, 5) as type (`${type.category}-${type.name}`)}
+                <li><span title={type.name}>{type.name}</span><code>{type.kind}</code><strong>{type.usages.length}</strong></li>
+              {/each}
+            </ul>
+          {:else}<p>Aucun type chargé.</p>{/if}
+        </article>
+        <article>
+          <header><h3>Imports principaux</h3><button type="button" onclick={() => (activeWorkspaceView = "imports")}>Voir tout</button></header>
+          {#if imports && imports.length > 0}
+            <ul>
+              {#each imports.slice(0, 5) as entry (entry.entry_address)}
+                <li><span title={entry.name}>{entry.name}</span><code>{entry.library ?? "—"}</code><strong>{entry.used_by_function_count}</strong></li>
+              {/each}
+            </ul>
+          {:else}<p>Aucun import chargé.</p>{/if}
+        </article>
+        <article>
+          <header><h3>Fonction la plus appelée</h3><button type="button" onclick={() => (activeWorkspaceView = "functions")}>Explorer</button></header>
+          {#if programOverview?.most_used_function}
+            <div class="top-function">
+              <strong>{programOverview.most_used_function.name}</strong>
+              <span>{programOverview.most_used_function.used_by_function_count} fonctions appelantes</span>
+              <button type="button" onclick={() => openFunction(programOverview?.most_used_function?.entry_address ?? null)}>Ouvrir la fonction</button>
+            </div>
+          {:else}<p>Aucune fonction dominante.</p>{/if}
+        </article>
       </section>
 
       <section
@@ -2164,30 +2356,182 @@ interface ApplyRenamesResult {
 
     {#if importedExport}
       <section
+        class="graph-workspace"
+        class:view-hidden={activeWorkspaceView !== "graph"}
+        aria-labelledby="graph-workspace-title"
+      >
+        <header class="section-toolbar">
+          <div>
+            <p class="detail-label">Exploration visuelle</p>
+            <h2 id="graph-workspace-title">Graphe d’appels</h2>
+          </div>
+          <div class="call-graph-controls compact-controls">
+            <label>
+              Direction
+              <select bind:value={callGraphDirection}>
+                <option value="outgoing">Appels sortants</option>
+                <option value="incoming">Appels entrants</option>
+                <option value="both">Les deux</option>
+              </select>
+            </label>
+            <label>
+              Profondeur
+              <input type="number" min="1" max="5" bind:value={callGraphDepth} />
+            </label>
+          </div>
+        </header>
+
+        <div class="graph-layout">
+          <div class="graph-stage-wrap">
+            {#if isLoadingCallGraph}
+              <p class="graph-message">Construction du graphe…</p>
+            {:else if callGraphError}
+              <p class="error" role="alert">{callGraphError}</p>
+            {:else if callGraphResult}
+              <div class="graph-legend">
+                <span class="user">Fonction analysée</span>
+                <span class="internal">Fonction interne</span>
+                <span class="external">Bibliothèque / externe</span>
+                <span class="thunk">Thunk</span>
+              </div>
+              <p class="call-graph-stats">
+                {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
+                profondeur {callGraphResult.depth_reached}
+              </p>
+              <div
+                class="graph-stage"
+                style={`width:${graphCanvasWidth}px;height:${callGraphLayout.height}px`}
+              >
+                <svg
+                  class="graph-edges"
+                  viewBox={`0 0 ${graphCanvasWidth} ${callGraphLayout.height}`}
+                  aria-hidden="true"
+                >
+                  <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                    </marker>
+                  </defs>
+                  {#each callGraphResult.edges as edge (`${edge.from}-${edge.to}`)}
+                    {@const from = graphNodePosition.get(edge.from)}
+                    {@const to = graphNodePosition.get(edge.to)}
+                    {#if from && to}
+                      <path
+                        d={`M ${from.x + graphNodeWidth / 2} ${from.y + graphNodeHeight} C ${from.x + graphNodeWidth / 2} ${from.y + graphNodeHeight + 45}, ${to.x + graphNodeWidth / 2} ${to.y - 45}, ${to.x + graphNodeWidth / 2} ${to.y}`}
+                        marker-end="url(#arrow)"
+                      ></path>
+                    {/if}
+                  {/each}
+                </svg>
+                {#each callGraphLayout.nodes as node (node.entry_address)}
+                  <button
+                    type="button"
+                    class="visual-graph-node"
+                    class:root={node.entry_address === selectedFunctionAddress}
+                    class:external={node.is_external}
+                    class:thunk={node.is_thunk}
+                    style={`left:${node.x}px;top:${node.y}px;width:${graphNodeWidth}px;height:${graphNodeHeight}px`}
+                    onclick={() => openFunction(node.entry_address)}
+                  >
+                    <strong>{node.name}</strong>
+                    <code>{node.entry_address}</code>
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <p class="graph-message">Sélectionne une fonction pour afficher son voisinage.</p>
+            {/if}
+          </div>
+
+          <aside class="graph-inspector">
+            {#if callGraphResult}
+              <p class="detail-label">Informations sur le graphe</p>
+              <dl class="graph-info-grid">
+                <div><dt>Vue</dt><dd>{callGraphDirection === "outgoing" ? "Appels sortants" : callGraphDirection === "incoming" ? "Appels entrants" : "Les deux"}</dd></div>
+                <div><dt>Nœuds</dt><dd>{callGraphResult.nodes.length}</dd></div>
+                <div><dt>Appels (arêtes)</dt><dd>{callGraphResult.edges.length}</dd></div>
+                <div><dt>Profondeur atteinte</dt><dd>{callGraphResult.depth_reached}</dd></div>
+                <div><dt>Fonctions externes</dt><dd>{callGraphResult.nodes.filter((node) => node.is_external).length}</dd></div>
+              </dl>
+            {/if}
+
+            <p class="detail-label">Fonction sélectionnée</p>
+            <h3>{selectedFunction?.name ?? "Aucune fonction"}</h3>
+            {#if selectedFunction}
+              <code>{selectedFunction.entry_address}</code>
+              <dl>
+                <div><dt>Type</dt><dd>{selectedFunction.is_external ? "Externe" : selectedFunction.is_thunk ? "Thunk" : "Interne"}</dd></div>
+                <div><dt>Appels</dt><dd>{selectedFunction.calls.length}</dd></div>
+                <div><dt>Chaînes</dt><dd>{selectedFunction.strings.length}</dd></div>
+                <div><dt>Paramètres</dt><dd>{displayedParameters.length}</dd></div>
+              </dl>
+              <button type="button" onclick={() => (activeWorkspaceView = "functions")}>Voir les détails</button>
+            {/if}
+          </aside>
+        </div>
+      </section>
+
+      <section
         class="function-explorer"
-        class:view-hidden={activeWorkspaceView !== "functions" && activeWorkspaceView !== "graph"}
+        class:view-hidden={activeWorkspaceView !== "functions"}
         aria-labelledby="functions-title"
       >
-        <h2 id="functions-title">Functions</h2>
+        <header class="function-list-heading">
+          <div>
+            <h2 id="functions-title">Fonctions</h2>
+            <span>{filteredFunctions.length.toLocaleString()} sur {importedExport.functions.length.toLocaleString()}</span>
+          </div>
+          <input type="search" placeholder="Rechercher une fonction…" bind:value={functionSearch} />
+        </header>
 
         {#if importedExport.functions.length === 0}
           <p>No functions were found in this export.</p>
         {:else}
-          <ul class="function-list">
-            {#each importedExport.functions as func (func.entry_address)}
-              <li>
-                <button
-                  type="button"
-                  class:active={func.entry_address === selectedFunctionAddress}
-                  aria-pressed={func.entry_address === selectedFunctionAddress}
-                  onclick={() => openFunction(func.entry_address)}
-                >
-                  <span>{func.name}</span>
-                  <code>{func.entry_address}</code>
-                </button>
-              </li>
-            {/each}
-          </ul>
+          <div class="function-table-wrap">
+            <table class="function-table">
+              <thead>
+                <tr>
+                  <th scope="col">Nom</th>
+                  <th scope="col">Adresse</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Appels</th>
+                  <th scope="col">Identification (FunctionID)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each filteredFunctions as func (func.entry_address)}
+                  {@const topCandidate = topIdentificationFor(func.entry_address)}
+                  <tr
+                    class:active={func.entry_address === selectedFunctionAddress}
+                    aria-selected={func.entry_address === selectedFunctionAddress}
+                  >
+                    <td>
+                      <button
+                        type="button"
+                        class="function-table-name"
+                        onclick={() => openFunction(func.entry_address)}
+                      >
+                        {func.name}
+                      </button>
+                    </td>
+                    <td><code>{func.entry_address}</code></td>
+                    <td>{func.is_external ? "Externe" : func.is_thunk ? "Thunk" : "Interne"}</td>
+                    <td>{func.calls.length}</td>
+                    <td>
+                      {#if topCandidate}
+                        <span title={`score ${topCandidate.overall_score.toFixed(1)}`}>
+                          {topCandidate.name}
+                          <em>({topCandidate.overall_score.toFixed(1)})</em>
+                        </span>
+                      {:else}
+                        <span class="function-table-muted">—</span>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
 
         {#if selectedFunction}
           <article
@@ -2239,236 +2583,244 @@ interface ApplyRenamesResult {
               {/if}
             </dl>
 
-            {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
-              <section class="function-section ghidra-rename-control">
-                <h4>Apply a function name to Ghidra</h4>
-                <p>
-                  This writes a user-confirmed name into the live Ghidra project, then refreshes
-                  the local snapshot. It never applies FunctionID or BSim suggestions automatically.
-                </p>
-                <div>
-                  <input type="text" maxlength="512" bind:value={functionRenameDraft} />
-                  <button
-                    type="button"
-                    disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
-                    onclick={applySelectedFunctionRename}
-                  >
-                    {isApplyingFunctionRename ? "Applying..." : "Apply rename"}
-                  </button>
-                </div>
-                {#if functionRenameError}
-                  <p class="error" role="alert">{functionRenameError}</p>
-                {/if}
-                {#if functionRenameSuccess}
-                  <p class="status">{functionRenameSuccess}</p>
-                {/if}
-              </section>
-            {/if}
+            <nav class="detail-tabs" aria-label="Détails de la fonction sélectionnée">
+              {#each detailTabs as tab (tab.id)}
+                <button
+                  type="button"
+                  class:active={activeDetailTab === tab.id}
+                  onclick={() => (activeDetailTab = tab.id)}
+                >
+                  {tab.label}
+                </button>
+              {/each}
+            </nav>
 
-            {#if selectedIdentificationCandidates.length > 0}
-              <section class="function-section">
-                <h4>Possible match (FunctionID)</h4>
-
-                <ul>
-                  {#each selectedIdentificationCandidates as candidate}
-                    <li
-                      class="rename-suggestion-item"
-                      class:selected={functionRenameDraft === candidate.name}
-                    >
-                      <button
-                        type="button"
-                        class="rename-suggestion"
-                        title={`Use ${candidate.name} as the proposed Ghidra name`}
-                        onclick={() => selectFunctionRenameSuggestion(candidate.name)}
-                      >
-                        <span>
-                          {candidate.name}
-                          <em>
-                            ({candidate.library_family} {candidate.library_version}
-                            {candidate.library_variant}, {candidate.match_mode})
-                          </em>
-                        </span>
-                        <code>score {candidate.overall_score.toFixed(1)}</code>
-                      </button>
-                    </li>
-                  {/each}
-                </ul>
-              </section>
-            {/if}
-
-            {#if selectedBsimResult}
-              <section class="function-section">
-                <h4>Similar functions (BSim)</h4>
-
-                {#if selectedBsimResult.status === "available"}
-                  {#if selectedBsimResult.matches.length === 0}
-                    <p>No sufficiently similar function was found in the seed corpus.</p>
-                  {:else}
-                    <ul>
-                      {#each selectedBsimResult.matches as candidate}
-                        <li
-                          class="rename-suggestion-item"
-                          class:selected={functionRenameDraft === candidate.name}
-                        >
-                          <button
-                            type="button"
-                            class="rename-suggestion"
-                            title={`Use ${candidate.name} as the proposed Ghidra name`}
-                            onclick={() => selectFunctionRenameSuggestion(candidate.name)}
-                          >
-                            <span>
-                              {candidate.name}
-                              <em>({candidate.executable})</em>
-                            </span>
-                            <code>
-                              similarity {candidate.similarity.toFixed(3)} · significance
-                              {candidate.significance.toFixed(1)}
-                            </code>
-                          </button>
-                        </li>
-                      {/each}
-                    </ul>
-                  {/if}
-                {:else if selectedBsimResult.status === "unavailable"}
-                  <p>{selectedBsimResult.message ?? "The BSim seed corpus is unavailable."}</p>
-                {:else}
-                  <p class="bsim-error">
-                    BSim query failed: {selectedBsimResult.message ?? "unknown error"}
+            <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "overview"}>
+              {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
+                <section class="function-section ghidra-rename-control">
+                  <h4>Apply a function name to Ghidra</h4>
+                  <p>
+                    This writes a user-confirmed name into the live Ghidra project, then refreshes
+                    the local snapshot. It never applies FunctionID or BSim suggestions automatically.
                   </p>
+                  <div>
+                    <input type="text" maxlength="512" bind:value={functionRenameDraft} />
+                    <button
+                      type="button"
+                      disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
+                      onclick={applySelectedFunctionRename}
+                    >
+                      {isApplyingFunctionRename ? "Applying..." : "Apply rename"}
+                    </button>
+                  </div>
+                  {#if functionRenameError}
+                    <p class="error" role="alert">{functionRenameError}</p>
+                  {/if}
+                  {#if functionRenameSuccess}
+                    <p class="status">{functionRenameSuccess}</p>
+                  {/if}
+                </section>
+              {/if}
+
+              <section class="function-section">
+                <h4>Parameters</h4>
+
+                {#if displayedParameters.length === 0}
+                  <p>No parameters were identified.</p>
+                {:else}
+                  <ul>
+                    {#each displayedParameters as parameter}
+                      <li>
+                        <code>{parameter.data_type}</code>
+                        <span>{parameter.name}</span>
+                      </li>
+                    {/each}
+                  </ul>
                 {/if}
               </section>
-            {/if}
 
-            <section class="function-section">
-              <h4>Graphe d'appels</h4>
+              <section class="function-section">
+                <div class="function-section-heading">
+                  <h4>Graphe d’appels (extrait)</h4>
+                  <button type="button" onclick={() => (activeWorkspaceView = "graph")}>Ouvrir le graphe complet</button>
+                </div>
 
-              <div class="call-graph-controls">
-                <label>
-                  Direction
-                  <select bind:value={callGraphDirection}>
-                    <option value="outgoing">Appels sortants</option>
-                    <option value="incoming">Appels entrants</option>
-                    <option value="both">Les deux</option>
-                  </select>
-                </label>
+                {#if isLoadingCallGraph}
+                  <p>Chargement du graphe d'appels...</p>
+                {:else if callGraphError}
+                  <p class="error" role="alert">{callGraphError}</p>
+                {:else if callGraphResult}
+                  <p class="call-graph-stats">
+                    {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
+                    profondeur atteinte {callGraphResult.depth_reached}
+                  </p>
 
-                <label>
-                  Profondeur
-                  <input
-                    type="number"
-                    min="1"
-                    max="5"
-                    bind:value={callGraphDepth}
-                  />
-                </label>
-              </div>
+                  {#each callGraphNodesByDepth as group (group.depth)}
+                    <div class="call-graph-depth-group">
+                      <p class="detail-label">
+                        {group.depth === 0 ? "Fonction sélectionnée" : `Niveau ${group.depth}`}
+                      </p>
 
-              {#if isLoadingCallGraph}
-                <p>Chargement du graphe d'appels...</p>
-              {:else if callGraphError}
-                <p class="error" role="alert">{callGraphError}</p>
-              {:else if callGraphResult}
-                <p class="call-graph-stats">
-                  {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
-                  profondeur atteinte {callGraphResult.depth_reached}
-                </p>
-
-                {#each callGraphNodesByDepth as group (group.depth)}
-                  <div class="call-graph-depth-group">
-                    <p class="detail-label">
-                      {group.depth === 0 ? "Fonction sélectionnée" : `Niveau ${group.depth}`}
-                    </p>
-
-                    <ul class="call-graph-node-list">
-                      {#each group.nodes as node (node.entry_address)}
-                        <li>
-                          <button
-                            type="button"
-                            class="call-graph-node"
-                            disabled={node.entry_address === selectedFunctionAddress}
-                            onclick={() => openFunction(node.entry_address)}
-                          >
-                            <span>
-                              {node.name}
-                              {#if node.is_external}<em>(externe)</em>{/if}
-                              {#if node.is_thunk}<em>(thunk)</em>{/if}
-                            </span>
-                            <code>{node.entry_address}</code>
-                          </button>
-                        </li>
-                      {/each}
-                    </ul>
-                  </div>
-                {/each}
-              {/if}
-            </section>
-
-            <section class="function-section">
-            <h4>Parameters</h4>
-
-              {#if displayedParameters.length === 0}
-                <p>No parameters were identified.</p>
-              {:else}
-                <ul>
-                  {#each displayedParameters as parameter}
-                    <li>
-                    <code>{parameter.data_type}</code>
-                      <span>{parameter.name}</span>
-                    </li>
+                      <ul class="call-graph-node-list">
+                        {#each group.nodes as node (node.entry_address)}
+                          <li>
+                            <button
+                              type="button"
+                              class="call-graph-node"
+                              disabled={node.entry_address === selectedFunctionAddress}
+                              onclick={() => openFunction(node.entry_address)}
+                            >
+                              <span>
+                                {node.name}
+                                {#if node.is_external}<em>(externe)</em>{/if}
+                                {#if node.is_thunk}<em>(thunk)</em>{/if}
+                              </span>
+                              <code>{node.entry_address}</code>
+                            </button>
+                          </li>
+                        {/each}
+                      </ul>
+                    </div>
                   {/each}
-              </ul>
-            {/if}
-          </section>
+                {/if}
+              </section>
+            </div>
 
-          <section class="function-section">
-            <h4>Function calls</h4>
+            <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "code"}>
+              <section class="function-section">
+                <h4>Decompiled code</h4>
 
-            {#if selectedFunction.calls.length === 0}
-              <p>No outgoing calls were identified.</p>
-            {:else}
-              <ul>
-                {#each selectedFunction.calls as call}
-                  <li>
-                    <span>{call.target_name}</span>
+                {#if isDecompilingSelected}
+                  <p>Decompiling...</p>
+                {:else if selectedDecompileError}
+                  <p class="error" role="alert">{selectedDecompileError}</p>
+                {:else if selectedDecompiledCode}
+                  <pre><code>{selectedDecompiledCode}</code></pre>
+                {:else}
+                  <p>No decompiled code is available for this function.</p>
+                {/if}
+              </section>
+            </div>
 
-                    {#if call.target_address}
-                      <code class="call-address">{call.target_address}</code>
+            <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "evidence"}>
+              {#if selectedIdentificationCandidates.length === 0 && !selectedBsimResult}
+                <p class="detail-label">Aucune preuve disponible pour cette fonction.</p>
+              {/if}
+
+              {#if selectedIdentificationCandidates.length > 0}
+                <section class="function-section">
+                  <h4>Possible match (FunctionID)</h4>
+
+                  <ul>
+                    {#each selectedIdentificationCandidates as candidate}
+                      <li
+                        class="rename-suggestion-item"
+                        class:selected={functionRenameDraft === candidate.name}
+                      >
+                        <button
+                          type="button"
+                          class="rename-suggestion"
+                          title={`Use ${candidate.name} as the proposed Ghidra name`}
+                          onclick={() => selectFunctionRenameSuggestion(candidate.name)}
+                        >
+                          <span>
+                            {candidate.name}
+                            <em>
+                              ({candidate.library_family} {candidate.library_version}
+                              {candidate.library_variant}, {candidate.match_mode})
+                            </em>
+                          </span>
+                          <code>score {candidate.overall_score.toFixed(1)}</code>
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                </section>
+              {/if}
+
+              {#if selectedBsimResult}
+                <section class="function-section">
+                  <h4>Similar functions (BSim)</h4>
+
+                  {#if selectedBsimResult.status === "available"}
+                    {#if selectedBsimResult.matches.length === 0}
+                      <p>No sufficiently similar function was found in the seed corpus.</p>
                     {:else}
-                      <em>Unresolved address</em>
+                      <ul>
+                        {#each selectedBsimResult.matches as candidate}
+                          <li
+                            class="rename-suggestion-item"
+                            class:selected={functionRenameDraft === candidate.name}
+                          >
+                            <button
+                              type="button"
+                              class="rename-suggestion"
+                              title={`Use ${candidate.name} as the proposed Ghidra name`}
+                              onclick={() => selectFunctionRenameSuggestion(candidate.name)}
+                            >
+                              <span>
+                                {candidate.name}
+                                <em>({candidate.executable})</em>
+                              </span>
+                              <code>
+                                similarity {candidate.similarity.toFixed(3)} · significance
+                                {candidate.significance.toFixed(1)}
+                              </code>
+                            </button>
+                          </li>
+                        {/each}
+                      </ul>
                     {/if}
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </section>
+                  {:else if selectedBsimResult.status === "unavailable"}
+                    <p>{selectedBsimResult.message ?? "The BSim seed corpus is unavailable."}</p>
+                  {:else}
+                    <p class="bsim-error">
+                      BSim query failed: {selectedBsimResult.message ?? "unknown error"}
+                    </p>
+                  {/if}
+                </section>
+              {/if}
+            </div>
 
-          <section class="function-section">
-            <h4>Referenced strings</h4>
+            <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "strings"}>
+              <section class="function-section">
+                <h4>Referenced strings</h4>
 
-            {#if selectedFunction.strings.length === 0}
-              <p>No referenced strings were identified.</p>
-            {:else}
-              <ul>
-                {#each selectedFunction.strings as referencedString}
-                  <li><code>{referencedString}</code></li>
-                {/each}
-              </ul>
-            {/if}
-          </section>
+                {#if selectedFunction.strings.length === 0}
+                  <p>No referenced strings were identified.</p>
+                {:else}
+                  <ul>
+                    {#each selectedFunction.strings as referencedString}
+                      <li><code>{referencedString}</code></li>
+                    {/each}
+                  </ul>
+                {/if}
+              </section>
+            </div>
 
-          <section class="function-section">
-            <h4>Decompiled code</h4>
+            <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "calls"}>
+              <section class="function-section">
+                <h4>Function calls</h4>
 
-            {#if isDecompilingSelected}
-              <p>Decompiling...</p>
-            {:else if selectedDecompileError}
-              <p class="error" role="alert">{selectedDecompileError}</p>
-            {:else if selectedDecompiledCode}
-              <pre><code>{selectedDecompiledCode}</code></pre>
-            {:else}
-              <p>No decompiled code is available for this function.</p>
-            {/if}
-          </section>
+                {#if selectedFunction.calls.length === 0}
+                  <p>No outgoing calls were identified.</p>
+                {:else}
+                  <ul>
+                    {#each selectedFunction.calls as call}
+                      <li>
+                        <span>{call.target_name}</span>
+
+                        {#if call.target_address}
+                          <code class="call-address">{call.target_address}</code>
+                        {:else}
+                          <em>Unresolved address</em>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </section>
+            </div>
       </article>
     {/if}
   {/if}
@@ -3016,58 +3368,80 @@ interface ApplyRenamesResult {
     align-items: start;
   }
 
-  .function-explorer > h2,
   .function-explorer > p {
     grid-column: 1 / -1;
     margin: 0;
   }
 
-  .function-list {
-    display: grid;
+  .function-table-wrap {
     max-height: 720px;
-    margin: 0;
-    padding: 0;
-    gap: 0.5rem;
-    overflow-y: auto;
-    list-style: none;
-  }
-
-  .function-list button {
-    display: flex;
-    width: 100%;
-    min-width: 0;
-    padding: 0.75rem;
-    justify-content: space-between;
-    align-items: center;
-    gap: 1rem;
+    overflow: auto;
     border: 1px solid #374151;
     border-radius: 0.5rem;
+  }
+
+  .function-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+
+  .function-table thead th {
+    position: sticky;
+    top: 0;
+    padding: 0.6rem 0.75rem;
     background-color: #1f2937;
-    color: #f9fafb;
+    color: #94a3b8;
+    font-size: 0.72rem;
+    font-weight: 600;
     text-align: left;
-    cursor: pointer;
-  }
-
-  .function-list button:hover {
-    border-color: #60a5fa;
-    background-color: #273449;
-  }
-
-  .function-list button.active {
-    border-color: #3b82f6;
-    background-color: #1e3a5f;
-  }
-
-  .function-list button span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .function-list code {
-    flex-shrink: 0;
+  .function-table tbody td {
+    padding: 0.55rem 0.75rem;
+    border-top: 1px solid #263349;
+    color: #d7e0ef;
+    overflow-wrap: anywhere;
+  }
+
+  .function-table tbody tr:hover {
+    background-color: #16263f;
+  }
+
+  .function-table tbody tr.active {
+    background-color: #1e3a5f;
+  }
+
+  .function-table code {
     color: #93c5fd;
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+
+  .function-table-name {
+    padding: 0;
+    background: transparent;
+    color: #f3f6fb;
+    font-weight: 600;
+    text-align: left;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+  }
+
+  .function-table-name:hover {
+    text-decoration-color: currentColor;
+  }
+
+  .function-table td em {
+    margin-left: 0.3rem;
+    color: #8292ad;
+    font-size: 0.72rem;
+    font-style: normal;
+  }
+
+  .function-table-muted {
+    color: #556077;
   }
 
   .function-details {
@@ -3145,6 +3519,35 @@ interface ApplyRenamesResult {
     overflow-wrap: anywhere;
   }
 
+  .detail-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2rem;
+    margin: 0.9rem 0 0;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #263349;
+  }
+
+  .detail-tabs button {
+    padding: 0.4rem 0.7rem;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #8292ad;
+    font-size: 0.74rem;
+    font-weight: 600;
+  }
+
+  .detail-tabs button:hover:not(.active),
+  .detail-tabs button.active {
+    background: rgb(124 58 237 / 12%);
+    color: #e9e3ff;
+  }
+
+  .detail-tab-panel {
+    margin-top: 0.25rem;
+  }
+
   .function-section {
     margin-top: 1.25rem;
   }
@@ -3152,6 +3555,56 @@ interface ApplyRenamesResult {
   .function-section h4 {
     margin: 0 0 0.75rem;
     color: #67e8f9;
+  }
+
+  .function-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .function-section-heading h4 {
+    margin: 0;
+  }
+
+  .function-section-heading button {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #4c3a83;
+    background: #201743;
+    color: #c4b5fd;
+    font-size: 0.66rem;
+  }
+
+  .call-graph-depth-group {
+    position: relative;
+    padding-top: 0.25rem;
+  }
+
+  .call-graph-node-list {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  }
+
+  .call-graph-node {
+    display: grid;
+    min-height: 55px;
+    justify-content: stretch;
+    gap: 0.2rem;
+    padding: 0.5rem;
+    border-color: #2563eb;
+    background: #102447;
+    text-align: center;
+  }
+
+  .call-graph-node:disabled {
+    border-color: #8b5cf6;
+    background: #29205a;
+  }
+
+  .call-graph-node code {
+    color: #91a9ca;
+    font-size: 0.62rem;
   }
 
   .function-section p {
@@ -3338,31 +3791,6 @@ interface ApplyRenamesResult {
     white-space: pre;
   }
 
-    .function-list {
-    min-width: 0;
-    overflow-x: hidden;
-  }
-
-  .function-list li {
-    min-width: 0;
-  }
-
-  .function-list button {
-    box-sizing: border-box;
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-  }
-
-  .function-list button span {
-    flex: 1 1 auto;
-  }
-
-  .function-list code {
-    flex: 0 0 auto;
-    white-space: nowrap;
-  }
-
   .function-metadata dd code {
     font-size: 0.85rem;
   }
@@ -3377,7 +3805,6 @@ interface ApplyRenamesResult {
       grid-template-columns: 1fr;
     }
 
-    .function-explorer > h2,
     .function-explorer > p {
       grid-column: 1;
     }
@@ -3743,6 +4170,459 @@ interface ApplyRenamesResult {
     .header-actions button {
       flex: 1 1 0;
     }
+  }
+
+  /* Dense analysis workspace inspired by the validated target mockups. */
+  .import-summary {
+    display: none;
+  }
+
+  .summary {
+    padding: 1rem;
+    border: 1px solid #1d2a40;
+    border-radius: 10px;
+    background: #0b1423;
+  }
+
+  .summary h2 {
+    margin: 0 0 0.85rem;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.65rem;
+  }
+
+  .summary-grid div {
+    min-height: 82px;
+    padding: 0.8rem;
+    border-color: #223149;
+    background: #0e192b;
+  }
+
+  .summary-grid dt {
+    font-size: 0.72rem;
+  }
+
+  .summary-grid dd {
+    font-size: 1rem;
+    line-height: 1.35;
+  }
+
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+    gap: 0.7rem;
+    margin-bottom: 0.8rem;
+  }
+
+  .kpi-card {
+    min-width: 0;
+    padding: 0.9rem 1rem;
+    border: 1px solid #1d2a40;
+    border-radius: 10px;
+    background: #0b1423;
+  }
+
+  .kpi-card .detail-label {
+    margin-bottom: 0.4rem;
+  }
+
+  .kpi-card strong {
+    display: block;
+    color: #f3f6fb;
+    font-size: 1.4rem;
+    line-height: 1.2;
+  }
+
+  .kpi-card span {
+    display: block;
+    margin-top: 0.3rem;
+    color: #71819c;
+    font-size: 0.7rem;
+  }
+
+  .kpi-card-ring {
+    display: grid;
+    place-items: center;
+    padding: 0.6rem;
+  }
+
+  @media (max-width: 1180px) {
+    .kpi-row {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .kpi-card-ring {
+      grid-column: 1 / -1;
+    }
+  }
+
+  .dashboard-insights {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.7rem;
+    margin-top: 0.8rem;
+  }
+
+  .dashboard-insights article {
+    min-width: 0;
+    min-height: 210px;
+    padding: 0.8rem;
+    border: 1px solid #1d2a40;
+    border-radius: 9px;
+    background: #0b1423;
+  }
+
+  .dashboard-insights header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.65rem;
+  }
+
+  .dashboard-insights h3 {
+    margin: 0;
+    font-size: 0.78rem;
+  }
+
+  .dashboard-insights header button,
+  .top-function button {
+    padding: 0.25rem 0.4rem;
+    background: transparent;
+    color: #a78bfa;
+    font-size: 0.68rem;
+  }
+
+  .dashboard-insights ul {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    gap: 0.15rem;
+    list-style: none;
+  }
+
+  .dashboard-insights li {
+    display: grid;
+    grid-template-columns: minmax(58px, auto) minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.45rem;
+    min-height: 25px;
+    border-bottom: 1px solid #17243a;
+    font-size: 0.7rem;
+  }
+
+  .dashboard-insights li span {
+    overflow: hidden;
+    color: #dbe5f5;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dashboard-insights li code,
+  .dashboard-insights li strong {
+    color: #7dd3fc;
+    font-size: 0.65rem;
+  }
+
+  .dashboard-insights p {
+    color: #71819c;
+    font-size: 0.75rem;
+  }
+
+  .top-function {
+    display: grid;
+    align-content: center;
+    min-height: 140px;
+    gap: 0.45rem;
+  }
+
+  .top-function > strong {
+    color: #c4b5fd;
+    font-size: 1.05rem;
+  }
+
+  .top-function > span {
+    color: #8190a8;
+    font-size: 0.72rem;
+  }
+
+  .section-toolbar,
+  .function-list-heading {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .section-toolbar h2,
+  .function-list-heading h2 {
+    margin: 0.15rem 0 0;
+    font-size: 1rem;
+  }
+
+  .graph-workspace {
+    min-width: 0;
+  }
+
+  .graph-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 220px;
+    min-height: 610px;
+    margin-top: 0.75rem;
+    border: 1px solid #1e2c42;
+    border-radius: 10px;
+    background: #080f1c;
+    overflow: hidden;
+  }
+
+  .graph-stage-wrap {
+    position: relative;
+    min-width: 0;
+    padding: 0.75rem;
+    overflow: auto;
+    background-image: radial-gradient(#27364e 0.7px, transparent 0.7px);
+    background-size: 18px 18px;
+  }
+
+  .graph-stage {
+    position: relative;
+    min-width: 100%;
+    margin-top: 0.5rem;
+  }
+
+  .graph-edges {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .graph-edges path:not(:first-child) {
+    fill: none;
+    stroke: #52627d;
+    stroke-width: 1.5;
+  }
+
+  .graph-edges marker path {
+    fill: #7183a3;
+  }
+
+  .visual-graph-node {
+    position: absolute;
+    display: grid;
+    align-content: center;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid #2563eb;
+    border-radius: 7px;
+    background: #102447;
+    box-shadow: 0 10px 28px rgb(0 0 0 / 22%);
+    color: #eaf2ff;
+    text-align: center;
+  }
+
+  .visual-graph-node:hover:not(:disabled) {
+    border-color: #60a5fa;
+    background: #173464;
+  }
+
+  .visual-graph-node strong,
+  .visual-graph-node code {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .visual-graph-node strong {
+    font-size: 0.72rem;
+  }
+
+  .visual-graph-node code {
+    margin-top: 0.25rem;
+    color: #91a9ca;
+    font-size: 0.62rem;
+  }
+
+  .visual-graph-node.root {
+    border-color: #8b5cf6;
+    background: #29205a;
+    box-shadow: 0 0 0 2px rgb(139 92 246 / 18%);
+  }
+
+  .visual-graph-node.external {
+    border-color: #7c3aed;
+    background: #211845;
+  }
+
+  .visual-graph-node.thunk:not(.root) {
+    border-color: #d97706;
+    background: #3a2412;
+  }
+
+  .graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+    color: #8090aa;
+    font-size: 0.66rem;
+  }
+
+  .graph-legend span::before {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 0.35rem;
+    border-radius: 2px;
+    background: #2563eb;
+    content: "";
+  }
+
+  .graph-legend .internal::before { background: #16a34a; }
+  .graph-legend .external::before { background: #7c3aed; }
+  .graph-legend .thunk::before { background: #d97706; }
+
+  .graph-inspector {
+    padding: 1rem;
+    border-left: 1px solid #1e2c42;
+    background: #0d1727;
+  }
+
+  .graph-inspector h3 {
+    margin: 0.4rem 0;
+    overflow-wrap: anywhere;
+  }
+
+  .graph-inspector > code { color: #93c5fd; }
+
+  .graph-info-grid {
+    padding-bottom: 0.9rem;
+    margin-bottom: 0.9rem !important;
+    border-bottom: 1px solid #1e2c42;
+  }
+
+  .graph-inspector dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem;
+    margin: 1rem 0;
+  }
+
+  .graph-inspector dl div {
+    padding: 0.55rem;
+    border: 1px solid #26354e;
+    border-radius: 6px;
+    background: #111e31;
+  }
+
+  .graph-inspector dt { color: #7f8faa; font-size: 0.65rem; }
+  .graph-inspector dd { margin: 0.25rem 0 0; font-size: 0.78rem; }
+  .graph-inspector button { width: 100%; padding: 0.55rem; font-size: 0.72rem; }
+  .graph-message { margin: 4rem auto; color: #8292ad; text-align: center; }
+
+  .compact-controls {
+    margin: 0;
+  }
+
+  .compact-controls label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.68rem;
+  }
+
+  .compact-controls select,
+  .compact-controls input {
+    width: auto;
+    padding: 0.38rem 0.5rem;
+    font-size: 0.7rem;
+  }
+
+  .function-explorer {
+    grid-template-columns: 330px minmax(0, 1fr);
+    gap: 0.7rem;
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .function-list-heading {
+    grid-column: 1 / -1;
+    align-items: center;
+    padding-bottom: 0.65rem;
+    border-bottom: 1px solid #1d2a40;
+  }
+
+  .function-list-heading > div {
+    display: flex;
+    align-items: baseline;
+    gap: 0.55rem;
+  }
+
+  .function-list-heading span {
+    color: #74849e;
+    font-size: 0.68rem;
+  }
+
+  .function-list-heading input {
+    width: min(320px, 45vw);
+    padding: 0.5rem 0.7rem;
+    font-size: 0.72rem;
+  }
+
+  .function-table-wrap {
+    max-height: calc(100vh - 220px);
+    border-color: #1d2a40;
+  }
+
+  .function-table thead th {
+    background-color: #101d30;
+  }
+
+  .function-details {
+    max-height: calc(100vh - 220px);
+    padding: 1rem;
+    border-color: #1d2a40;
+    border-radius: 8px;
+    background: #0b1423;
+  }
+
+  .function-details-header h3 { font-size: 1.2rem; }
+
+  .function-metadata {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.45rem;
+  }
+
+  .function-metadata div {
+    padding: 0.55rem;
+    border-color: #25344c;
+    background: #101d30;
+  }
+
+  .function-section {
+    margin-top: 0.9rem;
+  }
+
+  .function-section h4 {
+    margin-bottom: 0.5rem;
+    color: #a78bfa;
+    font-size: 0.82rem;
+  }
+
+  .function-section li {
+    padding: 0.5rem;
+    border-color: #25344c;
+    background: #101d30;
+    font-size: 0.72rem;
+  }
+
+  @media (max-width: 1180px) {
+    .dashboard-insights { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .graph-layout { grid-template-columns: minmax(0, 1fr); }
+    .graph-inspector { border-top: 1px solid #1e2c42; border-left: 0; }
   }
 
 
