@@ -74,11 +74,11 @@ interface ProjectMetadata {
   id: string;
   name: string;
   created_at_unix_seconds: number;
-  // Present for a "live" project (an automatic analysis whose original
-  // Ghidra project files are still on disk, so on-demand decompilation
-  // still works after reopening it); null for a snapshot-only project
-  // (a manual JSON import, or a live project whose Ghidra files went
-  // missing since it was saved).
+  // The permanent reference to this project's original Ghidra analysis,
+  // if it has one -- present for any automatic analysis, even if its
+  // Ghidra project files are currently unreachable. Only ever null for a
+  // project that never had one to begin with (a manual JSON import). See
+  // `session_available` on ProjectSummary for whether it currently works.
   session: AnalysisSession | null;
   program_name: string;
   program_format: string;
@@ -86,9 +86,18 @@ interface ProjectMetadata {
   function_count: number;
 }
 
+// What the backend actually returns for listing/opening a project:
+// `session`'s presence is a permanent fact, but `session_available` is
+// re-tested fresh every time (never cached) -- a project can go from
+// "live" to "unavailable" and back to "live" again across opens, e.g. if
+// its Ghidra project sits on a drive that gets unplugged and reconnected.
+interface ProjectSummary extends ProjectMetadata {
+  session_available: boolean;
+}
+
 interface LoadedProject {
   export: GhidraExport;
-  metadata: ProjectMetadata;
+  project: ProjectSummary;
 }
 
 interface GhidraInstallation {
@@ -281,7 +290,7 @@ interface ProgramOverview {
   let analysisSource = $state<"none" | "automatic" | "manual">("none");
   let activeProjectId = $state<string | null>(null);
 
-  let savedProjects = $state<ProjectMetadata[] | null>(null);
+  let savedProjects = $state<ProjectSummary[] | null>(null);
   let savedProjectsError = $state("");
   let isLoadingSavedProjects = $state(false);
   let projectActionError = $state("");
@@ -457,7 +466,7 @@ interface ProgramOverview {
     savedProjectsError = "";
 
     try {
-      savedProjects = await invoke<ProjectMetadata[]>("list_projects");
+      savedProjects = await invoke<ProjectSummary[]>("list_projects");
     } catch (error) {
       savedProjects = null;
       savedProjectsError = String(error);
@@ -485,27 +494,33 @@ interface ProgramOverview {
 
       importedExport = loaded.export;
       selectedFunctionAddress = loaded.export.functions[0]?.entry_address ?? null;
-      // A live session (still-present Ghidra project files) keeps on-demand
-      // decompilation working, exactly like a fresh automatic analysis. A
-      // downgraded/snapshot-only project behaves like a manual import.
-      analysisSource = loaded.metadata.session ? "automatic" : "manual";
-      activeProjectId = loaded.metadata.id;
+      // A currently-available session (Ghidra project files genuinely
+      // present right now, just re-verified by the backend) keeps
+      // on-demand decompilation working, exactly like a fresh automatic
+      // analysis. Anything else -- no session at all, or one whose Ghidra
+      // project is unreachable this time -- behaves like a manual import.
+      analysisSource = loaded.project.session_available ? "automatic" : "manual";
+      activeProjectId = loaded.project.id;
     } catch (error) {
       projectActionError = String(error);
     }
   }
 
-  async function deleteProject(id: string) {
-    if (!confirm("Delete this saved project? This cannot be undone.")) {
+  async function deleteProject(project: ProjectSummary) {
+    const message = project.session
+      ? `Delete "${project.name}"? This also permanently deletes its Ghidra analysis project on disk. This cannot be undone.`
+      : `Delete "${project.name}"? This cannot be undone.`;
+
+    if (!confirm(message)) {
       return;
     }
 
     projectActionError = "";
 
     try {
-      await invoke("delete_project", { id });
+      await invoke("delete_project", { id: project.id });
 
-      if (activeProjectId === id) {
+      if (activeProjectId === project.id) {
         activeProjectId = null;
       }
 
@@ -515,7 +530,7 @@ interface ProgramOverview {
     }
   }
 
-  function startRenamingProject(project: ProjectMetadata) {
+  function startRenamingProject(project: ProjectSummary) {
     renamingProjectId = project.id;
     renameDraft = project.name;
   }
@@ -957,9 +972,11 @@ interface ProgramOverview {
 
       <p class="saved-projects-note">
         Every completed analysis or import is saved here automatically. A "live" project
-        keeps on-demand decompilation working after reopening it (its original Ghidra
-        project is still on disk); a "snapshot" project shows the same data read-only.
-        Nothing here is ever synced or uploaded.
+        keeps on-demand decompilation working after reopening it; availability is checked
+        again every time it's opened, so a project only temporarily unavailable (e.g. its
+        Ghidra project sits on a drive that's currently unplugged) becomes live again on its
+        own once its files are back — nothing is permanently lost. A "snapshot" project shows
+        the same data read-only. Nothing here is ever synced or uploaded.
       </p>
 
       {#if isLoadingSavedProjects}
@@ -996,7 +1013,13 @@ interface ProgramOverview {
                   {:else}
                     <strong>{project.name}</strong>
                     <span class="global-strings-count">
-                      {project.session ? "live" : "snapshot"}
+                      {#if project.session_available}
+                        live
+                      {:else if project.session}
+                        snapshot (Ghidra project unavailable)
+                      {:else}
+                        snapshot
+                      {/if}
                     </span>
                     {#if project.id === activeProjectId}
                       <span class="global-strings-count">currently open</span>
@@ -1033,7 +1056,7 @@ interface ProgramOverview {
                   <button
                     type="button"
                     class="secondary-button"
-                    onclick={() => deleteProject(project.id)}
+                    onclick={() => deleteProject(project)}
                   >
                     Delete
                   </button>

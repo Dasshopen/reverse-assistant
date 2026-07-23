@@ -86,6 +86,21 @@ fn sanitize_project_name(binary_path: &Path) -> String {
     }
 }
 
+// Name of the app-data subdirectory holding every Ghidra project this app
+// has ever created for an analysis run. services::project_storage relies
+// on this being the single, authoritative root for "a directory this app
+// manages" when it verifies a project's Ghidra directory before deleting
+// it -- keep the two in sync via `ghidra_analysis_root_dir` rather than
+// duplicating the directory name.
+const GHIDRA_ANALYSIS_DIR_NAME: &str = "ghidra-analysis";
+
+pub fn ghidra_analysis_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join(GHIDRA_ANALYSIS_DIR_NAME))
+        .map_err(|error| format!("unable to resolve the application data directory: {error}"))
+}
+
 pub fn prepare_run_directory(
     app: &AppHandle,
     binary_path: &Path,
@@ -99,12 +114,7 @@ pub fn prepare_run_directory(
 
     let run_id = format!("{project_name}-{nanos}");
 
-    let run_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("unable to resolve the application data directory: {error}"))?
-        .join("ghidra-analysis")
-        .join(&run_id);
+    let run_dir = ghidra_analysis_root_dir(app)?.join(&run_id);
 
     fs::create_dir_all(&run_dir).map_err(|error| {
         format!(

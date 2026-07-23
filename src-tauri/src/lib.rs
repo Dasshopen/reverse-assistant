@@ -18,7 +18,7 @@ use services::ghidra_installation::{self, GhidraInstallationStatus};
 use services::global_strings::{self, GlobalStringView};
 use services::imports_exports::{self, ImportView};
 use services::program_overview::{self, ProgramOverview};
-use services::project_storage;
+use services::project_storage::{self, ProjectSummary};
 
 #[derive(Debug, Clone, Serialize)]
 struct AutomaticAnalysisResult {
@@ -29,7 +29,7 @@ struct AutomaticAnalysisResult {
 #[derive(Debug, Clone, Serialize)]
 struct LoadedProject {
     export: GhidraExport,
-    metadata: ProjectMetadata,
+    project: ProjectSummary,
 }
 
 // Best-effort: a failure to persist a project as a local project must not
@@ -239,7 +239,7 @@ fn get_program_overview(
 }
 
 #[tauri::command]
-fn list_projects(app: AppHandle) -> Result<Vec<ProjectMetadata>, String> {
+fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
     project_storage::list_projects(&app)
 }
 
@@ -250,16 +250,26 @@ fn open_project(
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
     id: String,
 ) -> Result<LoadedProject, String> {
-    let (export, metadata) = project_storage::load_project(&app, &id)?;
+    let (export, project) = project_storage::load_project(&app, &id)?;
+
+    // Availability is re-tested fresh by `load_project` on every call, so
+    // this never restores a session for Ghidra project files that aren't
+    // actually there right now -- and never permanently forgets the
+    // reference either, since `project.metadata.session` itself is left
+    // untouched on disk.
+    let session_to_restore = if project.session_available {
+        project.metadata.session.clone()
+    } else {
+        None
+    };
 
     *session_state
         .lock()
-        .map_err(|_| "the analysis session lock was poisoned".to_owned())? =
-        metadata.session.clone();
+        .map_err(|_| "the analysis session lock was poisoned".to_owned())? = session_to_restore;
 
     store_export(&export_state, export.clone())?;
 
-    Ok(LoadedProject { export, metadata })
+    Ok(LoadedProject { export, project })
 }
 
 #[tauri::command]
