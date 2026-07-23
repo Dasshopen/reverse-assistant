@@ -671,6 +671,41 @@ mod tests {
     }
 
     #[test]
+    fn delete_project_of_a_live_project_whose_ghidra_directory_is_already_gone_succeeds() {
+        let root = isolated_root("delete-live-already-gone");
+        let managed_ghidra_root = isolated_managed_ghidra_root("delete-live-already-gone");
+        fs::create_dir_all(&managed_ghidra_root).expect("the managed root should be created");
+
+        // A "live" project (has a session reference) whose Ghidra project
+        // directory was deleted by some other means after the fact -- e.g.
+        // the user manually cleared the Ghidra analysis folder, or an
+        // earlier `delete_project` run already removed it. This must not be
+        // treated like the "unsafe external path" cases: `is_dir()` is false,
+        // so the containment check and the Ghidra-directory removal are
+        // both skipped entirely, and only the project's own local record is
+        // removed.
+        let ghidra_project_dir = managed_ghidra_root.join("run-already-gone");
+        assert!(
+            !ghidra_project_dir.exists(),
+            "the Ghidra project directory must not exist for this test"
+        );
+
+        let export = sample_export("sample.exe");
+        let session = sample_session(&ghidra_project_dir);
+        let saved = save_project_at(&root, "Live But Orphaned", &export, Some(session))
+            .expect("saving should succeed");
+
+        delete_project_at(&root, &saved.id, &managed_ghidra_root).expect(
+            "deleting a live project whose Ghidra directory is already gone should succeed",
+        );
+
+        assert!(!project_dir_at(&root, &saved.id).is_dir());
+
+        fs::remove_dir_all(&root).expect("cleanup: root");
+        fs::remove_dir_all(&managed_ghidra_root).expect("cleanup: managed root");
+    }
+
+    #[test]
     fn deleting_an_unknown_project_id_is_an_error() {
         let root = isolated_root("delete-unknown");
         let managed_ghidra_root = isolated_managed_ghidra_root("delete-unknown");
