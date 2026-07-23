@@ -34,6 +34,9 @@ used to validate BSim end to end before deciding whether/how to scale it.
   the shipped Ghidra extension) that queries every function of an analyzed
   reference project back against the built database, to prove the whole
   generate → ingest → query pipeline actually works.
+- `scripts/verify-corpus.ps1` — runs that validator against every reference
+  project and checks an explicit success marker. This is necessary because
+  `analyzeHeadless` can return exit code 0 even when a post-script fails.
 - `sources/`, `build/` — gitignored. Downloaded archives, compiled
   DLLs/PDBs, Ghidra projects, and the resulting `.mv.db` all live here,
   regenerated locally by the scripts above. Nothing under these two
@@ -58,6 +61,9 @@ working hashes but weak or absent names.
 
 # 2. Analyze them and build the BSim database
 .\scripts\build-corpus-database.ps1 -GhidraInstallDir "C:\path\to\ghidra_12.x_PUBLIC"
+
+# 3. Verify every reference function against the resulting database
+.\scripts\verify-corpus.ps1 -GhidraInstallDir "C:\path\to\ghidra_12.x_PUBLIC"
 ```
 
 This produces `build\reverse-assistant-seed.mv.db`.
@@ -72,12 +78,14 @@ or compile profiles — expand only after checking the pipeline still holds.
 
 ### VerifyBsimQuery.java: what it actually checks and known caveats
 
-Every internal, non-thunk function is signed into one `DescriptionManager`
-and queried **in a single batch** (not one query per function — the
-generator accumulates into the same manager, so querying inside the scan
-loop would silently include every previously-scanned function in each
-successive query). The script fails loudly if a function BSim scored
-doesn't produce a near-1.0 similarity match from its own executable.
+Every internal, non-thunk function is queried in a **bounded batch**. Each
+batch uses a fresh signature generator and `DescriptionManager`: signatures
+therefore cannot accumulate across successive queries, and a large program
+does not depend on one oversized BSim response. Query functions are tracked
+by entry-point address rather than name because names are not guaranteed to
+be unique in Ghidra. The script fails loudly if a function BSim scored
+produces neither its exact database record (same executable and address) nor
+a near-1.0 equivalent from its own executable.
 
 Two things are reported separately, not treated as failures:
 - **Functions BSim returns no result for at all** — observed for very small
@@ -89,16 +97,18 @@ Two things are reported separately, not treated as failures:
   with 40+ other 3-code-unit no-ops), so matching is checked as "same
   executable + near-1.0 similarity," not "exact same name."
 
-After both of those, a small residual (8/189 in zlib, 1/2711 in sqlite3)
-still fails the batch check. Spot-checking the sqlite3 outlier
-(`exprCodeBetween`) with a single, non-batched query against the same
-database shows it *does* self-match at similarity 1.0 — so this residual
-looks like a batch-query edge case in the verification harness itself, not
-a corpus defect. Documented here rather than chased further, since the
-corpus's correctness is already established by three independent checks:
-raw log output with real matched names/scores, same-executable near-1.0
-self-consistency for ~99.6% of functions across both libraries, and
-individual-query confirmation for the one sqlite3 outlier.
+The exact executable/address pair is accepted even if its regenerated score
+is below 1.0. This is intentional: `sqlite3JournalOpen` consistently returns
+its exact database record at similarity 0.873, while every other identity
+field matches. Requiring 1.0 there would reject a valid round trip because of
+minor signature-generation variance rather than detect a corpus error.
+
+Earlier versions sent every function in one oversized request. That caused
+intermittently incomplete batch responses (observed for 8/189 zlib functions
+and `exprCodeBetween` in sqlite3 even though an individual query self-matched
+at similarity 1.0). Bounded, isolated batches remove that harness artifact;
+any remaining scored function without either its exact database record or a
+same-executable near-1.0 equivalent is a real validation failure.
 
 **Not yet done:**
 - Publishing the built `.mv.db` as a GitHub Release asset (a public action
