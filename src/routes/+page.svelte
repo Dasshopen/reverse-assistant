@@ -991,6 +991,12 @@ interface ApplyRenamesResult {
     }
   }
 
+  function selectFunctionRenameSuggestion(name: string) {
+    functionRenameDraft = name;
+    functionRenameError = "";
+    functionRenameSuccess = "";
+  }
+
   async function checkBackendStatus() {
     backendStatus = await invoke<string>("get_backend_status");
   }
@@ -2090,15 +2096,25 @@ interface ApplyRenamesResult {
 
                 <ul>
                   {#each selectedIdentificationCandidates as candidate}
-                    <li>
-                      <span>
-                        {candidate.name}
-                        <em>
-                          ({candidate.library_family} {candidate.library_version}
-                          {candidate.library_variant}, {candidate.match_mode})
-                        </em>
-                      </span>
-                      <code>score {candidate.overall_score.toFixed(1)}</code>
+                    <li
+                      class="rename-suggestion-item"
+                      class:selected={functionRenameDraft === candidate.name}
+                    >
+                      <button
+                        type="button"
+                        class="rename-suggestion"
+                        title={`Use ${candidate.name} as the proposed Ghidra name`}
+                        onclick={() => selectFunctionRenameSuggestion(candidate.name)}
+                      >
+                        <span>
+                          {candidate.name}
+                          <em>
+                            ({candidate.library_family} {candidate.library_version}
+                            {candidate.library_variant}, {candidate.match_mode})
+                          </em>
+                        </span>
+                        <code>score {candidate.overall_score.toFixed(1)}</code>
+                      </button>
                     </li>
                   {/each}
                 </ul>
@@ -2115,15 +2131,25 @@ interface ApplyRenamesResult {
                   {:else}
                     <ul>
                       {#each selectedBsimResult.matches as candidate}
-                        <li>
-                          <span>
-                            {candidate.name}
-                            <em>({candidate.executable})</em>
-                          </span>
-                          <code>
-                            similarity {candidate.similarity.toFixed(3)} · significance
-                            {candidate.significance.toFixed(1)}
-                          </code>
+                        <li
+                          class="rename-suggestion-item"
+                          class:selected={functionRenameDraft === candidate.name}
+                        >
+                          <button
+                            type="button"
+                            class="rename-suggestion"
+                            title={`Use ${candidate.name} as the proposed Ghidra name`}
+                            onclick={() => selectFunctionRenameSuggestion(candidate.name)}
+                          >
+                            <span>
+                              {candidate.name}
+                              <em>({candidate.executable})</em>
+                            </span>
+                            <code>
+                              similarity {candidate.similarity.toFixed(3)} · significance
+                              {candidate.significance.toFixed(1)}
+                            </code>
+                          </button>
                         </li>
                       {/each}
                     </ul>
@@ -3090,6 +3116,39 @@ interface ApplyRenamesResult {
     border-radius: 0.5rem;
     background-color: #1f2937;
     overflow-wrap: anywhere;
+  }
+
+  .function-section li.rename-suggestion-item {
+    padding: 0;
+    transition: border-color 120ms ease, background-color 120ms ease;
+  }
+
+  .function-section li.rename-suggestion-item.selected {
+    border-color: #22d3ee;
+    background-color: #164e63;
+  }
+
+  .rename-suggestion {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem;
+    border-radius: 0.5rem;
+    background: transparent;
+    color: #f8fafc;
+    font-weight: 400;
+    text-align: left;
+  }
+
+  .rename-suggestion:hover:not(:disabled) {
+    background-color: rgb(34 211 238 / 10%);
+  }
+
+  .rename-suggestion code {
+    color: #e2e8f0;
+    text-align: right;
   }
 
   .function-section pre {
