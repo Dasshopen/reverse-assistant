@@ -85,6 +85,7 @@ mod tests {
             decompiled_code: None,
             calls: Vec::<FunctionCall>::new(),
             strings: Vec::new(),
+            library: None,
         }
     }
 
@@ -105,7 +106,8 @@ mod tests {
                 architecture: "x86_64".to_owned(),
                 endianness: Endianness::Little,
                 image_base: "0x140000000".to_owned(),
-                entry_points: vec!["0x1000".to_owned()],
+                external_entry_points: Vec::new(),
+                required_libraries: Vec::new(),
             },
             functions,
             strings,

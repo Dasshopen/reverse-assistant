@@ -11,7 +11,8 @@ public record ProgramMetadata(
     String architecture,
     String endianness,
     String imageBase,
-    List<String> entryPoints
+    List<ExternalEntryPointMetadata> externalEntryPoints,
+    List<String> requiredLibraries
 ) {
 
     private static final Pattern SHA_256_PATTERN =
@@ -28,10 +29,16 @@ public record ProgramMetadata(
         endianness = requireNonBlank(endianness, "endianness");
         imageBase = requireNonBlank(imageBase, "imageBase");
         Objects.requireNonNull(
-            entryPoints,
-            "entryPoints must not be null"
+            externalEntryPoints,
+            "externalEntryPoints must not be null"
         );
-        entryPoints = List.copyOf(entryPoints);
+        externalEntryPoints = List.copyOf(externalEntryPoints);
+
+        Objects.requireNonNull(
+            requiredLibraries,
+            "requiredLibraries must not be null"
+        );
+        requiredLibraries = List.copyOf(requiredLibraries);
 
         if (!SHA_256_PATTERN.matcher(sha256).matches()) {
             throw new IllegalArgumentException(
@@ -46,12 +53,6 @@ public record ProgramMetadata(
         }
 
         validateAddress(imageBase, "imageBase");
-        for (int index = 0; index < entryPoints.size(); index++) {
-            validateAddress(
-                entryPoints.get(index),
-                "entryPoints[" + index + "]"
-            );
-        }
     }
 
     private static String requireNonBlank(String value, String fieldName) {

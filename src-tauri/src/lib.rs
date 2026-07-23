@@ -15,6 +15,7 @@ use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
 use services::ghidra_installation::{self, GhidraInstallationStatus};
 use services::global_strings::{self, GlobalStringView};
+use services::imports_exports::{self, ImportView};
 
 #[derive(Debug, Clone, Serialize)]
 struct AutomaticAnalysisResult {
@@ -147,6 +148,38 @@ fn get_global_strings(
     Ok(global_strings::build_global_strings_view(export))
 }
 
+#[tauri::command]
+fn get_imports(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+) -> Result<Vec<ImportView>, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+
+    let export = export.as_ref().ok_or_else(|| {
+        "No analysis is loaded. Analyze or import a binary before requesting its imports."
+            .to_owned()
+    })?;
+
+    Ok(imports_exports::list_imports(export))
+}
+
+#[tauri::command]
+fn get_external_entry_points(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+) -> Result<Vec<models::ghidra_export::ExternalEntryPoint>, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+
+    let export = export.as_ref().ok_or_else(|| {
+        "No analysis is loaded. Analyze or import a binary before requesting its external entry points."
+            .to_owned()
+    })?;
+
+    Ok(export.program.external_entry_points.clone())
+}
+
 #[tauri::command(async)]
 fn decompile_function(
     app: AppHandle,
@@ -185,7 +218,9 @@ pub fn run() {
             analyze_binary_with_ghidra,
             decompile_function,
             get_call_graph,
-            get_global_strings
+            get_global_strings,
+            get_imports,
+            get_external_entry_points
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

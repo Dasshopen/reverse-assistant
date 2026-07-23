@@ -16,6 +16,13 @@ import ghidra.util.exception.CancelledException;
 
 public final class FunctionMetadataCollector {
 
+    // Ghidra's own placeholder namespace for external functions whose real
+    // source library it could not determine (observed for every ELF import
+    // in testing -- ELF imports are not attributed to their real .so this
+    // way, unlike PE imports, which land in a namespace named after the
+    // real DLL). Never surfaced as if it were a real library name.
+    private static final String UNKNOWN_LIBRARY_NAMESPACE = "<EXTERNAL>";
+
     public List<FunctionMetadata> collect(
         Program program,
         TaskMonitor monitor
@@ -130,8 +137,19 @@ public final class FunctionMetadataCollector {
             function.isExternal(),
             function.isThunk(),
             null,
-            collectCalls(function)
+            collectCalls(function),
+            collectLibraryName(function)
         );
+    }
+
+    private static String collectLibraryName(Function function) {
+        if (!function.isExternal()) {
+            return null;
+        }
+
+        String namespaceName = function.getParentNamespace().getName();
+
+        return UNKNOWN_LIBRARY_NAMESPACE.equals(namespaceName) ? null : namespaceName;
     }
 
     private static List<FunctionCallMetadata> collectCalls(

@@ -7,8 +7,15 @@
         "architecture": "x86_64",
         "endianness": "little",
         "image_base": "0x140000000",
-        "entry_points": [
-            "0x140001000"
+        "external_entry_points": [
+            {
+                "address": "0x140001150",
+                "name": "FUN_140001150",
+                "kind": "function"
+            }
+        ],
+        "required_libraries": [
+            "MSVCRT.DLL"
         ]
     },
     "functions": [
@@ -27,10 +34,22 @@
             "decompiled_code": "int FUN_140001150(char *input) {\n  return strcmp(input, \"secret\");\n}",
             "calls": [
                 {
-                    "target_address": null,
+                    "target_address": "0x140002000",
                     "target_name": "strcmp"
                 }
-            ]
+            ],
+            "library": null
+        },
+        {
+            "entry_address": "0x140002000",
+            "name": "strcmp",
+            "return_type": "int",
+            "parameters": [],
+            "is_external": true,
+            "is_thunk": false,
+            "decompiled_code": null,
+            "calls": [],
+            "library": "MSVCRT.DLL"
         }
     ],
     "strings": [

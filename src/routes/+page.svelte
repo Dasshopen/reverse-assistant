@@ -10,6 +10,14 @@
     string_count: number;
   }
 
+  type ExternalEntryPointKind = "function" | "data" | "unknown";
+
+  interface ExternalEntryPoint {
+    address: string;
+    name: string | null;
+    kind: ExternalEntryPointKind;
+  }
+
   interface ProgramMetadata {
   name: string;
   sha256: string;
@@ -17,7 +25,8 @@
   architecture: string;
   endianness: "little" | "big";
   image_base: string;
-  entry_points: string[];
+  external_entry_points: ExternalEntryPoint[];
+  required_libraries: string[];
 }
 
 interface FunctionParameter {
@@ -40,6 +49,7 @@ interface GhidraFunction {
   decompiled_code: string | null;
   calls: FunctionCall[];
   strings: string[];
+  library: string | null;
 }
 
 interface GhidraExport {
@@ -140,6 +150,13 @@ interface GlobalStringView {
   referencing_functions: ReferencingFunction[];
 }
 
+interface ImportView {
+  entry_address: string;
+  name: string;
+  library: string | null;
+  used_by_function_count: number;
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -187,6 +204,46 @@ interface GlobalStringView {
     return globalStrings.filter((entry) =>
       entry.value.toLowerCase().includes(query),
     );
+  });
+
+  let imports = $state<ImportView[] | null>(null);
+  let importsError = $state("");
+  let isLoadingImports = $state(false);
+  let importsSearch = $state("");
+
+  let filteredImports = $derived.by(() => {
+    if (!imports) return [];
+
+    const query = importsSearch.trim().toLowerCase();
+    if (!query) return imports;
+
+    return imports.filter(
+      (entry) =>
+        entry.name.toLowerCase().includes(query) ||
+        (entry.library ?? "").toLowerCase().includes(query),
+    );
+  });
+
+  let externalEntryPoints = $state<ExternalEntryPoint[] | null>(null);
+  let externalEntryPointsError = $state("");
+  let isLoadingExternalEntryPoints = $state(false);
+  let externalEntryPointsSearch = $state("");
+  let externalEntryPointsFunctionsOnly = $state(true);
+
+  let filteredExternalEntryPoints = $derived.by(() => {
+    if (!externalEntryPoints) return [];
+
+    const query = externalEntryPointsSearch.trim().toLowerCase();
+
+    return externalEntryPoints.filter((entry) => {
+      if (externalEntryPointsFunctionsOnly && entry.kind !== "function") {
+        return false;
+      }
+
+      if (!query) return true;
+
+      return (entry.name ?? "").toLowerCase().includes(query);
+    });
   });
 
   let callGraphDirection = $state<CallGraphDirection>("outgoing");
@@ -276,6 +333,56 @@ interface GlobalStringView {
       globalStringsError = String(error);
     } finally {
       isLoadingGlobalStrings = false;
+    }
+  }
+
+  $effect(() => {
+    if (!importedExport) {
+      imports = null;
+      importsError = "";
+      return;
+    }
+
+    requestImports();
+  });
+
+  async function requestImports() {
+    isLoadingImports = true;
+    importsError = "";
+
+    try {
+      imports = await invoke<ImportView[]>("get_imports");
+    } catch (error) {
+      imports = null;
+      importsError = String(error);
+    } finally {
+      isLoadingImports = false;
+    }
+  }
+
+  $effect(() => {
+    if (!importedExport) {
+      externalEntryPoints = null;
+      externalEntryPointsError = "";
+      return;
+    }
+
+    requestExternalEntryPoints();
+  });
+
+  async function requestExternalEntryPoints() {
+    isLoadingExternalEntryPoints = true;
+    externalEntryPointsError = "";
+
+    try {
+      externalEntryPoints = await invoke<ExternalEntryPoint[]>(
+        "get_external_entry_points",
+      );
+    } catch (error) {
+      externalEntryPoints = null;
+      externalEntryPointsError = String(error);
+    } finally {
+      isLoadingExternalEntryPoints = false;
     }
   }
 
@@ -712,6 +819,130 @@ interface GlobalStringView {
                           {fn.name}
                         </button>
                       {/each}
+                    </div>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+      </section>
+    {/if}
+
+    {#if importedExport}
+      <section class="global-strings" aria-labelledby="imports-title">
+        <h2 id="imports-title">Imports (global)</h2>
+
+        <input
+          type="text"
+          class="global-strings-search"
+          placeholder="Filter by name or library..."
+          bind:value={importsSearch}
+        />
+
+        {#if isLoadingImports}
+          <p>Loading imports...</p>
+        {:else if importsError}
+          <p class="error" role="alert">{importsError}</p>
+        {:else if imports}
+          <p class="global-strings-stats">
+            {filteredImports.length} of {imports.length} imports
+          </p>
+
+          {#if filteredImports.length === 0}
+            <p>No import matches this filter.</p>
+          {:else}
+            <ul class="global-strings-list">
+              {#each filteredImports as entry (entry.entry_address)}
+                <li>
+                  <div class="global-strings-entry-header">
+                    <code>{entry.entry_address}</code>
+                    <span class="global-strings-value">
+                      {entry.name}
+                      <em>({entry.library ?? "unknown library"})</em>
+                    </span>
+                    <span class="global-strings-count">
+                      used by {entry.used_by_function_count}
+                      {entry.used_by_function_count === 1 ? "function" : "functions"}
+                    </span>
+                  </div>
+
+                  <div class="global-strings-functions">
+                    <button
+                      type="button"
+                      class="global-strings-function"
+                      disabled={entry.entry_address === selectedFunctionAddress}
+                      onclick={() => {
+                        selectedFunctionAddress = entry.entry_address;
+                      }}
+                    >
+                      Select function
+                    </button>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+      </section>
+    {/if}
+
+    {#if importedExport}
+      <section class="global-strings" aria-labelledby="external-entry-points-title">
+        <h2 id="external-entry-points-title">External entry points (exports)</h2>
+
+        <p class="global-strings-stats">
+          On a real library/DLL this is a clean export table; on a plain executable it is
+          broader and noisier (closer to every globally-visible symbol).
+        </p>
+
+        <div class="external-entry-points-controls">
+          <input
+            type="text"
+            class="global-strings-search"
+            placeholder="Filter by name..."
+            bind:value={externalEntryPointsSearch}
+          />
+
+          <label class="external-entry-points-toggle">
+            <input type="checkbox" bind:checked={externalEntryPointsFunctionsOnly} />
+            Functions only
+          </label>
+        </div>
+
+        {#if isLoadingExternalEntryPoints}
+          <p>Loading external entry points...</p>
+        {:else if externalEntryPointsError}
+          <p class="error" role="alert">{externalEntryPointsError}</p>
+        {:else if externalEntryPoints}
+          <p class="global-strings-stats">
+            {filteredExternalEntryPoints.length} of {externalEntryPoints.length} entries
+          </p>
+
+          {#if filteredExternalEntryPoints.length === 0}
+            <p>No entry matches this filter.</p>
+          {:else}
+            <ul class="global-strings-list">
+              {#each filteredExternalEntryPoints as entry (entry.address)}
+                <li>
+                  <div class="global-strings-entry-header">
+                    <code>{entry.address}</code>
+                    <span class="global-strings-value">{entry.name ?? "(anonymous)"}</span>
+                    <span class="global-strings-count">{entry.kind}</span>
+                  </div>
+
+                  {#if entry.kind === "function"}
+                    <div class="global-strings-functions">
+                      <button
+                        type="button"
+                        class="global-strings-function"
+                        disabled={entry.address === selectedFunctionAddress}
+                        onclick={() => {
+                          selectedFunctionAddress = entry.address;
+                        }}
+                      >
+                        Select function
+                      </button>
                     </div>
                   {/if}
                 </li>
@@ -1208,6 +1439,12 @@ interface GlobalStringView {
     overflow-wrap: anywhere;
   }
 
+  .global-strings-value em {
+    margin-left: 0.35rem;
+    color: #94a3b8;
+    font-style: normal;
+  }
+
   .global-strings-count {
     flex-shrink: 0;
     color: #94a3b8;
@@ -1242,6 +1479,28 @@ interface GlobalStringView {
     color: #f9fafb;
     cursor: default;
     opacity: 1;
+  }
+
+  .external-entry-points-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .external-entry-points-controls .global-strings-search {
+    flex: 1 1 auto;
+    margin-bottom: 0;
+  }
+
+  .external-entry-points-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: #94a3b8;
+    font-size: 0.85rem;
+    white-space: nowrap;
   }
 
   .backend-check {

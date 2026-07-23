@@ -71,15 +71,45 @@ public final class GhidraExportJsonWriter {
             metadata.imageBase()
         );
 
-        JsonArray entryPoints = new JsonArray();
+        program.add(
+            "external_entry_points",
+            createExternalEntryPointsArray(metadata.externalEntryPoints())
+        );
 
-        for (String entryPoint : metadata.entryPoints()) {
-            entryPoints.add(entryPoint);
+        JsonArray requiredLibraries = new JsonArray();
+
+        for (String library : metadata.requiredLibraries()) {
+            requiredLibraries.add(library);
         }
 
-        program.add("entry_points", entryPoints);
+        program.add("required_libraries", requiredLibraries);
 
         return program;
+    }
+
+    private static JsonArray createExternalEntryPointsArray(
+        List<ExternalEntryPointMetadata> externalEntryPoints
+    ) {
+        JsonArray array = new JsonArray();
+
+        for (ExternalEntryPointMetadata entryPoint : externalEntryPoints) {
+            JsonObject entryPointObject = new JsonObject();
+
+            entryPointObject.addProperty("address", entryPoint.address());
+
+            if (entryPoint.name() == null) {
+                entryPointObject.add("name", JsonNull.INSTANCE);
+            }
+            else {
+                entryPointObject.addProperty("name", entryPoint.name());
+            }
+
+            entryPointObject.addProperty("kind", entryPoint.kind());
+
+            array.add(entryPointObject);
+        }
+
+        return array;
     }
 
     private static JsonArray createFunctionsArray(
@@ -138,6 +168,13 @@ public final class GhidraExportJsonWriter {
             "calls",
             createCallsArray(metadata.calls())
         );
+
+        if (metadata.libraryName() == null) {
+            function.add("library", JsonNull.INSTANCE);
+        }
+        else {
+            function.addProperty("library", metadata.libraryName());
+        }
 
         return function;
     }

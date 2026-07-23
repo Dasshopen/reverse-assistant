@@ -1,8 +1,11 @@
-use reverse_assistant_lib::models::ghidra_export::{Endianness, GhidraExport};
+use reverse_assistant_lib::models::ghidra_export::{
+    Endianness, ExternalEntryPointKind, GhidraExport,
+};
 
 const V1_EXAMPLE_JSON: &str = include_str!("../../docs/contracts/ghidra-export-v1.example.json");
 const V2_EXAMPLE_JSON: &str = include_str!("../../docs/contracts/ghidra-export-v2.example.json");
-const REAL_V2_EXPORT_JSON: &str = include_str!("fixtures/real-fauxware-export-v2.json");
+const REAL_ELF_EXPORT_JSON: &str = include_str!("fixtures/real-fauxware-export-v2.json");
+const REAL_PE_EXPORT_JSON: &str = include_str!("fixtures/real-sqlite3-export-v2.json");
 
 fn parsed_v2_example() -> GhidraExport {
     GhidraExport::parse_and_validate(V2_EXAMPLE_JSON).expect("the v2 example JSON should be valid")
@@ -15,31 +18,42 @@ fn valid_ghidra_export_v2_deserializes() {
     assert_eq!(export.schema_version, 2);
     assert_eq!(export.program.name, "sample.exe");
     assert_eq!(export.program.endianness, Endianness::Little);
-    assert_eq!(export.functions.len(), 1);
+    assert_eq!(export.program.required_libraries, vec!["MSVCRT.DLL"]);
+    assert_eq!(export.program.external_entry_points.len(), 1);
+    assert_eq!(
+        export.program.external_entry_points[0].address,
+        "0x140001150"
+    );
+    assert_eq!(
+        export.program.external_entry_points[0].name.as_deref(),
+        Some("FUN_140001150")
+    );
+    assert_eq!(
+        export.program.external_entry_points[0].kind,
+        ExternalEntryPointKind::Function
+    );
 
-    let function = &export.functions[0];
+    assert_eq!(export.functions.len(), 2);
 
-    assert_eq!(function.entry_address, "0x140001150");
-    assert_eq!(function.name, "FUN_140001150");
-    assert_eq!(function.calls.len(), 1);
-    assert_eq!(function.calls[0].target_address, None);
+    let internal = &export.functions[0];
+    assert_eq!(internal.entry_address, "0x140001150");
+    assert_eq!(internal.library, None);
+
+    let external = &export.functions[1];
+    assert_eq!(external.name, "strcmp");
+    assert!(external.is_external);
+    assert_eq!(external.library.as_deref(), Some("MSVCRT.DLL"));
 
     // Function objects carry no wire-format `strings` field in v2 -- the
     // canonical model still exposes one, derived from the global table.
-    assert_eq!(function.strings, vec!["secret"]);
+    assert_eq!(internal.strings, vec!["secret"]);
 
     assert_eq!(export.strings.len(), 1);
     assert_eq!(export.strings[0].address, "0x140003000");
-    assert_eq!(export.strings[0].value, "secret");
-    assert_eq!(export.strings[0].references.len(), 1);
-    assert_eq!(
-        export.strings[0].references[0].function_address.as_deref(),
-        Some("0x140001150")
-    );
 }
 
 #[test]
-fn v1_export_still_imports_with_no_string_cross_references() {
+fn v1_export_still_imports_with_honest_gaps() {
     let export = GhidraExport::parse_and_validate(V1_EXAMPLE_JSON)
         .expect("the v1 example JSON should still be accepted");
 
@@ -50,57 +64,75 @@ fn v1_export_still_imports_with_no_string_cross_references() {
     // v1 never captured string addresses -- the global cross-reference
     // table is legitimately empty, not an error.
     assert!(export.strings.is_empty());
+
+    // v1 never attributed imports to a library or captured required
+    // libraries at all.
+    assert_eq!(export.functions[0].library, None);
+    assert!(export.program.required_libraries.is_empty());
+
+    // v1's bare entry_points addresses become honestly-unknown entries,
+    // not guessed names/kinds.
+    assert!(!export.program.external_entry_points.is_empty());
+    for entry_point in &export.program.external_entry_points {
+        assert_eq!(entry_point.name, None);
+        assert_eq!(entry_point.kind, ExternalEntryPointKind::Unknown);
+    }
 }
 
 #[test]
-fn real_binary_v2_export_has_a_string_referenced_multiple_times_from_one_function() {
-    let export = GhidraExport::parse_and_validate(REAL_V2_EXPORT_JSON)
-        .expect("a real headless v2 export should be valid");
+fn real_elf_export_has_no_per_import_library_but_real_required_libraries() {
+    let export = GhidraExport::parse_and_validate(REAL_ELF_EXPORT_JSON)
+        .expect("a real headless ELF v2 export should be valid");
 
-    assert_eq!(export.schema_version, 2);
+    assert_eq!(export.program.required_libraries, vec!["libc.so.6"]);
 
-    // The hardcoded backdoor password in this real fauxware CTF binary: 3
-    // real Ghidra references, 2 attributed to `authenticate` (0x400664) and
-    // 1 with no containing function -- a genuine real-data case of
-    // reference_count > distinct-referencing-function-count.
-    let backdoor = export
-        .strings
-        .iter()
-        .find(|string| string.value == "SOSNEAKY")
-        .expect("the SOSNEAKY string should be present");
-
-    assert_eq!(backdoor.references.len(), 3);
-
-    let authenticate_references = backdoor
-        .references
-        .iter()
-        .filter(|reference| reference.function_address.as_deref() == Some("0x400664"))
-        .count();
-    assert_eq!(authenticate_references, 2);
-
-    let unattributed_references = backdoor
-        .references
-        .iter()
-        .filter(|reference| reference.function_address.is_none())
-        .count();
-    assert_eq!(unattributed_references, 1);
-
-    // The canonical per-function view still derives correctly from the
-    // global table: `authenticate` should list "SOSNEAKY" exactly once
-    // (deduplicated), matching the pre-v2 per-function semantics.
-    let authenticate = export
+    let strcmp = export
         .functions
         .iter()
-        .find(|function| function.entry_address == "0x400664")
-        .expect("authenticate should be present");
-    assert_eq!(
-        authenticate
-            .strings
-            .iter()
-            .filter(|s| *s == "SOSNEAKY")
-            .count(),
-        1
-    );
+        .find(|function| function.name == "strcmp" && function.is_external)
+        .expect("strcmp should be present as an external function");
+
+    // ELF imports are never attributed to a specific library, even though
+    // the whole program's real dependency (libc.so.6) is known above.
+    assert_eq!(strcmp.library, None);
+
+    // `main` is a real function reachable externally on this ELF
+    // executable -- confirms external_entry_points carries real
+    // name/kind data, not just addresses.
+    let main_entry_point = export
+        .program
+        .external_entry_points
+        .iter()
+        .find(|entry_point| entry_point.name.as_deref() == Some("main"))
+        .expect("main should appear as an external entry point");
+    assert_eq!(main_entry_point.kind, ExternalEntryPointKind::Function);
+}
+
+#[test]
+fn real_pe_export_attributes_imports_to_the_real_dll_and_lists_clean_exports() {
+    let export = GhidraExport::parse_and_validate(REAL_PE_EXPORT_JSON)
+        .expect("a real headless PE v2 export should be valid");
+
+    assert!(export
+        .program
+        .required_libraries
+        .iter()
+        .any(|library| library == "KERNEL32.DLL"));
+
+    let kernel32_import = export
+        .functions
+        .iter()
+        .find(|function| function.is_external && function.name == "FlushFileBuffers")
+        .expect("FlushFileBuffers should be present as an external function");
+    assert_eq!(kernel32_import.library.as_deref(), Some("KERNEL32.DLL"));
+
+    let sqlite3_open = export
+        .program
+        .external_entry_points
+        .iter()
+        .find(|entry_point| entry_point.name.as_deref() == Some("sqlite3_open"))
+        .expect("sqlite3_open should be a real export of this DLL");
+    assert_eq!(sqlite3_open.kind, ExternalEntryPointKind::Function);
 }
 
 #[test]
@@ -166,13 +198,13 @@ fn invalid_image_base_is_rejected() {
 #[test]
 fn invalid_nested_addresses_are_rejected() {
     let mut export = parsed_v2_example();
-    export.program.entry_points[0] = String::from("invalid");
+    export.program.external_entry_points[0].address = String::from("invalid");
 
     assert_eq!(
         export
             .validate()
-            .expect_err("an invalid entry point should be rejected"),
-        "program.entry_points[0] must be a lowercase hexadecimal string beginning with 0x"
+            .expect_err("an invalid external entry point address should be rejected"),
+        "program.external_entry_points[0].address must be a lowercase hexadecimal string beginning with 0x"
     );
 
     let mut export = parsed_v2_example();
@@ -194,6 +226,19 @@ fn invalid_nested_addresses_are_rejected() {
             .expect_err("an invalid call target address should be rejected"),
         "functions[0].calls[0].target_address must be a lowercase hexadecimal string beginning with 0x"
     );
+}
+
+#[test]
+fn duplicate_external_entry_point_address_is_rejected() {
+    let mut export = parsed_v2_example();
+    let duplicate = export.program.external_entry_points[0].clone();
+    export.program.external_entry_points.push(duplicate);
+
+    let error = export
+        .validate()
+        .expect_err("duplicate external entry point addresses should be rejected");
+
+    assert_eq!(error, "duplicate external entry point address: 0x140001150");
 }
 
 #[test]

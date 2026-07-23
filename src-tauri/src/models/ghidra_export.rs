@@ -45,6 +45,27 @@ pub struct StringReference {
     pub function_address: Option<String>,
 }
 
+// Ghidra's own "external entry point" concept: any address reachable from
+// outside the analyzed code -- covers both a program's true execution entry
+// and, for a library, its exported functions/data. Not called "exports":
+// on a plain ELF executable this set is broader/noisier than a real DLL's
+// export table (mostly its global symbol table), so the name matches what
+// Ghidra itself means by it rather than overclaiming.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ExternalEntryPoint {
+    pub address: String,
+    pub name: Option<String>,
+    pub kind: ExternalEntryPointKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExternalEntryPointKind {
+    Function,
+    Data,
+    Unknown,
+}
+
 impl GhidraExport {
     pub fn parse_and_validate(json: &str) -> Result<Self, String> {
         let probe: SchemaVersionProbe = serde_json::from_str(json)
@@ -91,9 +112,17 @@ impl GhidraExport {
 
         validate_address(&self.program.image_base, "program.image_base")?;
 
-        for (index, entry_point) in self.program.entry_points.iter().enumerate() {
-            let field_name = format!("program.entry_points[{index}]");
-            validate_address(entry_point, &field_name)?;
+        let mut entry_point_addresses = HashSet::new();
+        for (index, entry_point) in self.program.external_entry_points.iter().enumerate() {
+            let field_name = format!("program.external_entry_points[{index}].address");
+            validate_address(&entry_point.address, &field_name)?;
+
+            if !entry_point_addresses.insert(entry_point.address.as_str()) {
+                return Err(format!(
+                    "duplicate external entry point address: {}",
+                    entry_point.address
+                ));
+            }
         }
 
         let mut function_addresses = HashSet::new();
@@ -151,23 +180,87 @@ struct SchemaVersionProbe {
     schema_version: u32,
 }
 
-// Schema v1 wire format. `GhidraFunction` already matches v1's exact
-// per-function shape (including its literal `strings: Vec<String>`), so no
-// separate raw function type is needed for this version.
+// Schema v1 wire format -- frozen historically. Diverges from the
+// canonical shape (no `library` on functions, no `required_libraries`, and
+// `entry_points` was a bare address list) so it gets its own raw types
+// rather than reusing the canonical ones.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct RawExportV1 {
     schema_version: u32,
-    program: ProgramMetadata,
-    functions: Vec<GhidraFunction>,
+    program: RawProgramMetadataV1,
+    functions: Vec<RawFunctionV1>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawProgramMetadataV1 {
+    name: String,
+    sha256: String,
+    format: String,
+    architecture: String,
+    endianness: Endianness,
+    image_base: String,
+    entry_points: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawFunctionV1 {
+    entry_address: String,
+    name: String,
+    return_type: String,
+    parameters: Vec<FunctionParameter>,
+    is_external: bool,
+    is_thunk: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    decompiled_code: Option<String>,
+    calls: Vec<FunctionCall>,
+    strings: Vec<String>,
 }
 
 impl From<RawExportV1> for GhidraExport {
     fn from(raw: RawExportV1) -> Self {
         GhidraExport {
             schema_version: raw.schema_version,
-            program: raw.program,
-            functions: raw.functions,
+            program: ProgramMetadata {
+                name: raw.program.name,
+                sha256: raw.program.sha256,
+                format: raw.program.format,
+                architecture: raw.program.architecture,
+                endianness: raw.program.endianness,
+                image_base: raw.program.image_base,
+                // v1 never captured a name or kind for these addresses --
+                // represented honestly as unknown rather than guessed.
+                external_entry_points: raw
+                    .program
+                    .entry_points
+                    .into_iter()
+                    .map(|address| ExternalEntryPoint {
+                        address,
+                        name: None,
+                        kind: ExternalEntryPointKind::Unknown,
+                    })
+                    .collect(),
+                required_libraries: Vec::new(),
+            },
+            functions: raw
+                .functions
+                .into_iter()
+                .map(|raw_function| GhidraFunction {
+                    entry_address: raw_function.entry_address,
+                    name: raw_function.name,
+                    return_type: raw_function.return_type,
+                    parameters: raw_function.parameters,
+                    is_external: raw_function.is_external,
+                    is_thunk: raw_function.is_thunk,
+                    decompiled_code: raw_function.decompiled_code,
+                    calls: raw_function.calls,
+                    strings: raw_function.strings,
+                    // v1 never attributed an import to its source library.
+                    library: None,
+                })
+                .collect(),
             strings: Vec::new(),
         }
     }
@@ -175,14 +268,39 @@ impl From<RawExportV1> for GhidraExport {
 
 // Schema v2 wire format: functions no longer carry their own `strings`
 // array (redundant with the global table below); a whole-program `strings`
-// table normalizes address, value, and every real reference to it.
+// table normalizes address, value, and every real reference to it. Program
+// metadata gains real per-import library attribution potential via
+// `required_libraries`, and `external_entry_points` replaces the old bare
+// `entry_points` address list with real name/kind data.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct RawExportV2 {
     schema_version: u32,
-    program: ProgramMetadata,
+    program: RawProgramMetadataV2,
     functions: Vec<RawFunctionV2>,
     strings: Vec<RawGlobalString>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawProgramMetadataV2 {
+    name: String,
+    sha256: String,
+    format: String,
+    architecture: String,
+    endianness: Endianness,
+    image_base: String,
+    external_entry_points: Vec<RawExternalEntryPoint>,
+    required_libraries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawExternalEntryPoint {
+    address: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    name: Option<String>,
+    kind: ExternalEntryPointKind,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -197,6 +315,8 @@ struct RawFunctionV2 {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     decompiled_code: Option<String>,
     calls: Vec<FunctionCall>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    library: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -258,6 +378,7 @@ impl From<RawExportV2> for GhidraExport {
                     decompiled_code: raw_function.decompiled_code,
                     calls: raw_function.calls,
                     strings,
+                    library: raw_function.library,
                 }
             })
             .collect();
@@ -281,7 +402,25 @@ impl From<RawExportV2> for GhidraExport {
 
         GhidraExport {
             schema_version: raw.schema_version,
-            program: raw.program,
+            program: ProgramMetadata {
+                name: raw.program.name,
+                sha256: raw.program.sha256,
+                format: raw.program.format,
+                architecture: raw.program.architecture,
+                endianness: raw.program.endianness,
+                image_base: raw.program.image_base,
+                external_entry_points: raw
+                    .program
+                    .external_entry_points
+                    .into_iter()
+                    .map(|raw_entry_point| ExternalEntryPoint {
+                        address: raw_entry_point.address,
+                        name: raw_entry_point.name,
+                        kind: raw_entry_point.kind,
+                    })
+                    .collect(),
+                required_libraries: raw.program.required_libraries,
+            },
             functions,
             strings,
         }
@@ -316,8 +455,7 @@ pub(crate) fn is_valid_address(value: &str) -> bool {
             .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ProgramMetadata {
     pub name: String,
     pub sha256: String,
@@ -325,18 +463,18 @@ pub struct ProgramMetadata {
     pub architecture: String,
     pub endianness: Endianness,
     pub image_base: String,
-    pub entry_points: Vec<String>,
+    pub external_entry_points: Vec<ExternalEntryPoint>,
+    pub required_libraries: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Endianness {
     Little,
     Big,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GhidraFunction {
     pub entry_address: String,
     pub name: String,
@@ -344,10 +482,13 @@ pub struct GhidraFunction {
     pub parameters: Vec<FunctionParameter>,
     pub is_external: bool,
     pub is_thunk: bool,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub decompiled_code: Option<String>,
     pub calls: Vec<FunctionCall>,
     pub strings: Vec<String>,
+    // Real DLL name for PE imports; always `None` for ELF (Ghidra doesn't
+    // attribute individual ELF imports to their real .so) and for
+    // non-external functions.
+    pub library: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -12,7 +12,8 @@ public record FunctionMetadata(
     boolean isExternal,
     boolean isThunk,
     String decompiledCode,
-    List<FunctionCallMetadata> calls
+    List<FunctionCallMetadata> calls,
+    String libraryName
 ) {
 
     private static final Pattern ADDRESS_PATTERN =

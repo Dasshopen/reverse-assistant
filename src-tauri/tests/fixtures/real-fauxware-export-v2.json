@@ -7,23 +7,90 @@
     "architecture": "x86_64",
     "endianness": "little",
     "image_base": "0x400000",
-    "entry_points": [
-      "0x4004e0",
-      "0x400580",
-      "0x400664",
-      "0x4006ed",
-      "0x4006fd",
-      "0x40071d",
-      "0x4007e0",
-      "0x400870",
-      "0x4008b8",
-      "0x4008c8",
-      "0x600e40",
-      "0x601038",
-      "0x601040",
-      "0x601048",
-      "0x601050",
-      "0x601060"
+    "external_entry_points": [
+      {
+        "address": "0x4004e0",
+        "name": "_init",
+        "kind": "function"
+      },
+      {
+        "address": "0x400580",
+        "name": "_start",
+        "kind": "function"
+      },
+      {
+        "address": "0x400664",
+        "name": "authenticate",
+        "kind": "function"
+      },
+      {
+        "address": "0x4006ed",
+        "name": "accepted",
+        "kind": "function"
+      },
+      {
+        "address": "0x4006fd",
+        "name": "rejected",
+        "kind": "function"
+      },
+      {
+        "address": "0x40071d",
+        "name": "main",
+        "kind": "function"
+      },
+      {
+        "address": "0x4007e0",
+        "name": "__libc_csu_init",
+        "kind": "function"
+      },
+      {
+        "address": "0x400870",
+        "name": "__libc_csu_fini",
+        "kind": "function"
+      },
+      {
+        "address": "0x4008b8",
+        "name": "_fini",
+        "kind": "function"
+      },
+      {
+        "address": "0x4008c8",
+        "name": "_IO_stdin_used",
+        "kind": "data"
+      },
+      {
+        "address": "0x600e40",
+        "name": "__DTOR_END__",
+        "kind": "data"
+      },
+      {
+        "address": "0x601038",
+        "name": "data_start",
+        "kind": "data"
+      },
+      {
+        "address": "0x601040",
+        "name": "__dso_handle",
+        "kind": "data"
+      },
+      {
+        "address": "0x601048",
+        "name": "sneaky",
+        "kind": "data"
+      },
+      {
+        "address": "0x601050",
+        "name": "completed.6531",
+        "kind": "data"
+      },
+      {
+        "address": "0x601060",
+        "name": "_end",
+        "kind": "unknown"
+      }
+    ],
+    "required_libraries": [
+      "libc.so.6"
     ]
   },
   "functions": [
@@ -40,7 +107,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x2",
@@ -55,7 +123,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x3",
@@ -78,7 +147,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x4",
@@ -88,7 +158,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x5",
@@ -107,7 +178,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x6",
@@ -126,7 +198,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x7",
@@ -141,7 +214,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x8",
@@ -151,7 +225,8 @@
       "is_external": true,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x4004e0",
@@ -179,7 +254,8 @@
           "target_address": "0x400880",
           "target_name": "__do_global_ctors_aux"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400500",
@@ -189,7 +265,8 @@
       "is_external": false,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x400510",
@@ -209,7 +286,8 @@
           "target_address": "0x602000",
           "target_name": "puts"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400520",
@@ -229,7 +307,8 @@
           "target_address": "0x602008",
           "target_name": "printf"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400530",
@@ -257,7 +336,8 @@
           "target_address": "0x602010",
           "target_name": "read"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400540",
@@ -272,7 +352,8 @@
           "target_address": "0x602018",
           "target_name": "__libc_start_main"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400550",
@@ -296,7 +377,8 @@
           "target_address": "0x602020",
           "target_name": "strcmp"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400560",
@@ -320,7 +402,8 @@
           "target_address": "0x602030",
           "target_name": "open"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400570",
@@ -340,7 +423,8 @@
           "target_address": "0x602038",
           "target_name": "exit"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400580",
@@ -355,7 +439,8 @@
           "target_address": "0x400540",
           "target_name": "__libc_start_main"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x4005ac",
@@ -370,7 +455,8 @@
           "target_address": "0x602028",
           "target_name": "__gmon_start__"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x4005d0",
@@ -380,7 +466,8 @@
       "is_external": false,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x400640",
@@ -390,7 +477,8 @@
       "is_external": false,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x400664",
@@ -413,7 +501,8 @@
           "target_address": "0x400560",
           "target_name": "open"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x4006ed",
@@ -428,7 +517,8 @@
           "target_address": "0x400510",
           "target_name": "puts"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x4006fd",
@@ -447,7 +537,8 @@
           "target_address": "0x400570",
           "target_name": "exit"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x40071d",
@@ -478,7 +569,8 @@
           "target_address": "0x4006fd",
           "target_name": "rejected"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x4007e0",
@@ -493,7 +585,8 @@
           "target_address": "0x4004e0",
           "target_name": "_init"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x400870",
@@ -503,7 +596,8 @@
       "is_external": false,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x400880",
@@ -513,7 +607,8 @@
       "is_external": false,
       "is_thunk": false,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x4008b8",
@@ -528,7 +623,8 @@
           "target_address": "0x4005d0",
           "target_name": "__do_global_dtors_aux"
         }
-      ]
+      ],
+      "library": null
     },
     {
       "entry_address": "0x602000",
@@ -543,7 +639,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x602008",
@@ -558,7 +655,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x602010",
@@ -581,7 +679,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x602018",
@@ -591,7 +690,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x602020",
@@ -610,7 +710,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x602028",
@@ -620,7 +721,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x602030",
@@ -639,7 +741,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     },
     {
       "entry_address": "0x602038",
@@ -654,7 +757,8 @@
       "is_external": false,
       "is_thunk": true,
       "decompiled_code": null,
-      "calls": []
+      "calls": [],
+      "library": null
     }
   ],
   "strings": [
