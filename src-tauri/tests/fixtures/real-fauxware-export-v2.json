@@ -108,7 +108,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x2",
@@ -124,7 +125,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x3",
@@ -148,7 +150,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4",
@@ -159,7 +162,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x5",
@@ -179,7 +183,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x6",
@@ -199,7 +204,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x7",
@@ -215,7 +221,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x8",
@@ -226,7 +233,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4004e0",
@@ -255,7 +263,8 @@
           "target_name": "__do_global_ctors_aux"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x400500",
@@ -266,7 +275,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x400510",
@@ -287,7 +297,8 @@
           "target_name": "puts"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x602000"
     },
     {
       "entry_address": "0x400520",
@@ -308,7 +319,8 @@
           "target_name": "printf"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x602008"
     },
     {
       "entry_address": "0x400530",
@@ -337,7 +349,8 @@
           "target_name": "read"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x602010"
     },
     {
       "entry_address": "0x400540",
@@ -353,7 +366,8 @@
           "target_name": "__libc_start_main"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x602018"
     },
     {
       "entry_address": "0x400550",
@@ -378,7 +392,8 @@
           "target_name": "strcmp"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x602020"
     },
     {
       "entry_address": "0x400560",
@@ -403,7 +418,8 @@
           "target_name": "open"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x602030"
     },
     {
       "entry_address": "0x400570",
@@ -424,7 +440,8 @@
           "target_name": "exit"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x602038"
     },
     {
       "entry_address": "0x400580",
@@ -440,7 +457,8 @@
           "target_name": "__libc_start_main"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4005ac",
@@ -456,7 +474,8 @@
           "target_name": "__gmon_start__"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4005d0",
@@ -467,7 +486,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x400640",
@@ -478,7 +498,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x400664",
@@ -502,7 +523,8 @@
           "target_name": "open"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4006ed",
@@ -518,7 +540,8 @@
           "target_name": "puts"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4006fd",
@@ -538,7 +561,8 @@
           "target_name": "exit"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x40071d",
@@ -570,7 +594,8 @@
           "target_name": "rejected"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4007e0",
@@ -586,7 +611,8 @@
           "target_name": "_init"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x400870",
@@ -597,7 +623,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x400880",
@@ -608,7 +635,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4008b8",
@@ -624,7 +652,8 @@
           "target_name": "__do_global_dtors_aux"
         }
       ],
-      "library": null
+      "library": null,
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x602000",
@@ -640,7 +669,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x1"
     },
     {
       "entry_address": "0x602008",
@@ -656,7 +686,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x2"
     },
     {
       "entry_address": "0x602010",
@@ -680,7 +711,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x3"
     },
     {
       "entry_address": "0x602018",
@@ -691,7 +723,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x4"
     },
     {
       "entry_address": "0x602020",
@@ -711,7 +744,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x5"
     },
     {
       "entry_address": "0x602028",
@@ -722,7 +756,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x8"
     },
     {
       "entry_address": "0x602030",
@@ -742,7 +777,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x6"
     },
     {
       "entry_address": "0x602038",
@@ -758,7 +794,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x7"
     }
   ],
   "strings": [

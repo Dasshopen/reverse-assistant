@@ -145,6 +145,12 @@ impl GhidraExport {
                     validate_address(target_address, &call_field)?;
                 }
             }
+
+            if let Some(thunk_target_address) = &function.thunk_target_address {
+                let thunk_field = format!("functions[{function_index}].thunk_target_address");
+
+                validate_address(thunk_target_address, &thunk_field)?;
+            }
         }
 
         let mut string_addresses = HashSet::new();
@@ -259,6 +265,8 @@ impl From<RawExportV1> for GhidraExport {
                     strings: raw_function.strings,
                     // v1 never attributed an import to its source library.
                     library: None,
+                    // v1 never captured thunk targets.
+                    thunk_target_address: None,
                 })
                 .collect(),
             strings: Vec::new(),
@@ -317,6 +325,8 @@ struct RawFunctionV2 {
     calls: Vec<FunctionCall>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     library: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    thunk_target_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -379,6 +389,7 @@ impl From<RawExportV2> for GhidraExport {
                     calls: raw_function.calls,
                     strings,
                     library: raw_function.library,
+                    thunk_target_address: raw_function.thunk_target_address,
                 }
             })
             .collect();
@@ -489,6 +500,14 @@ pub struct GhidraFunction {
     // attribute individual ELF imports to their real .so) and for
     // non-external functions.
     pub library: Option<String>,
+    // Immediate (non-recursive) thunk redirection target, from Ghidra's
+    // `Function.getThunkedFunction(false)`. Only ever `Some` when
+    // `is_thunk` is true, and only when Ghidra actually resolves it. A
+    // thunk's body is usually a jump rather than a call instruction, so
+    // this is the only way its real target is captured -- it never shows
+    // up in `calls`. May itself point at another thunk; callers that need
+    // the final non-thunk target must walk the chain themselves.
+    pub thunk_target_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -38,11 +38,13 @@ fn valid_ghidra_export_v2_deserializes() {
     let internal = &export.functions[0];
     assert_eq!(internal.entry_address, "0x140001150");
     assert_eq!(internal.library, None);
+    assert_eq!(internal.thunk_target_address, None);
 
     let external = &export.functions[1];
     assert_eq!(external.name, "strcmp");
     assert!(external.is_external);
     assert_eq!(external.library.as_deref(), Some("MSVCRT.DLL"));
+    assert_eq!(external.thunk_target_address, None);
 
     // Function objects carry no wire-format `strings` field in v2 -- the
     // canonical model still exposes one, derived from the global table.
@@ -70,6 +72,9 @@ fn v1_export_still_imports_with_honest_gaps() {
     assert_eq!(export.functions[0].library, None);
     assert!(export.program.required_libraries.is_empty());
 
+    // v1 never captured thunk targets either.
+    assert_eq!(export.functions[0].thunk_target_address, None);
+
     // v1's bare entry_points addresses become honestly-unknown entries,
     // not guessed names/kinds.
     assert!(!export.program.external_entry_points.is_empty());
@@ -95,6 +100,31 @@ fn real_elf_export_has_no_per_import_library_but_real_required_libraries() {
     // ELF imports are never attributed to a specific library, even though
     // the whole program's real dependency (libc.so.6) is known above.
     assert_eq!(strcmp.library, None);
+
+    // strcmp is only reachable through two levels of PLT/GOT thunks: a PLT
+    // stub (0x400550) whose real `calls` entry resolves to a GOT-level
+    // thunk (0x602020), which itself has no `calls` at all and only
+    // carries `thunk_target_address` pointing at the real external
+    // function above. Both hops must round-trip through parsing.
+    let plt_thunk = export
+        .functions
+        .iter()
+        .find(|function| function.entry_address == "0x400550")
+        .expect("the strcmp PLT thunk should be present");
+    assert!(plt_thunk.is_thunk);
+    assert_eq!(plt_thunk.thunk_target_address.as_deref(), Some("0x602020"));
+
+    let got_thunk = export
+        .functions
+        .iter()
+        .find(|function| function.entry_address == "0x602020")
+        .expect("the strcmp GOT-level thunk should be present");
+    assert!(got_thunk.is_thunk);
+    assert!(got_thunk.calls.is_empty());
+    assert_eq!(
+        got_thunk.thunk_target_address.as_deref(),
+        Some(strcmp.entry_address.as_str())
+    );
 
     // `main` is a real function reachable externally on this ELF
     // executable -- confirms external_entry_points carries real
@@ -133,6 +163,21 @@ fn real_pe_export_attributes_imports_to_the_real_dll_and_lists_clean_exports() {
         .find(|entry_point| entry_point.name.as_deref() == Some("sqlite3_open"))
         .expect("sqlite3_open should be a real export of this DLL");
     assert_eq!(sqlite3_open.kind, ExternalEntryPointKind::Function);
+
+    // The exported `sqlite3_open` symbol is itself a thunk wrapping the
+    // real implementation -- its own `calls` list is empty, so its target
+    // is only visible via `thunk_target_address`.
+    let sqlite3_open_thunk = export
+        .functions
+        .iter()
+        .find(|function| function.entry_address == "0x180001253")
+        .expect("the sqlite3_open thunk should be present");
+    assert!(sqlite3_open_thunk.is_thunk);
+    assert!(sqlite3_open_thunk.calls.is_empty());
+    assert_eq!(
+        sqlite3_open_thunk.thunk_target_address.as_deref(),
+        Some("0x180006890")
+    );
 }
 
 #[test]
@@ -225,6 +270,16 @@ fn invalid_nested_addresses_are_rejected() {
             .validate()
             .expect_err("an invalid call target address should be rejected"),
         "functions[0].calls[0].target_address must be a lowercase hexadecimal string beginning with 0x"
+    );
+
+    let mut export = parsed_v2_example();
+    export.functions[0].thunk_target_address = Some(String::from("not-an-address"));
+
+    assert_eq!(
+        export
+            .validate()
+            .expect_err("an invalid thunk target address should be rejected"),
+        "functions[0].thunk_target_address must be a lowercase hexadecimal string beginning with 0x"
     );
 }
 

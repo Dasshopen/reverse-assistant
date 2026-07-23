@@ -138,7 +138,8 @@ public final class FunctionMetadataCollector {
             function.isThunk(),
             null,
             collectCalls(function),
-            collectLibraryName(function)
+            collectLibraryName(function),
+            collectThunkTargetAddress(function)
         );
     }
 
@@ -150,6 +151,23 @@ public final class FunctionMetadataCollector {
         String namespaceName = function.getParentNamespace().getName();
 
         return UNKNOWN_LIBRARY_NAMESPACE.equals(namespaceName) ? null : namespaceName;
+    }
+
+    // Non-recursive: a thunk's body is often just a jump, so Ghidra's own
+    // per-function `calls` list (built from real CALL instructions) misses
+    // the redirection entirely. Deliberately the *immediate* target only
+    // (not the fully-resolved chain) so multi-level thunk chains and cycles
+    // are represented explicitly in the export rather than silently
+    // collapsed -- Rust walks the chain itself when it needs the final
+    // target (e.g. resolving an import's real callers).
+    private static String collectThunkTargetAddress(Function function) {
+        if (!function.isThunk()) {
+            return null;
+        }
+
+        Function thunkedFunction = function.getThunkedFunction(false);
+
+        return thunkedFunction == null ? null : formatAddress(thunkedFunction);
     }
 
     private static List<FunctionCallMetadata> collectCalls(

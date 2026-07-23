@@ -1483,7 +1483,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x2",
@@ -1494,7 +1495,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x3",
@@ -1510,7 +1512,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x4",
@@ -1542,7 +1545,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x5",
@@ -1578,7 +1582,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x6",
@@ -1618,7 +1623,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x7",
@@ -1634,7 +1640,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x8",
@@ -1650,7 +1657,8 @@
       "is_thunk": false,
       "decompiled_code": null,
       "calls": [],
-      "library": "KERNEL32.DLL"
+      "library": "KERNEL32.DLL",
+      "thunk_target_address": null
     },
     {
       "entry_address": "0x180001005",
@@ -1666,7 +1674,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x18000cbd0"
     },
     {
       "entry_address": "0x18000100a",
@@ -1677,7 +1686,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x180105ae0"
     },
     {
       "entry_address": "0x18000100f",
@@ -1697,7 +1707,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x18000e570"
     },
     {
       "entry_address": "0x180001014",
@@ -1708,7 +1719,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x180105f10"
     },
     {
       "entry_address": "0x180001019",
@@ -1724,7 +1736,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x18000c000"
     },
     {
       "entry_address": "0x180001253",
@@ -1744,7 +1757,8 @@
       "is_thunk": true,
       "decompiled_code": null,
       "calls": [],
-      "library": null
+      "library": null,
+      "thunk_target_address": "0x180006890"
     }
   ],
   "strings": [

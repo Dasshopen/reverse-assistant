@@ -13,7 +13,8 @@ public record FunctionMetadata(
     boolean isThunk,
     String decompiledCode,
     List<FunctionCallMetadata> calls,
-    String libraryName
+    String libraryName,
+    String thunkTargetAddress
 ) {
 
     private static final Pattern ADDRESS_PATTERN =
@@ -44,6 +45,14 @@ public record FunctionMetadata(
         if (!ADDRESS_PATTERN.matcher(entryAddress).matches()) {
             throw new IllegalArgumentException(
                 "entryAddress must use the format " +
+                    "0x followed by lowercase hexadecimal digits"
+            );
+        }
+
+        if (thunkTargetAddress != null &&
+            !ADDRESS_PATTERN.matcher(thunkTargetAddress).matches()) {
+            throw new IllegalArgumentException(
+                "thunkTargetAddress must use the format " +
                     "0x followed by lowercase hexadecimal digits"
             );
         }

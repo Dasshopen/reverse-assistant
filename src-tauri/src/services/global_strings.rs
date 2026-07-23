@@ -86,6 +86,7 @@ mod tests {
             calls: Vec::<FunctionCall>::new(),
             strings: Vec::new(),
             library: None,
+            thunk_target_address: None,
         }
     }
 

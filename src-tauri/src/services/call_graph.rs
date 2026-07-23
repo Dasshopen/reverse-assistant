@@ -40,6 +40,12 @@ pub struct CallGraphNeighborhood {
 // Maps a function's address to the addresses of every function whose `calls`
 // resolves to it. No such reverse lookup exists anywhere else: the export
 // only carries outgoing edges per function.
+//
+// Also indexes each thunk's `thunk_target_address` as if it were an
+// outgoing call: a thunk's body is typically a jump, not a call
+// instruction, so Ghidra's own `calls` list is empty for it even though it
+// genuinely redirects to that target. Without this, both the call graph
+// and import caller-resolution would see a dead end at every thunk.
 pub fn build_caller_index(export: &GhidraExport) -> HashMap<&str, Vec<&str>> {
     let mut index: HashMap<&str, Vec<&str>> = HashMap::new();
 
@@ -51,6 +57,13 @@ pub fn build_caller_index(export: &GhidraExport) -> HashMap<&str, Vec<&str>> {
                     .or_default()
                     .push(function.entry_address.as_str());
             }
+        }
+
+        if let Some(thunk_target_address) = &function.thunk_target_address {
+            index
+                .entry(thunk_target_address.as_str())
+                .or_default()
+                .push(function.entry_address.as_str());
         }
     }
 
@@ -114,6 +127,16 @@ pub fn compute_neighborhood(
                         if function_index.contains_key(target_address.as_str()) {
                             touching_edges.push((address.clone(), target_address.clone()));
                         }
+                    }
+                }
+
+                // A thunk's redirection never appears in `calls` (see
+                // `build_caller_index`), so it has to be added explicitly
+                // here too, or a thunk node would show zero outgoing edges
+                // even though it genuinely redirects somewhere.
+                if let Some(thunk_target_address) = &function.thunk_target_address {
+                    if function_index.contains_key(thunk_target_address.as_str()) {
+                        touching_edges.push((address.clone(), thunk_target_address.clone()));
                     }
                 }
             }
@@ -206,12 +229,21 @@ mod tests {
                 .collect(),
             strings: Vec::new(),
             library: None,
+            thunk_target_address: None,
         }
     }
 
     fn external_function(entry_address: &str, name: &str) -> GhidraFunction {
         GhidraFunction {
             is_external: true,
+            ..function(entry_address, name, &[])
+        }
+    }
+
+    fn thunk_function(entry_address: &str, name: &str, target: &str) -> GhidraFunction {
+        GhidraFunction {
+            is_thunk: true,
+            thunk_target_address: Some(target.to_owned()),
             ..function(entry_address, name, &[])
         }
     }
@@ -245,6 +277,40 @@ mod tests {
 
         assert_eq!(index.get("0x2"), Some(&vec!["0x1"]));
         assert_eq!(index.get("0x1"), None);
+    }
+
+    #[test]
+    fn caller_index_indexes_thunk_targets_as_callers() {
+        // A thunk's body is a jump, not a call: its own `calls` list is
+        // empty, so the only way its redirection is visible is via
+        // `thunk_target_address`.
+        let data = export(vec![
+            thunk_function("0x1", "strcmp", "0x2"),
+            external_function("0x2", "strcmp"),
+        ]);
+
+        let index = build_caller_index(&data);
+
+        assert_eq!(index.get("0x2"), Some(&vec!["0x1"]));
+    }
+
+    #[test]
+    fn outgoing_neighborhood_follows_a_thunk_with_no_calls() {
+        let data = export(vec![
+            thunk_function("0x1", "strcmp", "0x2"),
+            external_function("0x2", "strcmp"),
+        ]);
+
+        let result = compute_neighborhood(&data, "0x1", CallGraphDirection::Outgoing, 1).unwrap();
+
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(
+            result.edges[0],
+            CallGraphEdge {
+                from: "0x1".to_owned(),
+                to: "0x2".to_owned(),
+            }
+        );
     }
 
     #[test]

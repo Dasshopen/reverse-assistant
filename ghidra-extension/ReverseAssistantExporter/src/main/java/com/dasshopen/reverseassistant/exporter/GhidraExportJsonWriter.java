@@ -176,6 +176,16 @@ public final class GhidraExportJsonWriter {
             function.addProperty("library", metadata.libraryName());
         }
 
+        if (metadata.thunkTargetAddress() == null) {
+            function.add("thunk_target_address", JsonNull.INSTANCE);
+        }
+        else {
+            function.addProperty(
+                "thunk_target_address",
+                metadata.thunkTargetAddress()
+            );
+        }
+
         return function;
     }
 

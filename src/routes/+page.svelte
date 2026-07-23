@@ -50,6 +50,7 @@ interface GhidraFunction {
   calls: FunctionCall[];
   strings: string[];
   library: string | null;
+  thunk_target_address: string | null;
 }
 
 interface GhidraExport {

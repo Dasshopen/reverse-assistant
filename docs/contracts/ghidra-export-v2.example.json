@@ -38,7 +38,8 @@
                     "target_name": "strcmp"
                 }
             ],
-            "library": null
+            "library": null,
+            "thunk_target_address": null
         },
         {
             "entry_address": "0x140002000",
@@ -49,7 +50,8 @@
             "is_thunk": false,
             "decompiled_code": null,
             "calls": [],
-            "library": "MSVCRT.DLL"
+            "library": "MSVCRT.DLL",
+            "thunk_target_address": null
         }
     ],
     "strings": [

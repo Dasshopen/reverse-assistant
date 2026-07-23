@@ -84,6 +84,15 @@ reflection of what the binary actually exposes.
 | `decompiled_code` | string or null | Yes | Yes | Pseudocode produced by Ghidra for this function, or `null` when no pseudocode is available yet. |
 | `calls` | array | Yes | No | Functions called by this function. May be empty. |
 | `library` | string or null | Yes | Yes | For an external (imported) function: the real source library name when Ghidra can attribute it (reliable for PE), or `null` when it can't (always `null` for ELF imports — never guessed). Always `null` for non-external functions. |
+| `thunk_target_address` | string or null | Yes | Yes | When `is_thunk` is true: the immediate (one hop, not fully resolved) address this function redirects to, or `null` if Ghidra can't resolve it. Always `null` when `is_thunk` is false. |
+
+A thunk's body is typically a jump instruction rather than a call, so its own `calls` array is
+usually empty even though it genuinely redirects somewhere — `thunk_target_address` is the only
+place that redirection is captured. It may itself point at another thunk (PE and ELF both
+commonly chain two or more thunks, e.g. a PLT stub redirecting to a GOT-resolved stub that
+redirects to the real external function); resolving the final non-thunk target means following
+this field repeatedly, which this contract deliberately leaves to consumers rather than
+collapsing in the export.
 
 Unlike v1, a function object has **no `strings` field**. Which strings a function
 references is derivable from the root `strings` table's `references` (see below) — the
