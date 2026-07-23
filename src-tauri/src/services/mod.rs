@@ -1,3 +1,4 @@
+pub mod bsim_corpus;
 pub mod ghidra_decompile;
 pub mod ghidra_headless;
 pub mod ghidra_import;

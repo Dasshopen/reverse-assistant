@@ -1,0 +1,26 @@
+﻿{
+    "libraries":  [
+                      {
+                          "name":  "sqlite3",
+                          "version":  "3.53.3",
+                          "source_url":  "https://sqlite.org/2026/sqlite-amalgamation-3530300.zip",
+                          "archive_name":  "sqlite-amalgamation-3530300.zip",
+                          "sha256":  "646421e12aac110282ef8cc68f1a62d4bb15fc7b8f09da0b53e29ee690500431",
+                          "sha3_256":  "d45c688a8cb23f68611a894a756a12d7eb6ab6e9e2468ca70adbeab3808b5ab9",
+                          "license":  "Public Domain",
+                          "license_url":  "https://sqlite.org/copyright.html",
+                          "retrieved_date":  "2026-07-23"
+                      },
+                      {
+                          "name":  "zlib",
+                          "version":  "1.3.2",
+                          "source_url":  "https://zlib.net/zlib-1.3.2.tar.gz",
+                          "archive_name":  "zlib-1.3.2.tar.gz",
+                          "sha256":  "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+                          "sha3_256":  null,
+                          "license":  "zlib License",
+                          "license_url":  "https://zlib.net/zlib_license.html",
+                          "retrieved_date":  "2026-07-23"
+                      }
+                  ]
+}

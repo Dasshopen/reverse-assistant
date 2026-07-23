@@ -12,3 +12,8 @@ vite.config.ts.timestamp-*
 ghidra-extension/**/.gradle/
 ghidra-extension/**/build/
 ghidra-extension/**/dist/
+
+# BSim seed corpus: downloaded/compiled locally by bsim-corpus/scripts/*.ps1,
+# never committed (regeneratable binary artifacts, not source).
+bsim-corpus/sources/
+bsim-corpus/build/
