@@ -663,24 +663,6 @@ interface ApplyRenamesResult {
   let isLoadingCallGraph = $state(false);
   let callGraphRequestSeq = 0;
 
-  let callGraphNodesByDepth = $derived.by(() => {
-    if (!callGraphResult) return [];
-
-    const groups: { depth: number; nodes: CallGraphNode[] }[] = [];
-
-    for (const node of callGraphResult.nodes) {
-      const currentGroup = groups.at(-1);
-
-      if (currentGroup && currentGroup.depth === node.depth) {
-        currentGroup.nodes.push(node);
-      } else {
-        groups.push({ depth: node.depth, nodes: [node] });
-      }
-    }
-
-    return groups;
-  });
-
   const graphCanvasWidth = 1120;
   const graphNodeWidth = 184;
   const graphNodeHeight = 62;
@@ -2843,13 +2825,13 @@ interface ApplyRenamesResult {
           >
             <header class="function-details-header">
               <div>
-                <p class="detail-label">Selected function</p>
+                <p class="detail-label">Fonction sélectionnée</p>
                 <h3 id="function-details-title">{selectedFunction.name}</h3>
                 <code>{selectedFunction.entry_address}</code>
               </div>
 
               <div class="function-flags">
-                <span>{selectedFunction.is_external ? "External" : "Internal"}</span>
+                <span>{selectedFunction.is_external ? "Externe" : "Interne"}</span>
 
                 {#if selectedFunction.is_thunk}
                   <span>Thunk</span>
@@ -2859,28 +2841,28 @@ interface ApplyRenamesResult {
 
             <dl class="function-metadata">
               <div>
-                <dt>Return type</dt>
+                <dt>Type de retour</dt>
                 <dd><code>{displayedReturnType}</code></dd>
               </div>
 
               <div>
-                <dt>Parameters</dt>
+                <dt>Paramètres</dt>
                 <dd>{displayedParameters.length}</dd>
               </div>
 
               <div>
-                <dt>Calls</dt>
+                <dt>Appels</dt>
                 <dd>{selectedFunction.calls.length}</dd>
               </div>
 
             <div>
-                <dt>Strings</dt>
+                <dt>Chaînes</dt>
                 <dd>{selectedFunction.strings.length}</dd>
               </div>
 
               {#if displayedCallingConvention}
                 <div>
-                  <dt>Calling convention</dt>
+                  <dt>Convention d'appel</dt>
                   <dd><code>{displayedCallingConvention}</code></dd>
                 </div>
               {/if}
@@ -2899,94 +2881,76 @@ interface ApplyRenamesResult {
             </nav>
 
             <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "overview"}>
-              {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
-                <section class="function-section ghidra-rename-control">
-                  <h4>Apply a function name to Ghidra</h4>
-                  <p>
-                    This writes a user-confirmed name into the live Ghidra project, then refreshes
-                    the local snapshot. It never applies FunctionID or BSim suggestions automatically.
-                  </p>
-                  <div>
-                    <input type="text" maxlength="512" bind:value={functionRenameDraft} />
-                    <button
-                      type="button"
-                      disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
-                      onclick={applySelectedFunctionRename}
-                    >
-                      {isApplyingFunctionRename ? "Applying..." : "Apply rename"}
-                    </button>
-                  </div>
-                  {#if functionRenameError}
-                    <p class="error" role="alert">{functionRenameError}</p>
-                  {/if}
-                  {#if functionRenameSuccess}
-                    <p class="status">{functionRenameSuccess}</p>
-                  {/if}
-                </section>
-              {/if}
+              <div class="function-overview-grid">
+                <div class="function-overview-primary">
+                  <section class="function-section function-prototype-card">
+                    <h4>Prototype</h4>
+                    <code>{selectedPrototype}</code>
+                  </section>
 
-              <section class="function-section">
-                <h4>Parameters</h4>
-
-                {#if displayedParameters.length === 0}
-                  <p>No parameters were identified.</p>
-                {:else}
-                  <ul>
-                    {#each displayedParameters as parameter}
-                      <li>
-                        <code>{parameter.data_type}</code>
-                        <span>{parameter.name}</span>
-                      </li>
-                    {/each}
-                  </ul>
-                {/if}
-              </section>
-
-              <section class="function-section">
-                <div class="function-section-heading">
-                  <h4>Graphe d’appels (extrait)</h4>
-                  <button type="button" onclick={() => (activeWorkspaceView = "graph")}>Ouvrir le graphe complet</button>
-                </div>
-
-                {#if isLoadingCallGraph}
-                  <p>Chargement du graphe d'appels...</p>
-                {:else if callGraphError}
-                  <p class="error" role="alert">{callGraphError}</p>
-                {:else if callGraphResult}
-                  <p class="call-graph-stats">
-                    {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
-                    profondeur atteinte {callGraphResult.depth_reached}
-                  </p>
-
-                  {#each callGraphNodesByDepth as group (group.depth)}
-                    <div class="call-graph-depth-group">
-                      <p class="detail-label">
-                        {group.depth === 0 ? "Fonction sélectionnée" : `Niveau ${group.depth}`}
-                      </p>
-
-                      <ul class="call-graph-node-list">
-                        {#each group.nodes as node (node.entry_address)}
-                          <li>
-                            <button
-                              type="button"
-                              class="call-graph-node"
-                              disabled={node.entry_address === selectedFunctionAddress}
-                              onclick={() => openFunction(node.entry_address)}
-                            >
-                              <span>
-                                {node.name}
-                                {#if node.is_external}<em>(externe)</em>{/if}
-                                {#if node.is_thunk}<em>(thunk)</em>{/if}
-                              </span>
-                              <code>{node.entry_address}</code>
-                            </button>
-                          </li>
+                  <section class="function-section">
+                    <h4>Paramètres</h4>
+                    {#if displayedParameters.length === 0}
+                      <p>Aucun paramètre n'a été identifié.</p>
+                    {:else}
+                      <ul>
+                        {#each displayedParameters as parameter}
+                          <li><code>{parameter.data_type}</code><span>{parameter.name}</span></li>
                         {/each}
                       </ul>
+                    {/if}
+                  </section>
+                </div>
+
+                <section class="function-section function-graph-preview">
+                  <div class="function-section-heading">
+                    <div>
+                      <h4>Graphe d'appels</h4>
+                      {#if callGraphResult}
+                        <span>{callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels</span>
+                      {/if}
                     </div>
-                  {/each}
-                {/if}
-              </section>
+                    <div class="function-graph-actions">
+                      <button type="button" disabled={graphNavigationHistory.length === 0} onclick={navigateBackInGraph}>← Retour</button>
+                      <button type="button" onclick={() => (activeWorkspaceView = "graph")}>Graphe complet ↗</button>
+                    </div>
+                  </div>
+
+                  {#if isLoadingCallGraph}
+                    <p class="overview-empty">Construction du graphe…</p>
+                  {:else if callGraphError}
+                    <p class="error" role="alert">{callGraphError}</p>
+                  {:else if overviewGraphLayout.nodes.length > 0}
+                    <div class="function-graph-scroll">
+                      <div class="overview-graph-stage" style={`width:${overviewGraphWidth}px;height:${overviewGraphLayout.height}px`}>
+                        <svg viewBox={`0 0 ${overviewGraphWidth} ${overviewGraphLayout.height}`} aria-hidden="true">
+                          <defs><marker id="function-overview-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
+                          {#each overviewGraphLayout.edges as edge (`function-overview-${edge.from}-${edge.to}`)}
+                            {@const from = overviewGraphPositions.get(edge.from)}
+                            {@const to = overviewGraphPositions.get(edge.to)}
+                            {#if from && to}
+                              <path class="overview-edge" d={`M ${from.x + overviewGraphNodeWidth / 2} ${from.y + overviewGraphNodeHeight} C ${from.x + overviewGraphNodeWidth / 2} ${from.y + 28}, ${to.x + overviewGraphNodeWidth / 2} ${to.y - 28}, ${to.x + overviewGraphNodeWidth / 2} ${to.y}`} marker-end="url(#function-overview-arrow)"></path>
+                            {/if}
+                          {/each}
+                        </svg>
+                        {#each overviewGraphLayout.nodes as node (node.entry_address)}
+                          <button
+                            type="button"
+                            class="overview-graph-node"
+                            class:root={node.entry_address === selectedFunctionAddress}
+                            class:external={node.is_external}
+                            class:thunk={node.is_thunk}
+                            style={`left:${node.x}px;top:${node.y}px;width:${overviewGraphNodeWidth}px;height:${overviewGraphNodeHeight}px`}
+                            onclick={() => navigateWithinGraph(node.entry_address)}
+                          ><strong>{node.name}</strong><code>{node.entry_address}</code></button>
+                        {/each}
+                      </div>
+                    </div>
+                  {:else}
+                    <p class="overview-empty">Aucune relation d'appel disponible.</p>
+                  {/if}
+                </section>
+              </div>
             </div>
 
             <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "code"}>
@@ -3006,6 +2970,24 @@ interface ApplyRenamesResult {
             </div>
 
             <div class="detail-tab-panel" class:view-hidden={activeDetailTab !== "evidence"}>
+              {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
+                <section class="function-section ghidra-rename-control compact-rename-control">
+                  <div class="rename-heading">
+                    <div><h4>Nom à appliquer dans Ghidra</h4><p>Sélectionne une preuve ci-dessous ou saisis un nom, puis confirme.</p></div>
+                  </div>
+                  <div>
+                    <input type="text" maxlength="512" bind:value={functionRenameDraft} />
+                    <button
+                      type="button"
+                      disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
+                      onclick={applySelectedFunctionRename}
+                    >{isApplyingFunctionRename ? "Application…" : "Appliquer le nom"}</button>
+                  </div>
+                  {#if functionRenameError}<p class="error" role="alert">{functionRenameError}</p>{/if}
+                  {#if functionRenameSuccess}<p class="status">{functionRenameSuccess}</p>{/if}
+                </section>
+              {/if}
+
               {#if selectedIdentificationCandidates.length === 0 && !selectedBsimResult}
                 <p class="detail-label">Aucune preuve disponible pour cette fonction.</p>
               {/if}
@@ -3880,36 +3862,6 @@ interface ApplyRenamesResult {
     font-size: 0.66rem;
   }
 
-  .call-graph-depth-group {
-    position: relative;
-    padding-top: 0.25rem;
-  }
-
-  .call-graph-node-list {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  }
-
-  .call-graph-node {
-    display: grid;
-    min-height: 55px;
-    justify-content: stretch;
-    gap: 0.2rem;
-    padding: 0.5rem;
-    border-color: #2563eb;
-    background: #102447;
-    text-align: center;
-  }
-
-  .call-graph-node:disabled {
-    border-color: #8b5cf6;
-    background: #29205a;
-  }
-
-  .call-graph-node code {
-    color: #91a9ca;
-    font-size: 0.62rem;
-  }
-
   .function-section p {
     color: #94a3b8;
   }
@@ -3961,61 +3913,6 @@ interface ApplyRenamesResult {
     margin: 0 0 0.75rem;
     color: #94a3b8;
     font-size: 0.85rem;
-  }
-
-  .call-graph-depth-group {
-    margin-bottom: 1rem;
-  }
-
-  .call-graph-depth-group:last-child {
-    margin-bottom: 0;
-  }
-
-  .call-graph-node-list {
-    display: grid;
-    margin: 0.35rem 0 0;
-    padding: 0;
-    gap: 0.5rem;
-    list-style: none;
-  }
-
-  .call-graph-node-list li {
-    display: contents;
-  }
-
-  .call-graph-node {
-    display: flex;
-    width: 100%;
-    box-sizing: border-box;
-    justify-content: space-between;
-    align-items: center;
-    gap: 1rem;
-    padding: 0.65rem;
-    border: 1px solid #374151;
-    border-radius: 0.5rem;
-    background-color: #1f2937;
-    color: #f9fafb;
-    text-align: left;
-    cursor: pointer;
-    overflow-wrap: anywhere;
-  }
-
-  .call-graph-node:hover:not(:disabled) {
-    border-color: #60a5fa;
-    background-color: #273449;
-  }
-
-  .call-graph-node:disabled {
-    border-color: #3b82f6;
-    background-color: #1e3a5f;
-    cursor: default;
-    opacity: 1;
-  }
-
-  .call-graph-node em {
-    margin-left: 0.35rem;
-    color: #94a3b8;
-    font-style: normal;
   }
 
   .function-section li span em {
@@ -5440,6 +5337,194 @@ interface ApplyRenamesResult {
   .overview-empty { font-size: 0.78rem; }
   .comparison-preview-card > p,
   .comparison-preview-card > button { font-size: 0.72rem; }
+
+  /* Functions workspace: dense, readable and limited to one useful graph preview. */
+  .function-explorer {
+    grid-template-columns: minmax(430px, 0.9fr) minmax(680px, 2.1fr);
+    gap: 0.8rem;
+  }
+
+  .function-list-heading h2 {
+    margin: 0;
+    font-size: 1.08rem;
+  }
+
+  .function-list-heading input {
+    width: min(390px, 40vw);
+    border-color: #293a55;
+    background: #0b1423;
+  }
+
+  .function-table-wrap,
+  .function-details {
+    max-height: calc(100vh - 205px);
+  }
+
+  .function-table {
+    table-layout: fixed;
+    font-size: 0.72rem;
+  }
+
+  .function-table th:nth-child(1) { width: 28%; }
+  .function-table th:nth-child(2) { width: 18%; }
+  .function-table th:nth-child(3) { width: 13%; }
+  .function-table th:nth-child(4) { width: 9%; text-align: center; }
+  .function-table th:nth-child(5) { width: 32%; }
+
+  .function-table tbody td {
+    padding: 0.58rem 0.62rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    overflow-wrap: normal;
+    white-space: nowrap;
+  }
+
+  .function-table tbody td:nth-child(4) { text-align: center; }
+
+  .function-table-name {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    color: #f3f6fb;
+    font-size: 0.76rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .function-details {
+    padding: 0.85rem 1rem 1rem;
+  }
+
+  .function-details-header {
+    padding-bottom: 0.7rem;
+  }
+
+  .function-details-header h3 {
+    margin: 0.15rem 0 0.25rem;
+    font-size: 1.18rem;
+  }
+
+  .function-details-header code { font-size: 0.7rem; }
+
+  .function-metadata {
+    margin: 0.65rem 0 0.2rem;
+    gap: 0.35rem;
+  }
+
+  .function-metadata div {
+    display: flex;
+    min-height: 46px;
+    flex-direction: column;
+    justify-content: center;
+    padding: 0.42rem 0.55rem;
+  }
+
+  .function-metadata dt { font-size: 0.65rem; }
+  .function-metadata dd { margin-top: 0.18rem; font-size: 0.78rem; }
+  .function-metadata dd code { font-size: 0.72rem; }
+
+  .detail-tabs {
+    margin-top: 0.55rem;
+    padding-bottom: 0;
+    gap: 0.7rem;
+  }
+
+  .detail-tabs button {
+    padding: 0.42rem 0.1rem;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    font-size: 0.7rem;
+  }
+
+  .detail-tabs button:hover:not(.active),
+  .detail-tabs button.active {
+    border-bottom-color: #8b5cf6;
+    background: transparent;
+  }
+
+  .function-overview-grid {
+    display: grid;
+    grid-template-columns: minmax(250px, 0.78fr) minmax(420px, 1.22fr);
+    gap: 0.8rem;
+    align-items: stretch;
+  }
+
+  .function-overview-primary {
+    min-width: 0;
+  }
+
+  .function-prototype-card > code {
+    display: block;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid #25344c;
+    border-radius: 6px;
+    background: #101d30;
+    color: #d8c8ff;
+    font-size: 0.73rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .function-graph-preview {
+    min-width: 0;
+    padding-left: 0.8rem;
+    border-left: 1px solid #1d2a40;
+  }
+
+  .function-section-heading > div:first-child span {
+    color: #70819c;
+    font-size: 0.62rem;
+  }
+
+  .function-graph-actions {
+    display: flex;
+    gap: 0.3rem;
+  }
+
+  .function-graph-actions button {
+    white-space: nowrap;
+  }
+
+  .function-graph-scroll {
+    width: 100%;
+    min-height: 282px;
+    overflow-x: auto;
+    border: 1px solid #1d2a40;
+    border-radius: 7px;
+    background-color: #091423;
+    background-image: radial-gradient(circle, #26344a 0.8px, transparent 0.8px);
+    background-size: 17px 17px;
+  }
+
+  .function-graph-scroll .overview-graph-stage {
+    margin: 0 auto;
+    background: transparent;
+  }
+
+  .compact-rename-control {
+    padding: 0.75rem;
+    border: 1px solid #283954;
+    border-radius: 7px;
+    background: #0e1a2d;
+  }
+
+  .compact-rename-control .rename-heading h4 { margin-bottom: 0.15rem; }
+  .compact-rename-control .rename-heading p { margin: 0 0 0.6rem; font-size: 0.7rem; }
+  .compact-rename-control input { font-size: 0.75rem; }
+  .compact-rename-control button { flex: 0 0 auto; padding: 0.5rem 0.75rem; font-size: 0.7rem; }
+
+  @media (max-width: 1320px) {
+    .function-explorer { grid-template-columns: minmax(370px, 0.9fr) minmax(580px, 2fr); }
+    .function-overview-grid { grid-template-columns: 1fr; }
+    .function-graph-preview { padding-left: 0; border-top: 1px solid #1d2a40; border-left: 0; }
+  }
+
+  @media (max-width: 980px) {
+    .function-explorer { grid-template-columns: 1fr; }
+    .function-list-heading { grid-column: 1; }
+    .function-table-wrap { max-height: 400px; }
+    .function-details { max-height: none; }
+  }
 
 
 </style>
