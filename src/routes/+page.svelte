@@ -195,10 +195,10 @@ interface DetectedType {
   usages: TypeUsage[];
 }
 
-interface FunctionCallCount {
+interface FunctionUsageCount {
   entry_address: string;
   name: string;
-  call_count: number;
+  used_by_function_count: number;
 }
 
 interface StringReferenceCount {
@@ -213,14 +213,14 @@ interface ProgramOverview {
   external_function_count: number;
   thunk_function_count: number;
   decompiled_function_count: number;
-  total_call_count: number;
+  call_site_count: number;
   string_count: number;
   total_string_reference_count: number;
   most_referenced_string: StringReferenceCount | null;
   required_library_count: number;
   external_entry_point_count: number;
   external_entry_point_function_count: number;
-  most_called_function: FunctionCallCount | null;
+  most_used_function: FunctionUsageCount | null;
   detected_type_count: number;
   struct_count: number;
   union_count: number;
@@ -612,6 +612,14 @@ interface ProgramOverview {
       );
 
       decompileCache = new Map(decompileCache).set(entryAddress, details);
+
+      // The backend writes this function's pseudocode back into the
+      // stored export as it decompiles, so the overview's decompiled-count
+      // genuinely advances -- but only if this refetches it; the effect
+      // that fetches it only reruns when a whole new analysis loads.
+      if (details.decompiled_code !== null) {
+        requestProgramOverview();
+      }
     } catch (error) {
       decompileErrors = new Map(decompileErrors).set(entryAddress, String(error));
     } finally {
@@ -906,11 +914,6 @@ interface ProgramOverview {
           </div>
 
           <div>
-            <dt>Decompiled functions</dt>
-            <dd>{importSummary.decompiled_function_count}</dd>
-          </div>
-
-          <div>
             <dt>Calls</dt>
             <dd>{importSummary.call_count}</dd>
           </div>
@@ -944,16 +947,23 @@ interface ProgramOverview {
 
             <div>
               <dt>Decompiled functions</dt>
-              <dd>{programOverview.decompiled_function_count}</dd>
+              <dd>{programOverview.decompiled_function_count} (so far this session)</dd>
             </div>
 
             <div>
-              <dt>Calls</dt>
+              <dt>Call sites</dt>
+              <dd>{programOverview.call_site_count}</dd>
+            </div>
+
+            <div>
+              <dt>Most-used function</dt>
               <dd>
-                {programOverview.total_call_count}
-                {#if programOverview.most_called_function}
-                  (most: <code>{programOverview.most_called_function.name}</code>
-                  with {programOverview.most_called_function.call_count})
+                {#if programOverview.most_used_function}
+                  <code>{programOverview.most_used_function.name}</code>
+                  — called by {programOverview.most_used_function.used_by_function_count} distinct
+                  functions
+                {:else}
+                  none
                 {/if}
               </dd>
             </div>

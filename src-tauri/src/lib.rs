@@ -217,6 +217,7 @@ fn get_program_overview(
 fn decompile_function(
     app: AppHandle,
     session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
     decompile_coordinator: tauri::State<'_, DecompileCoordinator>,
     entry_address: String,
 ) -> Result<DecompiledFunctionDetails, String> {
@@ -231,8 +232,31 @@ fn decompile_function(
     // Ghidra takes an exclusive project lock even when analyzeHeadless opens
     // the program with -readOnly. Serialize requests so rapid function
     // selections wait their turn instead of failing with LockException.
-    decompile_coordinator
-        .run_exclusive(|| ghidra_decompile::decompile_function(&app, &session, &entry_address))
+    let details = decompile_coordinator
+        .run_exclusive(|| ghidra_decompile::decompile_function(&app, &session, &entry_address))?;
+
+    // Bulk export never populates `decompiled_code` (decompilation is
+    // on-demand by design), so without this write-through the stored
+    // export's copy would stay frozen at "nothing decompiled yet" forever
+    // -- silently making `decompiled_function_count` in the overview
+    // permanently wrong instead of tracking real progress.
+    if let Some(decompiled_code) = &details.decompiled_code {
+        let mut export = export_state
+            .lock()
+            .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+
+        if let Some(export) = export.as_mut() {
+            if let Some(function) = export
+                .functions
+                .iter_mut()
+                .find(|function| function.entry_address == entry_address)
+            {
+                function.decompiled_code = Some(decompiled_code.clone());
+            }
+        }
+    }
+
+    Ok(details)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

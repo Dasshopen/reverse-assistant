@@ -1,11 +1,24 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 
-use crate::models::ghidra_export::{DetectedTypeKind, ExternalEntryPointKind, GhidraExport};
+use crate::models::ghidra_export::{
+    DetectedTypeKind, ExternalEntryPointKind, GhidraExport, GhidraFunction,
+};
+use crate::services::call_graph::{build_caller_index, resolve_calling_functions};
 
 // A single dashboard-style snapshot of a loaded analysis, computed entirely
 // from data already captured by the other features (call graph, strings,
 // imports/exports, detected types) -- no new Ghidra collection needed, just
 // aggregation over the canonical `GhidraExport` already held in memory.
+//
+// `decompiled_function_count` reflects the loaded export's own snapshot of
+// `functions[].decompiled_code`. It is not a stale figure: for an
+// automatically-analyzed session, `decompile_function` writes each
+// on-demand result back into the stored export (see lib.rs), so this
+// number genuinely grows as the user decompiles more functions rather than
+// staying frozen at the export-time value (which bulk export never
+// populates -- decompilation is on-demand by design).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProgramOverview {
     pub function_count: usize,
@@ -13,7 +26,11 @@ pub struct ProgramOverview {
     pub external_function_count: usize,
     pub thunk_function_count: usize,
     pub decompiled_function_count: usize,
-    pub total_call_count: usize,
+    // Total distinct (caller, callee) call edges across the program --
+    // i.e. call *sites*, not distinct calling functions. Deliberately kept
+    // apart from `most_used_function` below, which counts something else
+    // entirely (see its own doc comment).
+    pub call_site_count: usize,
 
     pub string_count: usize,
     pub total_string_reference_count: usize,
@@ -22,7 +39,12 @@ pub struct ProgramOverview {
     pub required_library_count: usize,
     pub external_entry_point_count: usize,
     pub external_entry_point_function_count: usize,
-    pub most_called_function: Option<FunctionCallCount>,
+    // The function called by the most *distinct, non-thunk* functions in
+    // the program -- reuses the same thunk-aware resolution as an import's
+    // `used_by_function_count`, so a PLT/GOT-style redirect is never
+    // conflated with a real caller, and a caller reaching this function
+    // through several call sites still counts once.
+    pub most_used_function: Option<FunctionUsageCount>,
 
     pub detected_type_count: usize,
     pub struct_count: usize,
@@ -34,10 +56,10 @@ pub struct ProgramOverview {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct FunctionCallCount {
+pub struct FunctionUsageCount {
     pub entry_address: String,
     pub name: String,
-    pub call_count: usize,
+    pub used_by_function_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -64,17 +86,39 @@ pub fn compute_overview(export: &GhidraExport) -> ProgramOverview {
         .iter()
         .filter(|function| function.decompiled_code.is_some())
         .count();
-    let total_call_count: usize = export.functions.iter().map(|f| f.calls.len()).sum();
+    let call_site_count: usize = export.functions.iter().map(|f| f.calls.len()).sum();
 
-    let most_called_function = export
+    let caller_index = build_caller_index(export);
+    let function_index: HashMap<&str, &GhidraFunction> = export
         .functions
         .iter()
-        .filter(|function| !function.calls.is_empty())
-        .max_by_key(|function| function.calls.len())
-        .map(|function| FunctionCallCount {
+        .map(|function| (function.entry_address.as_str(), function))
+        .collect();
+
+    let most_used_function = export
+        .functions
+        .iter()
+        // A thunk is a redirect, not a callee identity worth ranking on its
+        // own -- its callers are already, transitively, callers of its
+        // real target too, so letting a thunk win here would just be a
+        // confusing duplicate of the real function's own count.
+        .filter(|function| !function.is_thunk)
+        .map(|function| {
+            let caller_count = resolve_calling_functions(
+                &caller_index,
+                &function_index,
+                function.entry_address.as_str(),
+            )
+            .len();
+
+            (function, caller_count)
+        })
+        .filter(|(_, caller_count)| *caller_count > 0)
+        .max_by_key(|(_, caller_count)| *caller_count)
+        .map(|(function, caller_count)| FunctionUsageCount {
             entry_address: function.entry_address.clone(),
             name: function.name.clone(),
-            call_count: function.calls.len(),
+            used_by_function_count: caller_count,
         });
 
     let total_string_reference_count: usize =
@@ -110,14 +154,14 @@ pub fn compute_overview(export: &GhidraExport) -> ProgramOverview {
         external_function_count,
         thunk_function_count,
         decompiled_function_count,
-        total_call_count,
+        call_site_count,
         string_count: export.strings.len(),
         total_string_reference_count,
         most_referenced_string,
         required_library_count: export.program.required_libraries.len(),
         external_entry_point_count: export.program.external_entry_points.len(),
         external_entry_point_function_count,
-        most_called_function,
+        most_used_function,
         detected_type_count: export.types.len(),
         struct_count,
         union_count,
@@ -150,7 +194,7 @@ mod tests {
         is_external: bool,
         is_thunk: bool,
         decompiled: bool,
-        calls: usize,
+        calls: &[&str],
     ) -> GhidraFunction {
         GhidraFunction {
             entry_address: entry_address.to_owned(),
@@ -160,15 +204,26 @@ mod tests {
             is_external,
             is_thunk,
             decompiled_code: decompiled.then(|| "void f() {}".to_owned()),
-            calls: (0..calls)
-                .map(|index| FunctionCall {
-                    target_address: Some(format!("0x{index:x}")),
-                    target_name: format!("callee-{index}"),
+            calls: calls
+                .iter()
+                .map(|target| FunctionCall {
+                    target_address: Some((*target).to_owned()),
+                    target_name: format!("callee-{target}"),
                 })
                 .collect(),
             strings: Vec::new(),
             library: None,
             thunk_target_address: None,
+        }
+    }
+
+    // A PLT-style thunk: redirects to `target` via `thunk_target_address`
+    // rather than a real `calls` entry, mirroring what Ghidra actually
+    // exports for a thunk (see call_graph.rs/imports_exports.rs tests).
+    fn thunk(entry_address: &str, name: &str, target: &str) -> GhidraFunction {
+        GhidraFunction {
+            thunk_target_address: Some(target.to_owned()),
+            ..function(entry_address, name, false, true, false, &[])
         }
     }
 
@@ -224,7 +279,7 @@ mod tests {
         let overview = compute_overview(&data);
 
         assert_eq!(overview.function_count, 0);
-        assert_eq!(overview.most_called_function, None);
+        assert_eq!(overview.most_used_function, None);
         assert_eq!(overview.most_referenced_string, None);
     }
 
@@ -232,10 +287,10 @@ mod tests {
     fn function_counts_split_internal_external_thunk_and_decompiled() {
         let data = export(
             vec![
-                function("0x1", "main", false, false, true, 2),
-                function("0x2", "helper", false, false, false, 0),
-                function("0x3", "plt_stub", false, true, false, 1),
-                function("0x4", "printf", true, false, false, 0),
+                function("0x1", "main", false, false, true, &["0x2", "0x4"]),
+                function("0x2", "helper", false, false, false, &[]),
+                function("0x3", "plt_stub", false, true, false, &["0x4"]),
+                function("0x4", "printf", true, false, false, &[]),
             ],
             Vec::new(),
             Vec::new(),
@@ -250,16 +305,28 @@ mod tests {
         assert_eq!(overview.external_function_count, 1);
         assert_eq!(overview.thunk_function_count, 1);
         assert_eq!(overview.decompiled_function_count, 1);
-        assert_eq!(overview.total_call_count, 3);
+        assert_eq!(overview.call_site_count, 3);
     }
 
     #[test]
-    fn most_called_function_is_the_true_maximum_and_ties_pick_one_deterministically() {
+    fn most_used_function_counts_distinct_real_callers_not_outgoing_calls_or_call_sites() {
+        // "target" is called directly once by `a`, twice (two call sites)
+        // by `b`, and once more through a thunk by `c` -- a naive
+        // "outgoing calls" or "raw call site" count would crown a
+        // different function; the true distinct-caller count is 3 (a, b,
+        // c), with the thunk itself never counted as a caller.
         let data = export(
             vec![
-                function("0x1", "a", false, false, false, 1),
-                function("0x2", "b", false, false, false, 5),
-                function("0x3", "c", false, false, false, 3),
+                function("0x1", "target", false, false, false, &[]),
+                function("0x2", "a", false, false, false, &["0x1"]),
+                function("0x3", "b", false, false, false, &["0x1", "0x1"]),
+                thunk("0x4", "target_thunk", "0x1"),
+                function("0x5", "c", false, false, false, &["0x4"]),
+                // "decoy" makes far more outgoing calls than anyone makes
+                // into "target" (and, crucially, never calls "target" or
+                // its thunk itself), but is called by nobody -- it must
+                // not be reported as the most-used function.
+                function("0x6", "decoy", false, false, false, &["0x2", "0x3", "0x5"]),
             ],
             Vec::new(),
             Vec::new(),
@@ -269,11 +336,42 @@ mod tests {
 
         let overview = compute_overview(&data);
 
-        let most_called = overview
-            .most_called_function
-            .expect("should have a maximum");
-        assert_eq!(most_called.entry_address, "0x2");
-        assert_eq!(most_called.call_count, 5);
+        let most_used = overview.most_used_function.expect("should have a maximum");
+        assert_eq!(most_used.entry_address, "0x1");
+        assert_eq!(most_used.name, "target");
+        assert_eq!(most_used.used_by_function_count, 3);
+    }
+
+    #[test]
+    fn a_thunk_is_never_reported_as_the_most_used_function_even_on_a_tie() {
+        // Every caller of `real_target` goes exclusively through the
+        // thunk, so both resolve to the exact same distinct-caller count
+        // (2) -- a genuine tie. `max_by_key` keeps the *last* equally-
+        // maximal candidate, and the thunk is placed later in the function
+        // list (mirroring how a real PLT thunk's address usually sorts
+        // after the plain external stub it redirects to), so without
+        // excluding thunks from candidacy the thunk would win the tie.
+        // It's a redirect, not a meaningful callee identity, and must
+        // never be reported here.
+        let data = export(
+            vec![
+                function("0x1", "real_target", false, false, false, &[]),
+                thunk("0x9", "real_target_thunk", "0x1"),
+                function("0x2", "a", false, false, false, &["0x9"]),
+                function("0x3", "b", false, false, false, &["0x9"]),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let overview = compute_overview(&data);
+
+        let most_used = overview.most_used_function.expect("should have a maximum");
+        assert_eq!(most_used.entry_address, "0x1");
+        assert_eq!(most_used.name, "real_target");
+        assert_eq!(most_used.used_by_function_count, 2);
     }
 
     #[test]

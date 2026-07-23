@@ -17,13 +17,20 @@ fn real_elf_overview_matches_the_known_fauxware_shape() {
     assert_eq!(overview.thunk_function_count, 15);
     // Headless export never bulk-decompiles (on-demand only).
     assert_eq!(overview.decompiled_function_count, 0);
-    assert_eq!(overview.total_call_count, 25);
+    assert_eq!(overview.call_site_count, 25);
 
-    let most_called = overview
-        .most_called_function
-        .expect("main should be the most-called function");
-    assert_eq!(most_called.name, "main");
-    assert_eq!(most_called.call_count, 5);
+    // `read` is directly called by both `authenticate` and `main` --  two
+    // distinct real callers. `puts` ties at 2 as well (`accepted` and
+    // `main`), but `read`'s entry address sorts after `puts`'s, so it wins
+    // the deterministic last-equal-wins tie-break. Crucially, this is a
+    // *distinct-caller* count, not the number of outgoing calls `read`
+    // itself makes (it makes none -- it's an external import).
+    let most_used = overview
+        .most_used_function
+        .expect("some function should have real distinct callers");
+    assert_eq!(most_used.entry_address, "0x3");
+    assert_eq!(most_used.name, "read");
+    assert_eq!(most_used.used_by_function_count, 2);
 
     assert_eq!(overview.string_count, 7);
     assert_eq!(overview.total_string_reference_count, 11);
@@ -51,7 +58,7 @@ fn real_elf_overview_matches_the_known_fauxware_shape() {
 }
 
 #[test]
-fn real_pe_overview_reports_no_most_called_function_when_every_kept_function_is_a_leaf() {
+fn real_pe_overview_reports_no_most_used_function_when_every_kept_function_is_a_leaf() {
     let export = GhidraExport::parse_and_validate(REAL_PE_EXPORT_JSON)
         .expect("a real headless PE v2 export should be valid");
 
@@ -62,9 +69,10 @@ fn real_pe_overview_reports_no_most_called_function_when_every_kept_function_is_
     assert_eq!(overview.thunk_function_count, 6);
 
     // Every function kept in this trimmed fixture is a leaf import/thunk
-    // stub with an empty `calls` list -- there is honestly no "most called"
-    // function to report, not a fabricated zero-call entry.
-    assert_eq!(overview.most_called_function, None);
+    // stub with an empty `calls` list, and none of them call each other --
+    // there is honestly no function with any real caller to report, not a
+    // fabricated entry.
+    assert_eq!(overview.most_used_function, None);
 
     assert_eq!(overview.detected_type_count, 6);
     assert_eq!(overview.struct_count, 2);

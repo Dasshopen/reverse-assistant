@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use serde::Serialize;
 
 use crate::models::ghidra_export::{GhidraExport, GhidraFunction};
-use crate::services::call_graph::build_caller_index;
+use crate::services::call_graph::{build_caller_index, resolve_calling_functions};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ImportView {
@@ -39,7 +39,7 @@ pub fn list_imports(export: &GhidraExport) -> Vec<ImportView> {
             entry_address: function.entry_address.clone(),
             name: function.name.clone(),
             library: function.library.clone(),
-            used_by_function_count: resolve_using_functions(
+            used_by_function_count: resolve_calling_functions(
                 &caller_index,
                 &function_index,
                 function.entry_address.as_str(),
@@ -47,51 +47,6 @@ pub fn list_imports(export: &GhidraExport) -> Vec<ImportView> {
             .len(),
         })
         .collect()
-}
-
-// Starting from `start` (an import's address), walks backwards over the
-// (thunk-aware) caller index. A caller that is itself a thunk is never
-// counted as a "using" function -- the walk continues past it to find its
-// own callers instead, since a thunk chain can be several hops deep (or,
-// on ELF, a single PLT stub hop). The first non-thunk caller found along
-// each path is the real user. A `visited` set guards against cycles (a
-// thunk chain that loops back on itself), which simply yield no users
-// along that path rather than looping forever.
-fn resolve_using_functions<'a>(
-    caller_index: &HashMap<&'a str, Vec<&'a str>>,
-    function_index: &HashMap<&'a str, &'a GhidraFunction>,
-    start: &'a str,
-) -> HashSet<&'a str> {
-    let mut users: HashSet<&str> = HashSet::new();
-    let mut visited: HashSet<&str> = HashSet::new();
-    visited.insert(start);
-
-    let mut queue: VecDeque<&str> = VecDeque::new();
-    queue.push_back(start);
-
-    while let Some(address) = queue.pop_front() {
-        let Some(callers) = caller_index.get(address) else {
-            continue;
-        };
-
-        for &caller in callers {
-            if !visited.insert(caller) {
-                continue;
-            }
-
-            let is_thunk = function_index
-                .get(caller)
-                .is_some_and(|function| function.is_thunk);
-
-            if is_thunk {
-                queue.push_back(caller);
-            } else {
-                users.insert(caller);
-            }
-        }
-    }
-
-    users
 }
 
 #[cfg(test)]

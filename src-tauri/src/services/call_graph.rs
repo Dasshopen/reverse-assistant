@@ -70,6 +70,53 @@ pub fn build_caller_index(export: &GhidraExport) -> HashMap<&str, Vec<&str>> {
     index
 }
 
+// Every distinct *real* (non-thunk) function that ends up calling `start`,
+// walking backwards over `caller_index`. A caller that is itself a thunk is
+// never counted -- the walk continues past it to find its own callers
+// instead, since a thunk chain can be several hops deep (a PLT stub
+// redirecting to a GOT-resolved stub, for instance). This is deliberately
+// "distinct calling functions", not "call sites": the same function calling
+// `start` from three different instructions still counts once, and a
+// thunk redirect is never conflated with a real caller. A `visited` set
+// guards against cycles (a thunk chain that loops back on itself), which
+// simply yield no callers along that path rather than looping forever.
+pub fn resolve_calling_functions<'a>(
+    caller_index: &HashMap<&'a str, Vec<&'a str>>,
+    function_index: &HashMap<&'a str, &'a GhidraFunction>,
+    start: &'a str,
+) -> HashSet<&'a str> {
+    let mut callers: HashSet<&str> = HashSet::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    visited.insert(start);
+
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    queue.push_back(start);
+
+    while let Some(address) = queue.pop_front() {
+        let Some(direct_callers) = caller_index.get(address) else {
+            continue;
+        };
+
+        for &caller in direct_callers {
+            if !visited.insert(caller) {
+                continue;
+            }
+
+            let is_thunk = function_index
+                .get(caller)
+                .is_some_and(|function| function.is_thunk);
+
+            if is_thunk {
+                queue.push_back(caller);
+            } else {
+                callers.insert(caller);
+            }
+        }
+    }
+
+    callers
+}
+
 // Breadth-first search bounded to `max_depth` hops from `root_address`, in
 // the requested direction. Deliberately not "the whole program graph": real
 // binaries have thousands of functions, so the mockup's own graph view
