@@ -34,6 +34,7 @@ struct AutomaticAnalysisResult {
 #[derive(Debug, Clone, Serialize)]
 struct LoadedProject {
     export: GhidraExport,
+    identifications: Option<Vec<FunctionIdentification>>,
     project: ProjectSummary,
 }
 
@@ -45,8 +46,20 @@ fn auto_save_project(
     app: &AppHandle,
     export: &GhidraExport,
     session: Option<AnalysisSession>,
+    identifications: Option<&[FunctionIdentification]>,
 ) -> Option<ProjectMetadata> {
-    match project_storage::save_project(app, &export.program.name, export, session) {
+    let result = if let Some(identifications) = identifications {
+        project_storage::save_project_with_identifications(
+            app,
+            &export.program.name,
+            export,
+            session,
+            identifications,
+        )
+    } else {
+        project_storage::save_project(app, &export.program.name, export, session)
+    };
+    match result {
         Ok(project) => Some(project),
         Err(error) => {
             eprintln!("failed to save this analysis as a local project: {error}");
@@ -87,7 +100,7 @@ fn import_ghidra_export_summary(
     store_export(&export_state, imported.export.clone())?;
     // A manual JSON import has no live Ghidra project behind it -- it can
     // only ever be a snapshot project.
-    let _ = auto_save_project(&app, &imported.export, None);
+    let _ = auto_save_project(&app, &imported.export, None, None);
 
     Ok(imported.summary)
 }
@@ -100,7 +113,7 @@ fn import_ghidra_export_details(
 ) -> Result<ImportedGhidraExport, String> {
     let imported = import_ghidra_export(Path::new(&path))?;
     store_export(&export_state, imported.export.clone())?;
-    let _ = auto_save_project(&app, &imported.export, None);
+    let _ = auto_save_project(&app, &imported.export, None, None);
 
     Ok(imported)
 }
@@ -172,7 +185,12 @@ fn analyze_binary_with_ghidra(
         .map_err(|_| "the analysis session lock was poisoned".to_owned())? = Some(session.clone());
 
     store_export(&export_state, imported.export.clone())?;
-    let saved_project = auto_save_project(&app, &imported.export, Some(session));
+    let saved_project = auto_save_project(
+        &app,
+        &imported.export,
+        Some(session),
+        Some(&identifications),
+    );
 
     Ok(AutomaticAnalysisResult {
         imported,
@@ -307,7 +325,8 @@ fn open_project(
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
     id: String,
 ) -> Result<LoadedProject, String> {
-    let (export, project) = project_storage::load_project(&app, &id)?;
+    let (export, identifications, project) =
+        project_storage::load_project_with_identifications(&app, &id)?;
 
     // Availability is re-tested fresh by `load_project` on every call, so
     // this never restores a session for Ghidra project files that aren't
@@ -326,7 +345,11 @@ fn open_project(
 
     store_export(&export_state, export.clone())?;
 
-    Ok(LoadedProject { export, project })
+    Ok(LoadedProject {
+        export,
+        identifications,
+        project,
+    })
 }
 
 #[tauri::command]

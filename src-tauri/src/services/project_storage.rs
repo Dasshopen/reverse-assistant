@@ -1,12 +1,16 @@
 use std::fs;
+use std::io::{Read, Write};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::models::ghidra_export::GhidraExport;
+use crate::models::ghidra_identification::{parse_identifications, FunctionIdentification};
 use crate::models::ghidra_session::AnalysisSession;
 use crate::models::project::ProjectMetadata;
 use crate::services::ghidra_headless::ghidra_analysis_root_dir;
@@ -14,6 +18,8 @@ use crate::services::ghidra_headless::ghidra_analysis_root_dir;
 const PROJECTS_DIR_NAME: &str = "projects";
 const PROJECT_METADATA_FILE_NAME: &str = "project.json";
 const PROJECT_EXPORT_FILE_NAME: &str = "export.json";
+const PROJECT_DATA_ARCHIVE_FILE_NAME: &str = "analysis.zip";
+const PROJECT_IDENTIFICATIONS_FILE_NAME: &str = "identifications.json";
 
 // `metadata.session` is the permanent reference to a project's original
 // Ghidra analysis; `session_available` is always computed fresh (never
@@ -58,12 +64,42 @@ pub fn save_project(
     save_project_at(&real_projects_root_dir(app)?, name, export, session)
 }
 
+pub fn save_project_with_identifications(
+    app: &AppHandle,
+    name: &str,
+    export: &GhidraExport,
+    session: Option<AnalysisSession>,
+    identifications: &[FunctionIdentification],
+) -> Result<ProjectMetadata, String> {
+    save_project_at_with_identifications(
+        &real_projects_root_dir(app)?,
+        name,
+        export,
+        session,
+        Some(identifications),
+    )
+}
+
 pub fn list_projects(app: &AppHandle) -> Result<Vec<ProjectSummary>, String> {
     list_projects_at(&real_projects_root_dir(app)?)
 }
 
 pub fn load_project(app: &AppHandle, id: &str) -> Result<(GhidraExport, ProjectSummary), String> {
     load_project_at(&real_projects_root_dir(app)?, id)
+}
+
+pub fn load_project_with_identifications(
+    app: &AppHandle,
+    id: &str,
+) -> Result<
+    (
+        GhidraExport,
+        Option<Vec<FunctionIdentification>>,
+        ProjectSummary,
+    ),
+    String,
+> {
+    load_project_at_with_identifications(&real_projects_root_dir(app)?, id)
 }
 
 pub fn delete_project(app: &AppHandle, id: &str) -> Result<(), String> {
@@ -97,7 +133,8 @@ fn replace_project_export_at(root: &Path, id: &str, export: &GhidraExport) -> Re
         return Err(format!("no saved project exists with id '{id}'"));
     }
     export.validate()?;
-    write_export(&dir, export)
+    let identifications = read_stored_identifications(&dir, None)?;
+    write_project_archive(&dir, export, identifications.as_deref())
 }
 
 pub fn require_managed_session(app: &AppHandle, session: &AnalysisSession) -> Result<(), String> {
@@ -166,6 +203,16 @@ fn save_project_at(
     export: &GhidraExport,
     session: Option<AnalysisSession>,
 ) -> Result<ProjectMetadata, String> {
+    save_project_at_with_identifications(root, name, export, session, None)
+}
+
+fn save_project_at_with_identifications(
+    root: &Path,
+    name: &str,
+    export: &GhidraExport,
+    session: Option<AnalysisSession>,
+    identifications: Option<&[FunctionIdentification]>,
+) -> Result<ProjectMetadata, String> {
     let id = generate_project_id(name)?;
     let dir = project_dir_at(root, &id);
 
@@ -188,7 +235,7 @@ fn save_project_at(
     };
 
     write_metadata(&dir, &metadata)?;
-    write_export(&dir, export)?;
+    write_project_archive(&dir, export, identifications)?;
 
     Ok(metadata)
 }
@@ -201,15 +248,65 @@ fn write_metadata(dir: &Path, metadata: &ProjectMetadata) -> Result<(), String> 
         .map_err(|error| format!("failed to write project metadata: {error}"))
 }
 
-// The canonical `GhidraExport` only derives `Serialize` (see
-// models::ghidra_export) -- exactly what's needed here, since this writes
-// the same shape already sent to Svelte straight to disk.
-fn write_export(dir: &Path, export: &GhidraExport) -> Result<(), String> {
-    let json = serde_json::to_string(export)
+// The full analysis is compressed as one local archive. `project.json`
+// intentionally stays outside it so listing projects never has to inflate
+// a potentially large export. A present-but-empty identifications entry
+// means FunctionID ran and found nothing; a missing entry means it never ran.
+fn write_project_archive(
+    dir: &Path,
+    export: &GhidraExport,
+    identifications: Option<&[FunctionIdentification]>,
+) -> Result<(), String> {
+    let export_json = serde_json::to_vec(export)
         .map_err(|error| format!("failed to serialize the analysis export: {error}"))?;
+    let identifications_json = identifications
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|error| format!("failed to serialize FunctionID results: {error}"))?;
 
-    fs::write(dir.join(PROJECT_EXPORT_FILE_NAME), json)
-        .map_err(|error| format!("failed to write the analysis export: {error}"))
+    let archive_path = dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME);
+    let temporary_path = dir.join(format!("{PROJECT_DATA_ARCHIVE_FILE_NAME}.tmp"));
+    let file = fs::File::create(&temporary_path).map_err(|error| {
+        format!(
+            "failed to create project archive '{}': {error}",
+            temporary_path.display()
+        )
+    })?;
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file(PROJECT_EXPORT_FILE_NAME, options)
+        .map_err(|error| format!("failed to start the export archive entry: {error}"))?;
+    archive
+        .write_all(&export_json)
+        .map_err(|error| format!("failed to compress the analysis export: {error}"))?;
+    if let Some(json) = identifications_json {
+        archive
+            .start_file(PROJECT_IDENTIFICATIONS_FILE_NAME, options)
+            .map_err(|error| format!("failed to start the FunctionID archive entry: {error}"))?;
+        archive
+            .write_all(&json)
+            .map_err(|error| format!("failed to compress FunctionID results: {error}"))?;
+    }
+    archive
+        .finish()
+        .map_err(|error| format!("failed to finish the project archive: {error}"))?;
+
+    if archive_path.is_file() {
+        fs::remove_file(&archive_path).map_err(|error| {
+            format!(
+                "failed to replace project archive '{}': {error}",
+                archive_path.display()
+            )
+        })?;
+    }
+    fs::rename(&temporary_path, &archive_path).map_err(|error| {
+        format!(
+            "failed to install project archive '{}': {error}",
+            archive_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn read_metadata(dir: &Path) -> Result<ProjectMetadata, String> {
@@ -258,6 +355,21 @@ fn list_projects_at(root: &Path) -> Result<Vec<ProjectSummary>, String> {
 }
 
 fn load_project_at(root: &Path, id: &str) -> Result<(GhidraExport, ProjectSummary), String> {
+    let (export, _, summary) = load_project_at_with_identifications(root, id)?;
+    Ok((export, summary))
+}
+
+fn load_project_at_with_identifications(
+    root: &Path,
+    id: &str,
+) -> Result<
+    (
+        GhidraExport,
+        Option<Vec<FunctionIdentification>>,
+        ProjectSummary,
+    ),
+    String,
+> {
     require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
 
@@ -271,13 +383,7 @@ fn load_project_at(root: &Path, id: &str) -> Result<(GhidraExport, ProjectSummar
     // become "live" again automatically the moment those files reappear.
     let summary = summarize(read_metadata(&dir)?);
 
-    let export_path = dir.join(PROJECT_EXPORT_FILE_NAME);
-    let json = fs::read_to_string(&export_path).map_err(|error| {
-        format!(
-            "failed to read project export '{}': {error}",
-            export_path.display()
-        )
-    })?;
+    let (json, archived_identifications) = read_project_payload(&dir)?;
 
     // Deliberately not `GhidraExport::parse_and_validate`: that entry point
     // is for real Ghidra-produced files and dispatches on `schema_version`
@@ -287,15 +393,89 @@ fn load_project_at(root: &Path, id: &str) -> Result<(GhidraExport, ProjectSummar
     // `strings`), so it's deserialized directly as that shape. `validate()`
     // still runs as a defense-in-depth check against a hand-edited or
     // corrupted cache file.
-    let export: GhidraExport = serde_json::from_str(&json).map_err(|error| {
+    let export: GhidraExport = serde_json::from_str(&json)
+        .map_err(|error| format!("invalid saved project export: {error}"))?;
+    export.validate()?;
+
+    let identifications = if archived_identifications.is_some() {
+        archived_identifications
+    } else {
+        read_stored_identifications(&dir, summary.metadata.session.as_ref())?
+    };
+
+    Ok((export, identifications, summary))
+}
+
+fn read_project_payload(
+    dir: &Path,
+) -> Result<(String, Option<Vec<FunctionIdentification>>), String> {
+    let archive_path = dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME);
+    if archive_path.is_file() {
+        let file = fs::File::open(&archive_path).map_err(|error| {
+            format!(
+                "failed to open project archive '{}': {error}",
+                archive_path.display()
+            )
+        })?;
+        let mut archive = ZipArchive::new(file).map_err(|error| {
+            format!(
+                "invalid project archive '{}': {error}",
+                archive_path.display()
+            )
+        })?;
+        let mut export_json = String::new();
+        archive
+            .by_name(PROJECT_EXPORT_FILE_NAME)
+            .map_err(|error| format!("project archive has no export entry: {error}"))?
+            .read_to_string(&mut export_json)
+            .map_err(|error| format!("failed to inflate the project export: {error}"))?;
+
+        let identifications = match archive.by_name(PROJECT_IDENTIFICATIONS_FILE_NAME) {
+            Ok(mut entry) => {
+                let mut json = String::new();
+                entry
+                    .read_to_string(&mut json)
+                    .map_err(|error| format!("failed to inflate FunctionID results: {error}"))?;
+                Some(parse_identifications(&json)?)
+            }
+            Err(zip::result::ZipError::FileNotFound) => None,
+            Err(error) => return Err(format!("failed to read FunctionID results: {error}")),
+        };
+        return Ok((export_json, identifications));
+    }
+
+    // Backward compatibility: projects created before compact archives used
+    // a plain canonical export file. They remain fully readable.
+    let export_path = dir.join(PROJECT_EXPORT_FILE_NAME);
+    let json = fs::read_to_string(&export_path).map_err(|error| {
         format!(
-            "invalid project export '{}': {error}",
+            "failed to read project export '{}': {error}",
             export_path.display()
         )
     })?;
-    export.validate()?;
+    Ok((json, None))
+}
 
-    Ok((export, summary))
+fn read_stored_identifications(
+    dir: &Path,
+    session: Option<&AnalysisSession>,
+) -> Result<Option<Vec<FunctionIdentification>>, String> {
+    let local_path = dir.join(PROJECT_IDENTIFICATIONS_FILE_NAME);
+    let fallback_path =
+        session.map(|value| value.project_dir.join(PROJECT_IDENTIFICATIONS_FILE_NAME));
+    let path = if local_path.is_file() {
+        Some(local_path)
+    } else {
+        fallback_path.filter(|candidate| candidate.is_file())
+    };
+    let Some(path) = path else { return Ok(None) };
+    let json = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "failed to read FunctionID results '{}': {error}",
+            path.display()
+        )
+    })?;
+    parse_identifications(&json).map(Some)
 }
 
 fn ghidra_project_files_exist(session: &AnalysisSession) -> bool {
@@ -401,6 +581,7 @@ fn rename_project_at(root: &Path, id: &str, new_name: &str) -> Result<ProjectMet
 mod tests {
     use super::*;
     use crate::models::ghidra_export::{Endianness, ProgramMetadata};
+    use crate::models::ghidra_identification::FidCandidate;
 
     fn isolated_root(test_name: &str) -> PathBuf {
         let unique_suffix = SystemTime::now()
@@ -486,6 +667,14 @@ mod tests {
         let saved = save_project_at(&root, "fauxware", &export, None)
             .expect("saving a real export should succeed");
         assert_eq!(saved.function_count, export.functions.len());
+        let raw_size = serde_json::to_vec(&export)
+            .expect("the real export should serialize")
+            .len() as u64;
+        let archive_size =
+            fs::metadata(project_dir_at(&root, &saved.id).join(PROJECT_DATA_ARCHIVE_FILE_NAME))
+                .expect("the compact project archive should exist")
+                .len();
+        assert!(archive_size < raw_size, "the real export should compress");
 
         let (loaded_export, _) =
             load_project_at(&root, &saved.id).expect("loading the real export should succeed");
@@ -514,6 +703,81 @@ mod tests {
         assert!(!loaded_summary.session_available);
 
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn compact_archive_round_trips_function_id_results_without_a_plain_export_copy() {
+        let root = isolated_root("function-id-round-trip");
+        let export = sample_export("identified.exe");
+        let identifications = vec![FunctionIdentification {
+            entry_address: "0x140001000".to_owned(),
+            candidates: vec![FidCandidate {
+                name: "memcpy".to_owned(),
+                library_family: "visual studio".to_owned(),
+                library_version: "2019".to_owned(),
+                library_variant: "x64".to_owned(),
+                overall_score: 42.5,
+                match_mode: "FULL".to_owned(),
+            }],
+        }];
+
+        let saved = save_project_at_with_identifications(
+            &root,
+            "Identified",
+            &export,
+            None,
+            Some(&identifications),
+        )
+        .expect("saving identified project should succeed");
+        let project_dir = project_dir_at(&root, &saved.id);
+        assert!(project_dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME).is_file());
+        assert!(!project_dir.join(PROJECT_EXPORT_FILE_NAME).exists());
+
+        let (loaded_export, loaded_identifications, _) =
+            load_project_at_with_identifications(&root, &saved.id)
+                .expect("compact project should load");
+        assert_eq!(loaded_export, export);
+        assert_eq!(loaded_identifications, Some(identifications));
+
+        fs::remove_dir_all(root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn an_empty_function_id_result_remains_distinct_from_function_id_not_run() {
+        let root = isolated_root("empty-function-id");
+        let export = sample_export("no-match.exe");
+        let saved =
+            save_project_at_with_identifications(&root, "No match", &export, None, Some(&[]))
+                .expect("saving empty FunctionID result should succeed");
+
+        let (_, loaded_identifications, _) = load_project_at_with_identifications(&root, &saved.id)
+            .expect("empty FunctionID result should load");
+        assert_eq!(loaded_identifications, Some(Vec::new()));
+
+        fs::remove_dir_all(root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn legacy_plain_export_projects_remain_readable() {
+        let root = isolated_root("legacy-plain-export");
+        let export = sample_export("legacy.exe");
+        let saved =
+            save_project_at(&root, "Legacy", &export, None).expect("initial project should save");
+        let project_dir = project_dir_at(&root, &saved.id);
+        fs::remove_file(project_dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME))
+            .expect("test should remove the new archive");
+        fs::write(
+            project_dir.join(PROJECT_EXPORT_FILE_NAME),
+            serde_json::to_vec(&export).expect("legacy export should serialize"),
+        )
+        .expect("legacy export should be written");
+
+        let (loaded, identifications, _) = load_project_at_with_identifications(&root, &saved.id)
+            .expect("legacy project should remain readable");
+        assert_eq!(loaded, export);
+        assert_eq!(identifications, None);
+
+        fs::remove_dir_all(root).expect("the isolated test directory should be removed");
     }
 
     #[test]

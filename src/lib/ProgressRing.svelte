@@ -14,23 +14,28 @@
 
   let clamped = $derived(Math.max(0, Math.min(100, percentage)));
   let dashOffset = $derived(circumference * (1 - clamped / 100));
+  let displayedPercentage = $derived(
+    clamped > 0 && clamped < 1 ? "<1%" : `${Math.round(clamped)}%`,
+  );
 </script>
 
 <div class="progress-ring">
-  <svg viewBox="0 0 100 100" aria-hidden="true">
-    <circle class="track" cx="50" cy="50" r={radius} />
-    <circle
-      class="value"
-      cx="50"
-      cy="50"
-      r={radius}
-      stroke-dasharray={circumference}
-      stroke-dashoffset={dashOffset}
-    />
-  </svg>
-  <div class="progress-ring-text">
-    <strong>{clamped}%</strong>
-    <span>{label}</span>
+  <div class="ring-visual">
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <circle class="track" cx="50" cy="50" r={radius} />
+      <circle
+        class="value"
+        cx="50"
+        cy="50"
+        r={radius}
+        stroke-dasharray={circumference}
+        stroke-dashoffset={dashOffset}
+      />
+    </svg>
+    <div class="progress-ring-text">
+      <strong>{displayedPercentage}</strong>
+      <span>{label}</span>
+    </div>
   </div>
   {#if sublabel}
     <small>{sublabel}</small>
@@ -41,12 +46,19 @@
   .progress-ring {
     display: grid;
     justify-items: center;
-    gap: 0.3rem;
+    align-content: center;
+    gap: 0.15rem;
+  }
+
+  .ring-visual {
+    position: relative;
+    width: 72px;
+    height: 72px;
   }
 
   svg {
-    width: 108px;
-    height: 108px;
+    width: 72px;
+    height: 72px;
     transform: rotate(-90deg);
   }
 
@@ -66,26 +78,32 @@
   }
 
   .progress-ring-text {
+    position: absolute;
+    inset: 0;
     display: grid;
-    margin-top: -74px;
+    align-content: center;
     justify-items: center;
     text-align: center;
   }
 
   .progress-ring-text strong {
     color: #f3f6fb;
-    font-size: 1.15rem;
+    font-size: 1rem;
+    line-height: 1;
   }
 
   .progress-ring-text span {
     color: #8292ad;
-    font-size: 0.62rem;
+    margin-top: 0.16rem;
+    font-size: 0.6rem;
   }
 
   small {
-    margin-top: 0.35rem;
+    max-width: 130px;
+    margin-top: 0;
     color: #71819c;
-    font-size: 0.66rem;
+    font-size: 0.64rem;
+    line-height: 1.15;
     text-align: center;
   }
 </style>

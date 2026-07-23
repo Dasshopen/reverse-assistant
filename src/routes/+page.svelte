@@ -100,6 +100,7 @@ interface ProjectSummary extends ProjectMetadata {
 
 interface LoadedProject {
   export: GhidraExport;
+  identifications: FunctionIdentification[] | null;
   project: ProjectSummary;
 }
 
@@ -335,6 +336,8 @@ interface ApplyRenamesResult {
   let importedExport = $state<GhidraExport | null>(null);
   let selectedFunctionAddress = $state<string | null>(null);
   let functionSearch = $state("");
+  let graphNavigationHistory = $state<string[]>([]);
+  let graphHistoryProgramSha: string | null = null;
 
   let selectedFunction = $derived(
     importedExport?.functions.find(
@@ -416,6 +419,7 @@ interface ApplyRenamesResult {
   let pendingDecompiles = $state(new Set<string>());
   let decompileErrors = $state(new Map<string, string>());
   let identifications = $state(new Map<string, FidCandidate[]>());
+  let functionIdAnalysisAvailable = $state(false);
   let functionRenameDraft = $state("");
   let isApplyingFunctionRename = $state(false);
   let functionRenameError = $state("");
@@ -435,7 +439,7 @@ interface ApplyRenamesResult {
   // where a function is selected, never averaged into one number here.
   let identifiedFunctionStats = $derived.by(() => {
     if (!importedExport) return null;
-    if (identifications.size === 0) return null;
+    if (!functionIdAnalysisAvailable) return null;
 
     const internalFunctions = importedExport.functions.filter(
       (func) => !func.is_external,
@@ -458,6 +462,90 @@ interface ApplyRenamesResult {
     return identifications.get(entryAddress)?.[0] ?? null;
   }
 
+  function initialFunctionAddress(exportData: GhidraExport): string | null {
+    const internalFunctions = exportData.functions.filter((func) => !func.is_external);
+    const normalizedName = (func: GhidraFunction) =>
+      func.name.toLowerCase().replace(/^.*::/, "");
+
+    const mainNames = new Set(["main", "wmain", "winmain", "wwinmain"]);
+    const mainFunction = internalFunctions.find((func) => mainNames.has(normalizedName(func)));
+    if (mainFunction) return mainFunction.entry_address;
+
+    const entryAddresses = new Set(
+      exportData.program.external_entry_points
+        .filter((entry) => entry.kind === "function")
+        .map((entry) => entry.address),
+    );
+    const programEntryFunction = internalFunctions.find((func) =>
+      entryAddresses.has(func.entry_address),
+    );
+    if (programEntryFunction) return programEntryFunction.entry_address;
+
+    const entryNames = new Set(["_start", "start", "entry", "__start"]);
+    const namedEntryFunction = internalFunctions.find((func) =>
+      entryNames.has(normalizedName(func)),
+    );
+    if (namedEntryFunction) return namedEntryFunction.entry_address;
+
+    return (
+      internalFunctions.find((func) => !func.is_thunk)?.entry_address ??
+      internalFunctions[0]?.entry_address ??
+      exportData.functions[0]?.entry_address ??
+      null
+    );
+  }
+
+  let importantFunctions = $derived.by(() => {
+    if (!importedExport) return [];
+
+    const callCounts = new Map<string, number>();
+    for (const caller of importedExport.functions) {
+      const targets = new Set(
+        caller.calls
+          .map((call) => call.target_address)
+          .filter((address): address is string => address !== null),
+      );
+      if (caller.thunk_target_address) targets.add(caller.thunk_target_address);
+      for (const target of targets) {
+        callCounts.set(target, (callCounts.get(target) ?? 0) + 1);
+      }
+    }
+
+    return importedExport.functions
+      .filter((func) => !func.is_external && !func.is_thunk)
+      .map((func) => ({
+        ...func,
+        callerCount: callCounts.get(func.entry_address) ?? 0,
+        identification: topIdentificationFor(func.entry_address),
+      }))
+      .sort((a, b) => b.callerCount - a.callerCount || a.name.localeCompare(b.name))
+      .slice(0, 8);
+  });
+
+  let detectedLibraries = $derived.by(() => {
+    const libraries = new Map<string, { candidateCount: number; scoreTotal: number }>();
+    for (const candidates of identifications.values()) {
+      for (const candidate of candidates.slice(0, 1)) {
+        const label = [candidate.library_family, candidate.library_version]
+          .filter(Boolean)
+          .join(" ");
+        if (!label) continue;
+        const current = libraries.get(label) ?? { candidateCount: 0, scoreTotal: 0 };
+        current.candidateCount += 1;
+        current.scoreTotal += candidate.overall_score;
+        libraries.set(label, current);
+      }
+    }
+    return [...libraries.entries()]
+      .map(([name, value]) => ({
+        name,
+        candidateCount: value.candidateCount,
+        averageScore: value.scoreTotal / value.candidateCount,
+      }))
+      .sort((a, b) => b.candidateCount - a.candidateCount)
+      .slice(0, 5);
+  });
+
   let globalStrings = $state<GlobalStringView[] | null>(null);
   let globalStringsError = $state("");
   let isLoadingGlobalStrings = $state(false);
@@ -473,6 +561,12 @@ interface ApplyRenamesResult {
       entry.value.toLowerCase().includes(query),
     );
   });
+
+  let interestingStrings = $derived(
+    [...(globalStrings ?? [])]
+      .sort((a, b) => b.reference_count - a.reference_count)
+      .slice(0, 5),
+  );
 
   let imports = $state<ImportView[] | null>(null);
   let importsError = $state("");
@@ -549,9 +643,7 @@ interface ApplyRenamesResult {
   // many exist. Reused as the overview's progress ring.
   let decompiledProgress = $derived.by(() => {
     if (!programOverview || programOverview.function_count === 0) return 0;
-    return Math.round(
-      (programOverview.decompiled_function_count / programOverview.function_count) * 100,
-    );
+    return (programOverview.decompiled_function_count / programOverview.function_count) * 100;
   });
 
   type DetailTab = "overview" | "code" | "evidence" | "strings" | "calls";
@@ -621,6 +713,40 @@ interface ApplyRenamesResult {
     new Map(callGraphLayout.nodes.map((node) => [node.entry_address, node])),
   );
 
+  const overviewGraphWidth = 520;
+  const overviewGraphNodeWidth = 126;
+  const overviewGraphNodeHeight = 48;
+  let overviewGraphLayout = $derived.by(() => {
+    if (!callGraphResult) return { nodes: [], edges: [], height: 280 };
+    const grouped = new Map<number, CallGraphNode[]>();
+    for (const node of callGraphResult.nodes) {
+      const group = grouped.get(node.depth) ?? [];
+      if (group.length < (node.depth === 0 ? 1 : 3)) group.push(node);
+      grouped.set(node.depth, group);
+    }
+    const nodes = [...grouped.entries()]
+      .filter(([depth]) => depth <= 2)
+      .flatMap(([depth, group]) =>
+        group.map((node, index) => ({
+          ...node,
+          x: Math.round(((index + 1) * overviewGraphWidth) / (group.length + 1) - overviewGraphNodeWidth / 2),
+          y: 22 + depth * 96,
+        })),
+      );
+    const addresses = new Set(nodes.map((node) => node.entry_address));
+    return {
+      nodes,
+      edges: callGraphResult.edges.filter(
+        (edge) => addresses.has(edge.from) && addresses.has(edge.to),
+      ),
+      height: 280,
+    };
+  });
+
+  let overviewGraphPositions = $derived(
+    new Map(overviewGraphLayout.nodes.map((node) => [node.entry_address, node])),
+  );
+
   let isDecompilingSelected = $derived(
     selectedFunctionAddress !== null &&
       pendingDecompiles.has(selectedFunctionAddress),
@@ -656,6 +782,14 @@ interface ApplyRenamesResult {
   );
 
   let displayedCallingConvention = $derived(enrichedDetails?.calling_convention ?? null);
+
+  let selectedPrototype = $derived.by(() => {
+    if (!selectedFunction) return "";
+    const parameters = displayedParameters
+      .map((parameter) => `${parameter.data_type} ${parameter.name}`)
+      .join(", ");
+    return `${displayedReturnType || "undefined"} ${selectedFunction.name}(${parameters})`;
+  });
   let selectedBsimResult = $derived(enrichedDetails?.bsim ?? null);
 
   $effect(() => {
@@ -667,6 +801,14 @@ interface ApplyRenamesResult {
     functionRenameError = "";
     functionRenameSuccess = "";
     activeDetailTab = "overview";
+  });
+
+  $effect(() => {
+    const currentProgramSha = importedExport?.program.sha256 ?? null;
+    if (currentProgramSha !== graphHistoryProgramSha) {
+      graphHistoryProgramSha = currentProgramSha;
+      graphNavigationHistory = [];
+    }
   });
 
   $effect(() => {
@@ -704,12 +846,20 @@ interface ApplyRenamesResult {
     pendingDecompiles = new Set();
     decompileErrors = new Map();
     identifications = new Map();
+    functionIdAnalysisAvailable = false;
 
     try {
       const loaded = await invoke<LoadedProject>("open_project", { id });
 
       importedExport = loaded.export;
-      selectedFunctionAddress = loaded.export.functions[0]?.entry_address ?? null;
+      selectedFunctionAddress = initialFunctionAddress(loaded.export);
+      identifications = new Map(
+        (loaded.identifications ?? []).map((identification) => [
+          identification.entry_address,
+          identification.candidates,
+        ]),
+      );
+      functionIdAnalysisAvailable = loaded.identifications !== null;
       // A currently-available session (Ghidra project files genuinely
       // present right now, just re-verified by the backend) keeps
       // on-demand decompilation working, exactly like a fresh automatic
@@ -1118,10 +1268,24 @@ interface ApplyRenamesResult {
     functionRenameSuccess = "";
   }
 
-  function openFunction(entryAddress: string | null) {
+  function openFunction(entryAddress: string | null, navigateToFunctions = true) {
     if (!entryAddress) return;
     selectedFunctionAddress = entryAddress;
-    activeWorkspaceView = "functions";
+    if (navigateToFunctions) activeWorkspaceView = "functions";
+  }
+
+  function navigateWithinGraph(entryAddress: string) {
+    if (selectedFunctionAddress && selectedFunctionAddress !== entryAddress) {
+      graphNavigationHistory = [...graphNavigationHistory, selectedFunctionAddress];
+    }
+    openFunction(entryAddress, false);
+  }
+
+  function navigateBackInGraph() {
+    const previousAddress = graphNavigationHistory.at(-1);
+    if (!previousAddress) return;
+    graphNavigationHistory = graphNavigationHistory.slice(0, -1);
+    openFunction(previousAddress, false);
   }
 
   async function checkBackendStatus() {
@@ -1198,6 +1362,7 @@ interface ApplyRenamesResult {
     pendingDecompiles = new Set();
     decompileErrors = new Map();
     identifications = new Map();
+    functionIdAnalysisAvailable = false;
 
     isAnalyzing = true;
 
@@ -1209,8 +1374,7 @@ interface ApplyRenamesResult {
 
       importedExport = result.imported.export;
       importSummary = result.imported.summary;
-      selectedFunctionAddress =
-        result.imported.export.functions[0]?.entry_address ?? null;
+      selectedFunctionAddress = initialFunctionAddress(result.imported.export);
       analysisSource = "automatic";
       activeProjectId = result.saved_project?.id ?? null;
       activeWorkspaceView = "overview";
@@ -1220,6 +1384,7 @@ interface ApplyRenamesResult {
           identification.candidates,
         ]),
       );
+      functionIdAnalysisAvailable = true;
       // The backend auto-saves every completed analysis as a local
       // project -- refresh the list so it shows up right away.
       requestProjectList();
@@ -1264,6 +1429,7 @@ interface ApplyRenamesResult {
     pendingDecompiles = new Set();
     decompileErrors = new Map();
     identifications = new Map();
+    functionIdAnalysisAvailable = false;
 
     const path = exportPath.trim();
 
@@ -1282,8 +1448,7 @@ interface ApplyRenamesResult {
 
       importedExport = imported.export;
       importSummary = imported.summary;
-      selectedFunctionAddress =
-        imported.export.functions[0]?.entry_address ?? null;
+      selectedFunctionAddress = initialFunctionAddress(imported.export);
       analysisSource = "manual";
       activeProjectId = null;
       activeWorkspaceView = "overview";
@@ -1903,10 +2068,10 @@ interface ApplyRenamesResult {
     {#if importedExport}
       <section
         class="summary"
-        class:view-hidden={activeWorkspaceView !== "overview" && activeWorkspaceView !== "reports"}
+        class:view-hidden={activeWorkspaceView !== "reports"}
         aria-labelledby="program-overview-title"
       >
-        <h2 id="program-overview-title">Overview</h2>
+        <h2 id="program-overview-title">Rapport d’analyse</h2>
 
         <div class="report-export-controls">
           <button type="button" disabled={isExportingPdfReport} onclick={exportPdfReport}>
@@ -1998,7 +2163,7 @@ interface ApplyRenamesResult {
 
       <section
         class="dashboard-insights"
-        class:view-hidden={activeWorkspaceView !== "overview"}
+        class:view-hidden={true}
         aria-label="Informations principales de l’analyse"
       >
         <article>
@@ -2041,6 +2206,141 @@ interface ApplyRenamesResult {
             </div>
           {:else}<p>Aucune fonction dominante.</p>{/if}
         </article>
+      </section>
+
+      <section
+        class="overview-dashboard"
+        class:view-hidden={activeWorkspaceView !== "overview"}
+        aria-label="Tableau de bord de l’analyse"
+      >
+        <div class="overview-main-grid">
+          <article class="overview-card important-functions-card">
+            <header class="overview-card-header">
+              <div><h2>Fonctions les plus importantes</h2><span>Classées par nombre de fonctions appelantes</span></div>
+            </header>
+            {#if importantFunctions.length > 0}
+              <table>
+                <thead><tr><th>Fonction</th><th>Identification</th><th>Appels</th></tr></thead>
+                <tbody>
+                  {#each importantFunctions as func (func.entry_address)}
+                    <tr class:selected={func.entry_address === selectedFunctionAddress}>
+                      <td><button type="button" onclick={() => navigateWithinGraph(func.entry_address)}>{func.name}</button><code>{func.entry_address}</code></td>
+                      <td>
+                        {#if func.identification}
+                          <span class="identification-badge" title={`Score FunctionID ${func.identification.overall_score.toFixed(1)}`}>
+                            {func.identification.name}
+                          </span>
+                        {:else}<span class="muted-value">—</span>{/if}
+                      </td>
+                      <td><strong>{func.callerCount}</strong></td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {:else}<p class="overview-empty">Aucune relation d’appel disponible.</p>{/if}
+            <button type="button" class="overview-card-link" onclick={() => (activeWorkspaceView = "functions")}>Voir toutes les fonctions →</button>
+          </article>
+
+          <article class="overview-card overview-graph-card">
+            <header class="overview-card-header">
+              <div><h2>Graphe d’appels (aperçu)</h2><span>Voisinage réel de la fonction sélectionnée</span></div>
+              <div class="overview-graph-actions">
+                <button type="button" disabled={graphNavigationHistory.length === 0} onclick={navigateBackInGraph}>← Retour</button>
+                <button type="button" onclick={() => (activeWorkspaceView = "graph")}>Ouvrir le graphe complet</button>
+              </div>
+            </header>
+            {#if isLoadingCallGraph}
+              <p class="overview-empty">Construction du graphe…</p>
+            {:else if callGraphError}
+              <p class="error" role="alert">{callGraphError}</p>
+            {:else if overviewGraphLayout.nodes.length > 0}
+              <div class="overview-graph-scroll">
+                <div class="overview-graph-stage" style={`width:${overviewGraphWidth}px;height:${overviewGraphLayout.height}px`}>
+                  <svg viewBox={`0 0 ${overviewGraphWidth} ${overviewGraphLayout.height}`} aria-hidden="true">
+                    <defs><marker id="overview-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
+                    {#each overviewGraphLayout.edges as edge (`overview-${edge.from}-${edge.to}`)}
+                      {@const from = overviewGraphPositions.get(edge.from)}
+                      {@const to = overviewGraphPositions.get(edge.to)}
+                      {#if from && to}
+                        <path class="overview-edge" d={`M ${from.x + overviewGraphNodeWidth / 2} ${from.y + overviewGraphNodeHeight} C ${from.x + overviewGraphNodeWidth / 2} ${from.y + 28}, ${to.x + overviewGraphNodeWidth / 2} ${to.y - 28}, ${to.x + overviewGraphNodeWidth / 2} ${to.y}`} marker-end="url(#overview-arrow)"></path>
+                      {/if}
+                    {/each}
+                  </svg>
+                  {#each overviewGraphLayout.nodes as node (node.entry_address)}
+                    <button
+                      type="button"
+                      class="overview-graph-node"
+                      class:root={node.entry_address === selectedFunctionAddress}
+                      class:external={node.is_external}
+                      class:thunk={node.is_thunk}
+                      style={`left:${node.x}px;top:${node.y}px;width:${overviewGraphNodeWidth}px;height:${overviewGraphNodeHeight}px`}
+                      onclick={() => navigateWithinGraph(node.entry_address)}
+                    ><strong>{node.name}</strong><code>{node.entry_address}</code></button>
+                  {/each}
+                </div>
+              </div>
+              <div class="overview-graph-legend"><span class="root">Sélection</span><span>Interne</span><span class="external">Externe</span><span class="thunk">Thunk</span></div>
+            {:else}<p class="overview-empty">Sélectionne une fonction pour afficher son graphe.</p>{/if}
+          </article>
+
+          <article class="overview-card selected-function-card">
+            <header class="selected-function-heading">
+              <div><p class="detail-label">Détails de la fonction sélectionnée</p><h2>{selectedFunction?.name ?? "Aucune fonction"}</h2>{#if selectedFunction}<code>{selectedFunction.entry_address}</code>{/if}</div>
+              {#if selectedFunction}<span class="function-kind-badge">{selectedFunction.is_external ? "Externe" : selectedFunction.is_thunk ? "Thunk" : "Interne"}</span>{/if}
+            </header>
+            {#if selectedFunction}
+              <nav class="overview-detail-tabs" aria-label="Aperçu de la fonction">
+                {#each detailTabs as tab (tab.id)}
+                  <button type="button" class:active={activeDetailTab === tab.id} onclick={() => (activeDetailTab = tab.id)}>{tab.label}</button>
+                {/each}
+              </nav>
+              {#if activeDetailTab === "overview"}
+                <div class="overview-function-content">
+                  <p class="mini-label">Prototype</p><code class="prototype-line">{selectedPrototype}</code>
+                  <p class="mini-label">Preuves disponibles</p>
+                  <ul class="evidence-list">
+                    <li class:available={selectedIdentificationCandidates.length > 0}>FunctionID : {selectedIdentificationCandidates.length > 0 ? `${selectedIdentificationCandidates.length} candidature(s)` : "aucune candidature"}</li>
+                    <li class:available={selectedBsimResult?.status === "available" && selectedBsimResult.matches.length > 0}>BSim : {selectedBsimResult?.status === "available" ? `${selectedBsimResult.matches.length} correspondance(s)` : "non interrogé"}</li>
+                    <li class:available={selectedFunction.strings.length > 0}>{selectedFunction.strings.length} chaîne(s) référencée(s)</li>
+                    <li class:available={selectedFunction.calls.length > 0}>{selectedFunction.calls.length} appel(s) sortant(s)</li>
+                  </ul>
+                </div>
+              {:else if activeDetailTab === "code"}
+                <div class="overview-code-preview">{#if isDecompilingSelected}<p>Décompilation…</p>{:else if selectedDecompiledCode}<pre><code>{selectedDecompiledCode}</code></pre>{:else}<p>Aucun pseudocode disponible.</p>{/if}</div>
+              {:else if activeDetailTab === "evidence"}
+                <div class="overview-function-content"><p>{selectedIdentificationCandidates.length} candidature(s) FunctionID et {selectedBsimResult?.matches.length ?? 0} correspondance(s) BSim.</p></div>
+              {:else if activeDetailTab === "strings"}
+                <ul class="compact-detail-list">{#each selectedFunction.strings.slice(0, 6) as value}<li><code>{value}</code></li>{/each}</ul>
+              {:else}
+                <ul class="compact-detail-list">{#each selectedFunction.calls.slice(0, 6) as call}<li><span>{call.target_name}</span><code>{call.target_address ?? "?"}</code></li>{/each}</ul>
+              {/if}
+              <button type="button" class="overview-card-link" onclick={() => (activeWorkspaceView = "functions")}>Ouvrir la fiche complète →</button>
+            {:else}<p class="overview-empty">Sélectionne une fonction dans la liste.</p>{/if}
+          </article>
+        </div>
+
+        <div class="overview-bottom-grid">
+          <article class="overview-card compact-overview-card">
+            <header class="overview-card-header"><div><h2>Chaînes intéressantes</h2><span>Classées par références</span></div></header>
+            <ul class="overview-data-list">{#each interestingStrings as entry (entry.address)}<li><code>{entry.address}</code><span title={entry.value}>{entry.value}</span><strong>{entry.reference_count}</strong></li>{/each}</ul>
+            <button type="button" class="overview-card-link" onclick={() => (activeWorkspaceView = "strings")}>Voir toutes les chaînes →</button>
+          </article>
+          <article class="overview-card compact-overview-card">
+            <header class="overview-card-header"><div><h2>Imports principaux</h2><span>{imports?.length ?? 0} imports détectés</span></div></header>
+            {#if imports && imports.length > 0}<ul class="overview-data-list">{#each [...imports].sort((a, b) => b.used_by_function_count - a.used_by_function_count).slice(0, 5) as entry (entry.entry_address)}<li><span title={entry.name}>{entry.name}</span><code>{entry.library ?? "Bibliothèque inconnue"}</code><strong>{entry.used_by_function_count}</strong></li>{/each}</ul>{:else}<p class="overview-empty">Aucun import détecté.</p>{/if}
+            <button type="button" class="overview-card-link" onclick={() => (activeWorkspaceView = "imports")}>Voir tous les imports →</button>
+          </article>
+          <article class="overview-card compact-overview-card">
+            <header class="overview-card-header"><div><h2>Bibliothèques reconnues</h2><span>Candidatures FunctionID réelles</span></div></header>
+            {#if detectedLibraries.length > 0}<ul class="overview-data-list library-list">{#each detectedLibraries as library (library.name)}<li><span>{library.name}</span><code>score moyen {library.averageScore.toFixed(1)}</code><strong>{library.candidateCount}</strong></li>{/each}</ul>{:else}<p class="overview-empty">Aucune bibliothèque reconnue dans cette session.</p>{/if}
+          </article>
+          <article class="overview-card compact-overview-card comparison-preview-card">
+            <header class="overview-card-header"><div><h2>Comparaison de versions</h2><span>Deux projets locaux nécessaires</span></div></header>
+            {#if savedProjects && savedProjects.length >= 2}
+              <strong>{savedProjects.length} projets disponibles</strong><p>Choisis deux analyses pour comparer les fonctions modifiées.</p><button type="button" onclick={() => (activeWorkspaceView = "comparison")}>Configurer la comparaison</button>
+            {:else}<p class="overview-empty">Analyse ou importe un second binaire pour activer cette vue.</p>{/if}
+          </article>
+        </div>
       </section>
 
       <section
@@ -2366,6 +2666,9 @@ interface ApplyRenamesResult {
             <h2 id="graph-workspace-title">Graphe d’appels</h2>
           </div>
           <div class="call-graph-controls compact-controls">
+            <button type="button" class="graph-back-button" disabled={graphNavigationHistory.length === 0} onclick={navigateBackInGraph}>
+              ← Retour {graphNavigationHistory.length > 0 ? `(${graphNavigationHistory.length})` : ""}
+            </button>
             <label>
               Direction
               <select bind:value={callGraphDirection}>
@@ -2431,7 +2734,7 @@ interface ApplyRenamesResult {
                     class:external={node.is_external}
                     class:thunk={node.is_thunk}
                     style={`left:${node.x}px;top:${node.y}px;width:${graphNodeWidth}px;height:${graphNodeHeight}px`}
-                    onclick={() => openFunction(node.entry_address)}
+                    onclick={() => navigateWithinGraph(node.entry_address)}
                   >
                     <strong>{node.name}</strong>
                     <code>{node.entry_address}</code>
@@ -4624,6 +4927,519 @@ interface ApplyRenamesResult {
     .graph-layout { grid-template-columns: minmax(0, 1fr); }
     .graph-inspector { border-top: 1px solid #1e2c42; border-left: 0; }
   }
+
+  /* Overview: compact three-column composition matching the target dashboard. */
+  .app-shell {
+    grid-template-columns: 176px minmax(0, 1fr);
+  }
+
+  .app-sidebar {
+    padding: 0.65rem 0.55rem;
+  }
+
+  .brand {
+    gap: 0.4rem;
+    padding: 0 0.2rem;
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+
+  .brand-mark {
+    width: 1.55rem;
+    height: 1.55rem;
+  }
+
+  .brand small { font-size: 0.48rem; }
+  .new-analysis { margin-top: 0.8rem; padding: 0.55rem; font-size: 0.72rem; }
+  .sidebar-nav { margin-top: 0.8rem; }
+  .sidebar-nav button { padding: 0.48rem 0.5rem; font-size: 0.72rem; }
+  .sidebar-status { padding: 0.6rem; }
+
+  .workspace-header {
+    padding: 0.65rem 0.9rem 0.55rem;
+  }
+
+  .workspace-header p { margin-bottom: 0.15rem; font-size: 0.55rem; }
+  .workspace-header h1 { font-size: 1.15rem; }
+  .workspace-header > div:first-child > span { margin-top: 0.2rem; font-size: 0.65rem; }
+  .header-actions button { padding: 0.42rem 0.65rem; font-size: 0.66rem; }
+
+  .workspace-tabs {
+    padding: 0.25rem 0.85rem 0;
+  }
+
+  .workspace-tabs button {
+    padding: 0.48rem 0.62rem;
+    border-radius: 0;
+    font-size: 0.64rem;
+  }
+
+  .workspace-tabs button:hover:not(:disabled),
+  .workspace-tabs button.active {
+    background: transparent;
+  }
+
+  .workspace-scroll > .panel {
+    padding: 0.7rem 0.85rem 1.5rem;
+  }
+
+  .kpi-row {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) 150px;
+    gap: 0.45rem;
+    margin-bottom: 0.55rem;
+  }
+
+  .kpi-card {
+    min-height: 72px;
+    padding: 0.6rem 0.7rem;
+    border-radius: 7px;
+    background: #0a1423;
+  }
+
+  .kpi-card .detail-label { margin-bottom: 0.25rem; font-size: 0.56rem; }
+  .kpi-card strong { font-size: 1rem; }
+  .kpi-card span { margin-top: 0.2rem; font-size: 0.56rem; }
+  .kpi-card-ring { min-height: 72px; padding: 0.25rem; }
+
+  .overview-dashboard {
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .overview-main-grid {
+    display: grid;
+    grid-template-columns: minmax(245px, 0.86fr) minmax(360px, 1.25fr) minmax(310px, 1fr);
+    gap: 0.5rem;
+    min-height: 348px;
+  }
+
+  .overview-card {
+    min-width: 0;
+    border: 1px solid #1d2a40;
+    border-radius: 7px;
+    background: #091321;
+    overflow: hidden;
+  }
+
+  .overview-card-header {
+    display: flex;
+    min-height: 35px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.55rem 0.65rem;
+    border-bottom: 1px solid #19263a;
+  }
+
+  .overview-card-header h2 {
+    margin: 0;
+    font-size: 0.68rem;
+  }
+
+  .overview-card-header span {
+    display: block;
+    margin-top: 0.15rem;
+    color: #62728c;
+    font-size: 0.52rem;
+  }
+
+  .overview-card-link {
+    padding: 0.25rem 0.4rem;
+    background: transparent;
+    color: #a78bfa;
+    font-size: 0.55rem;
+  }
+
+  .overview-graph-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .overview-graph-actions button,
+  .graph-back-button {
+    padding: 0.3rem 0.45rem;
+    border: 1px solid #4c3a83;
+    background: #201743;
+    color: #c4b5fd;
+    font-size: 0.68rem;
+  }
+
+  .overview-graph-actions button:disabled,
+  .graph-back-button:disabled {
+    border-color: #253149;
+    background: #111a2a;
+    color: #53617a;
+    cursor: not-allowed;
+    opacity: 1;
+  }
+
+  .important-functions-card table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+
+  .important-functions-card th {
+    padding: 0.38rem 0.5rem;
+    color: #60708a;
+    font-size: 0.5rem;
+    font-weight: 600;
+    text-align: left;
+  }
+
+  .important-functions-card th:first-child { width: 44%; }
+  .important-functions-card th:nth-child(2) { width: 40%; }
+  .important-functions-card th:last-child { width: 16%; text-align: right; }
+
+  .important-functions-card td {
+    padding: 0.35rem 0.5rem;
+    border-top: 1px solid #142136;
+    font-size: 0.56rem;
+    overflow: hidden;
+  }
+
+  .important-functions-card tr.selected { background: #1c1740; }
+  .important-functions-card td:last-child { color: #86efac; text-align: right; }
+
+  .important-functions-card td > button {
+    display: block;
+    max-width: 100%;
+    padding: 0;
+    background: transparent;
+    color: #dbe7f8;
+    font-size: 0.58rem;
+    font-weight: 650;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .important-functions-card td > code {
+    display: block;
+    margin-top: 0.1rem;
+    color: #55749c;
+    font-size: 0.48rem;
+  }
+
+  .identification-badge {
+    display: block;
+    color: #86efac;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .muted-value { color: #46566f; }
+
+  .important-functions-card > .overview-card-link {
+    display: block;
+    width: calc(100% - 1rem);
+    margin: 0.35rem 0.5rem 0;
+    border-top: 1px solid #17243a;
+    text-align: center;
+  }
+
+  .overview-graph-card {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .overview-graph-scroll {
+    min-height: 0;
+    overflow: auto hidden;
+    background-image: radial-gradient(#26354d 0.55px, transparent 0.55px);
+    background-size: 15px 15px;
+  }
+
+  .overview-graph-stage {
+    position: relative;
+    margin: 0 auto;
+  }
+
+  .overview-graph-stage svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .overview-edge { fill: none; stroke: #52627d; stroke-width: 1.3; }
+  #overview-arrow path { fill: #7183a3; }
+
+  .overview-graph-node {
+    position: absolute;
+    display: grid;
+    align-content: center;
+    padding: 0.35rem;
+    border: 1px solid #2563eb;
+    border-radius: 5px;
+    background: #102447;
+    color: #edf5ff;
+    text-align: center;
+  }
+
+  .overview-graph-node strong,
+  .overview-graph-node code {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .overview-graph-node strong { font-size: 0.54rem; }
+  .overview-graph-node code { margin-top: 0.12rem; color: #8399b8; font-size: 0.45rem; }
+  .overview-graph-node.root { border-color: #8b5cf6; background: #29205a; }
+  .overview-graph-node.external { border-color: #7c3aed; background: #211845; }
+  .overview-graph-node.thunk:not(.root) { border-color: #d97706; background: #38220f; }
+
+  .overview-graph-legend {
+    display: flex;
+    justify-content: center;
+    gap: 0.7rem;
+    padding: 0.35rem;
+    border-top: 1px solid #17243a;
+    color: #687994;
+    font-size: 0.48rem;
+  }
+
+  .overview-graph-legend span::before {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 0.25rem;
+    border-radius: 1px;
+    background: #2563eb;
+    content: "";
+  }
+
+  .overview-graph-legend .root::before { background: #8b5cf6; }
+  .overview-graph-legend .external::before { background: #7c3aed; }
+  .overview-graph-legend .thunk::before { background: #d97706; }
+
+  .selected-function-card { padding: 0.65rem; }
+
+  .selected-function-heading {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .selected-function-heading h2 { margin: 0.2rem 0 0.15rem; font-size: 0.85rem; }
+  .selected-function-heading > div > code { color: #6882a5; font-size: 0.52rem; }
+
+  .function-kind-badge {
+    padding: 0.18rem 0.35rem;
+    border: 1px solid #16a34a;
+    border-radius: 4px;
+    background: #0c2b20;
+    color: #86efac;
+    font-size: 0.5rem;
+  }
+
+  .overview-detail-tabs {
+    display: flex;
+    margin-top: 0.55rem;
+    border-bottom: 1px solid #1d2a40;
+    overflow-x: auto;
+  }
+
+  .overview-detail-tabs button {
+    flex: 0 0 auto;
+    padding: 0.35rem 0.42rem;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: #71819a;
+    font-size: 0.5rem;
+  }
+
+  .overview-detail-tabs button.active { border-bottom-color: #8b5cf6; color: #e4dcff; }
+  .overview-function-content { padding-top: 0.55rem; }
+  .mini-label { margin: 0 0 0.28rem; color: #71819a; font-size: 0.5rem; }
+
+  .prototype-line {
+    display: block;
+    padding: 0.45rem;
+    border: 1px solid #1c2a40;
+    border-radius: 4px;
+    background: #0d192a;
+    color: #d8cfff;
+    font-size: 0.52rem;
+    overflow-wrap: anywhere;
+  }
+
+  .evidence-list,
+  .compact-detail-list {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    gap: 0.28rem;
+    list-style: none;
+  }
+
+  .evidence-list li {
+    color: #71819a;
+    font-size: 0.54rem;
+  }
+
+  .evidence-list li::before { margin-right: 0.35rem; color: #64748b; content: "○"; }
+  .evidence-list li.available { color: #b7c6dc; }
+  .evidence-list li.available::before { color: #22c55e; content: "✓"; }
+
+  .overview-code-preview {
+    max-height: 190px;
+    margin-top: 0.5rem;
+    overflow: auto;
+  }
+
+  .overview-code-preview pre { margin: 0; font-size: 0.5rem; white-space: pre; }
+  .compact-detail-list { margin-top: 0.5rem; }
+  .compact-detail-list li { display: flex; justify-content: space-between; gap: 0.4rem; color: #8292ac; font-size: 0.54rem; }
+  .selected-function-card > .overview-card-link { width: 100%; margin-top: 0.5rem; border-top: 1px solid #17243a; }
+
+  .overview-bottom-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.5rem;
+  }
+
+  .compact-overview-card {
+    display: grid;
+    min-height: 165px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .overview-data-list {
+    display: grid;
+    align-content: start;
+    margin: 0;
+    padding: 0.25rem 0.65rem;
+    list-style: none;
+  }
+
+  .overview-data-list li {
+    display: grid;
+    grid-template-columns: minmax(55px, auto) minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 22px;
+    border-bottom: 1px solid #142136;
+    font-size: 0.52rem;
+  }
+
+  .overview-data-list li span {
+    overflow: hidden;
+    color: #b9c7da;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .overview-data-list li code { color: #6081aa; font-size: 0.47rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .overview-data-list li strong { color: #86efac; }
+  .compact-overview-card > .overview-card-link { width: calc(100% - 1rem); margin: 0 0.5rem; border-top: 1px solid #17243a; }
+  .overview-empty { margin: auto; padding: 1rem; color: #65758e; font-size: 0.58rem; text-align: center; }
+
+  .comparison-preview-card > strong,
+  .comparison-preview-card > p { margin: 0.6rem 0.7rem 0; }
+  .comparison-preview-card > strong { color: #c4b5fd; font-size: 0.8rem; }
+  .comparison-preview-card > p { color: #71819a; font-size: 0.55rem; }
+  .comparison-preview-card > button { margin: 0.5rem 0.7rem; padding: 0.4rem; background: #6d28d9; color: white; font-size: 0.55rem; }
+
+  @media (max-width: 1320px) {
+    .overview-main-grid { grid-template-columns: minmax(235px, 0.9fr) minmax(330px, 1.15fr) minmax(285px, 1fr); }
+    .overview-bottom-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 980px) {
+    .overview-main-grid { grid-template-columns: 1fr; }
+    .overview-main-grid > .overview-card { min-height: 330px; }
+    .kpi-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .kpi-card-ring { grid-column: auto; }
+  }
+
+  /* Readability pass validated against the full-screen overview capture. */
+  .brand { font-size: 0.86rem; }
+  .new-analysis,
+  .sidebar-nav button { font-size: 0.8rem; }
+  .sidebar-status strong { font-size: 0.72rem; }
+  .sidebar-status small { font-size: 0.65rem; }
+  .workspace-header h1 { font-size: 1.28rem; }
+  .workspace-header > div:first-child > span { font-size: 0.72rem; }
+  .header-actions button { font-size: 0.72rem; }
+  .workspace-tabs button { font-size: 0.72rem; }
+
+  .kpi-card .detail-label { font-size: 0.66rem; }
+  .kpi-card strong { font-size: 1.15rem; }
+  .kpi-card span { font-size: 0.64rem; line-height: 1.3; }
+  .kpi-card-ring { min-width: 145px; }
+
+  .overview-card-header h2 { font-size: 0.8rem; }
+  .overview-card-header span { font-size: 0.62rem; }
+  .overview-card-link { font-size: 0.65rem; }
+  .important-functions-card th { font-size: 0.6rem; }
+  .important-functions-card td { font-size: 0.67rem; }
+  .important-functions-card td > button { font-size: 0.68rem; }
+  .important-functions-card td > code { font-size: 0.56rem; }
+  .overview-graph-node strong { font-size: 0.63rem; }
+  .overview-graph-node code { font-size: 0.54rem; }
+  .overview-graph-legend { font-size: 0.58rem; }
+
+  .selected-function-heading h2 { font-size: 1rem; }
+  .selected-function-heading > div > code { font-size: 0.62rem; }
+  .function-kind-badge { font-size: 0.6rem; }
+  .overview-detail-tabs button { font-size: 0.62rem; }
+  .mini-label { font-size: 0.62rem; }
+  .prototype-line { font-size: 0.64rem; }
+  .evidence-list li,
+  .compact-detail-list li { font-size: 0.64rem; }
+  .overview-code-preview pre { font-size: 0.62rem; }
+
+  .overview-data-list li { min-height: 25px; font-size: 0.64rem; }
+  .overview-data-list li code { font-size: 0.57rem; }
+  .overview-empty { font-size: 0.67rem; line-height: 1.4; }
+  .comparison-preview-card > strong { font-size: 0.9rem; }
+  .comparison-preview-card > p,
+  .comparison-preview-card > button { font-size: 0.65rem; }
+
+  /* Second readability step requested after visual review. */
+  .workspace-header p { font-size: 0.64rem; }
+  .workspace-header h1 { font-size: 1.44rem; }
+  .workspace-header > div:first-child > span { font-size: 0.82rem; }
+  .workspace-tabs button { font-size: 0.82rem; }
+  .header-actions button { font-size: 0.82rem; }
+
+  .kpi-card .detail-label { font-size: 0.76rem; }
+  .kpi-card strong { font-size: 1.34rem; }
+  .kpi-card span { font-size: 0.74rem; }
+
+  .overview-card-header h2 { font-size: 0.95rem; }
+  .overview-card-header span { font-size: 0.72rem; }
+  .overview-card-link { font-size: 0.76rem; }
+  .important-functions-card th { font-size: 0.7rem; }
+  .important-functions-card td { font-size: 0.78rem; }
+  .important-functions-card td > button { font-size: 0.8rem; }
+  .important-functions-card td > code { font-size: 0.66rem; }
+  .overview-graph-node strong { font-size: 0.74rem; }
+  .overview-graph-node code { font-size: 0.64rem; }
+  .overview-graph-legend { font-size: 0.68rem; }
+
+  .selected-function-heading h2 { font-size: 1.16rem; }
+  .selected-function-heading > div > code { font-size: 0.72rem; }
+  .function-kind-badge { font-size: 0.71rem; }
+  .overview-detail-tabs button { font-size: 0.73rem; }
+  .mini-label { font-size: 0.72rem; }
+  .prototype-line { font-size: 0.75rem; }
+  .evidence-list li,
+  .compact-detail-list li { font-size: 0.75rem; }
+  .overview-code-preview pre { font-size: 0.72rem; }
+
+  .overview-data-list li { min-height: 29px; font-size: 0.75rem; }
+  .overview-data-list li code { font-size: 0.67rem; }
+  .overview-empty { font-size: 0.78rem; }
+  .comparison-preview-card > p,
+  .comparison-preview-card > button { font-size: 0.72rem; }
 
 
 </style>
