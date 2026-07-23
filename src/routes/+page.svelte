@@ -195,6 +195,41 @@ interface DetectedType {
   usages: TypeUsage[];
 }
 
+interface FunctionCallCount {
+  entry_address: string;
+  name: string;
+  call_count: number;
+}
+
+interface StringReferenceCount {
+  address: string;
+  value: string;
+  reference_count: number;
+}
+
+interface ProgramOverview {
+  function_count: number;
+  internal_function_count: number;
+  external_function_count: number;
+  thunk_function_count: number;
+  decompiled_function_count: number;
+  total_call_count: number;
+  string_count: number;
+  total_string_reference_count: number;
+  most_referenced_string: StringReferenceCount | null;
+  required_library_count: number;
+  external_entry_point_count: number;
+  external_entry_point_function_count: number;
+  most_called_function: FunctionCallCount | null;
+  detected_type_count: number;
+  struct_count: number;
+  union_count: number;
+  enum_count: number;
+  typedef_count: number;
+  opaque_type_count: number;
+  anonymous_type_count: number;
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -306,6 +341,10 @@ interface DetectedType {
       return type.name.toLowerCase().includes(query);
     });
   });
+
+  let programOverview = $state<ProgramOverview | null>(null);
+  let programOverviewError = $state("");
+  let isLoadingProgramOverview = $state(false);
 
   let callGraphDirection = $state<CallGraphDirection>("outgoing");
   let callGraphDepth = $state(3);
@@ -474,6 +513,30 @@ interface DetectedType {
   function formatTypeSize(size: number | null): string {
     if (size === null) return "size unknown";
     return size === 1 ? "1 byte" : `${size} bytes`;
+  }
+
+  $effect(() => {
+    if (!importedExport) {
+      programOverview = null;
+      programOverviewError = "";
+      return;
+    }
+
+    requestProgramOverview();
+  });
+
+  async function requestProgramOverview() {
+    isLoadingProgramOverview = true;
+    programOverviewError = "";
+
+    try {
+      programOverview = await invoke<ProgramOverview>("get_program_overview");
+    } catch (error) {
+      programOverview = null;
+      programOverviewError = String(error);
+    } finally {
+      isLoadingProgramOverview = false;
+    }
   }
 
   $effect(() => {
@@ -861,6 +924,76 @@ interface DetectedType {
     {/if}
 
     {#if importedExport}
+      <section class="summary" aria-labelledby="program-overview-title">
+        <h2 id="program-overview-title">Overview</h2>
+
+        {#if isLoadingProgramOverview}
+          <p>Loading overview...</p>
+        {:else if programOverviewError}
+          <p class="error" role="alert">{programOverviewError}</p>
+        {:else if programOverview}
+          <dl class="summary-grid">
+            <div>
+              <dt>Functions</dt>
+              <dd>
+                {programOverview.function_count}
+                ({programOverview.internal_function_count} internal, {programOverview.external_function_count}
+                external, {programOverview.thunk_function_count} thunks)
+              </dd>
+            </div>
+
+            <div>
+              <dt>Decompiled functions</dt>
+              <dd>{programOverview.decompiled_function_count}</dd>
+            </div>
+
+            <div>
+              <dt>Calls</dt>
+              <dd>
+                {programOverview.total_call_count}
+                {#if programOverview.most_called_function}
+                  (most: <code>{programOverview.most_called_function.name}</code>
+                  with {programOverview.most_called_function.call_count})
+                {/if}
+              </dd>
+            </div>
+
+            <div>
+              <dt>Strings</dt>
+              <dd>
+                {programOverview.string_count} distinct, {programOverview.total_string_reference_count}
+                references
+                {#if programOverview.most_referenced_string}
+                  (most: <code>{programOverview.most_referenced_string.value}</code>
+                  with {programOverview.most_referenced_string.reference_count})
+                {/if}
+              </dd>
+            </div>
+
+            <div>
+              <dt>Imports / exports</dt>
+              <dd>
+                {programOverview.external_function_count} imports,
+                {programOverview.external_entry_point_count} external entry points
+                ({programOverview.external_entry_point_function_count} functions),
+                {programOverview.required_library_count} required libraries
+              </dd>
+            </div>
+
+            <div>
+              <dt>Detected types</dt>
+              <dd>
+                {programOverview.detected_type_count} total —
+                {programOverview.struct_count} structs, {programOverview.union_count} unions,
+                {programOverview.enum_count} enums, {programOverview.typedef_count} typedefs
+                ({programOverview.opaque_type_count} opaque, {programOverview.anonymous_type_count}
+                anonymous)
+              </dd>
+            </div>
+          </dl>
+        {/if}
+      </section>
+
       <section class="global-strings" aria-labelledby="global-strings-title">
         <h2 id="global-strings-title">Strings (global)</h2>
 

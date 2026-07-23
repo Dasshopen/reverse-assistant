@@ -16,6 +16,7 @@ use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, Importe
 use services::ghidra_installation::{self, GhidraInstallationStatus};
 use services::global_strings::{self, GlobalStringView};
 use services::imports_exports::{self, ImportView};
+use services::program_overview::{self, ProgramOverview};
 
 #[derive(Debug, Clone, Serialize)]
 struct AutomaticAnalysisResult {
@@ -196,6 +197,22 @@ fn get_detected_types(
     Ok(export.types.clone())
 }
 
+#[tauri::command]
+fn get_program_overview(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+) -> Result<ProgramOverview, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+
+    let export = export.as_ref().ok_or_else(|| {
+        "No analysis is loaded. Analyze or import a binary before requesting its overview."
+            .to_owned()
+    })?;
+
+    Ok(program_overview::compute_overview(export))
+}
+
 #[tauri::command(async)]
 fn decompile_function(
     app: AppHandle,
@@ -237,7 +254,8 @@ pub fn run() {
             get_global_strings,
             get_imports,
             get_external_entry_points,
-            get_detected_types
+            get_detected_types,
+            get_program_overview
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
