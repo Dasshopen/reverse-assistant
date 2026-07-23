@@ -12,8 +12,7 @@ public record FunctionMetadata(
     boolean isExternal,
     boolean isThunk,
     String decompiledCode,
-    List<FunctionCallMetadata> calls,
-    List<String> strings
+    List<FunctionCallMetadata> calls
 ) {
 
     private static final Pattern ADDRESS_PATTERN =
@@ -40,10 +39,6 @@ public record FunctionMetadata(
             calls,
             "calls must not be null"
         );
-        Objects.requireNonNull(
-            strings,
-            "strings must not be null"
-        );
 
         if (!ADDRESS_PATTERN.matcher(entryAddress).matches()) {
             throw new IllegalArgumentException(
@@ -54,6 +49,5 @@ public record FunctionMetadata(
 
         parameters = List.copyOf(parameters);
         calls = List.copyOf(calls);
-        strings = List.copyOf(strings);
     }
 }

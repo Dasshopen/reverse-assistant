@@ -1,6 +1,6 @@
 # Ghidra Export Contract v1
 
-Status: Draft
+Status: Superseded by [v2](ghidra-export-v2.md) — kept for Rust import compatibility only.
 Schema version: `1`
 
 ## Purpose
@@ -8,6 +8,12 @@ Schema version: `1`
 This contract defines the JSON data exported by Ghidra and imported by Reverse Assistant.
 
 The export represents one analyzed program and the functions discovered inside that program.
+
+**The Ghidra exporter no longer produces v1** (it only ever writes v2 now). This document
+stays as a reference for the still-supported *read* path: the Rust importer accepts v1 files
+so an old manual JSON export doesn't stop working, but v1-sourced data has no string
+cross-reference data (see v2's `strings` root array) since v1 never captured string
+addresses at all.
 
 ## General rules
 

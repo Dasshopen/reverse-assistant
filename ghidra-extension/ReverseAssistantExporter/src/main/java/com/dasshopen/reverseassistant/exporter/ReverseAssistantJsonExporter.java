@@ -21,7 +21,7 @@ public final class ReverseAssistantJsonExporter
 
     public ReverseAssistantJsonExporter() {
         super(
-            "Reverse Assistant JSON v1",
+            "Reverse Assistant JSON v2",
             "json",
             null
         );
@@ -76,7 +76,7 @@ public final class ReverseAssistantJsonExporter
         }
 
         monitor.setMessage(
-            "Exporting Reverse Assistant JSON v1"
+            "Exporting Reverse Assistant JSON v2"
         );
 
         try {
@@ -112,6 +112,6 @@ public final class ReverseAssistantJsonExporter
 
     @Override
     public void setOptions(List<Option> options) {
-        // Version 1 does not expose export options.
+        // This exporter does not expose export options.
     }
 }

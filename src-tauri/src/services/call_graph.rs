@@ -228,6 +228,7 @@ mod tests {
                 entry_points: vec!["0x1000".to_owned()],
             },
             functions,
+            strings: Vec::new(),
         }
     }
 

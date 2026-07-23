@@ -128,6 +128,18 @@ interface AutomaticAnalysisResult {
   identifications: FunctionIdentification[];
 }
 
+interface ReferencingFunction {
+  entry_address: string;
+  name: string;
+}
+
+interface GlobalStringView {
+  address: string;
+  value: string;
+  reference_count: number;
+  referencing_functions: ReferencingFunction[];
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -160,6 +172,22 @@ interface AutomaticAnalysisResult {
       ? (identifications.get(selectedFunctionAddress) ?? [])
       : [],
   );
+
+  let globalStrings = $state<GlobalStringView[] | null>(null);
+  let globalStringsError = $state("");
+  let isLoadingGlobalStrings = $state(false);
+  let globalStringsSearch = $state("");
+
+  let filteredGlobalStrings = $derived.by(() => {
+    if (!globalStrings) return [];
+
+    const query = globalStringsSearch.trim().toLowerCase();
+    if (!query) return globalStrings;
+
+    return globalStrings.filter((entry) =>
+      entry.value.toLowerCase().includes(query),
+    );
+  });
 
   let callGraphDirection = $state<CallGraphDirection>("outgoing");
   let callGraphDepth = $state(3);
@@ -226,6 +254,30 @@ interface AutomaticAnalysisResult {
   $effect(() => {
     loadGhidraInstallationStatus();
   });
+
+  $effect(() => {
+    if (!importedExport) {
+      globalStrings = null;
+      globalStringsError = "";
+      return;
+    }
+
+    requestGlobalStrings();
+  });
+
+  async function requestGlobalStrings() {
+    isLoadingGlobalStrings = true;
+    globalStringsError = "";
+
+    try {
+      globalStrings = await invoke<GlobalStringView[]>("get_global_strings");
+    } catch (error) {
+      globalStrings = null;
+      globalStringsError = String(error);
+    } finally {
+      isLoadingGlobalStrings = false;
+    }
+  }
 
   $effect(() => {
     const func = selectedFunction;
@@ -608,6 +660,65 @@ interface AutomaticAnalysisResult {
             <dd>{importSummary.string_count}</dd>
           </div>
         </dl>
+      </section>
+    {/if}
+
+    {#if importedExport}
+      <section class="global-strings" aria-labelledby="global-strings-title">
+        <h2 id="global-strings-title">Strings (global)</h2>
+
+        <input
+          type="text"
+          class="global-strings-search"
+          placeholder="Filter by string content..."
+          bind:value={globalStringsSearch}
+        />
+
+        {#if isLoadingGlobalStrings}
+          <p>Loading strings...</p>
+        {:else if globalStringsError}
+          <p class="error" role="alert">{globalStringsError}</p>
+        {:else if globalStrings}
+          <p class="global-strings-stats">
+            {filteredGlobalStrings.length} of {globalStrings.length} strings
+          </p>
+
+          {#if filteredGlobalStrings.length === 0}
+            <p>No string matches this filter.</p>
+          {:else}
+            <ul class="global-strings-list">
+              {#each filteredGlobalStrings as entry (entry.address)}
+                <li>
+                  <div class="global-strings-entry-header">
+                    <code>{entry.address}</code>
+                    <span class="global-strings-value">{entry.value}</span>
+                    <span class="global-strings-count">
+                      {entry.reference_count}
+                      {entry.reference_count === 1 ? "reference" : "references"}
+                    </span>
+                  </div>
+
+                  {#if entry.referencing_functions.length > 0}
+                    <div class="global-strings-functions">
+                      {#each entry.referencing_functions as fn (fn.entry_address)}
+                        <button
+                          type="button"
+                          class="global-strings-function"
+                          disabled={fn.entry_address === selectedFunctionAddress}
+                          onclick={() => {
+                            selectedFunctionAddress = fn.entry_address;
+                          }}
+                        >
+                          {fn.name}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
       </section>
     {/if}
 
@@ -1039,6 +1150,98 @@ interface AutomaticAnalysisResult {
     color: #67e8f9;
     font-size: 1.75rem;
     font-weight: 700;
+  }
+
+  .global-strings {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #374151;
+  }
+
+  .global-strings h2 {
+    margin: 0 0 1rem;
+    font-size: 1.25rem;
+  }
+
+  .global-strings-search {
+    margin-bottom: 0.75rem;
+  }
+
+  .global-strings-stats {
+    margin: 0 0 0.75rem;
+    color: #94a3b8;
+    font-size: 0.85rem;
+  }
+
+  .global-strings-list {
+    display: grid;
+    max-height: 480px;
+    margin: 0;
+    padding: 0;
+    gap: 0.5rem;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .global-strings-list li {
+    padding: 0.65rem;
+    border: 1px solid #374151;
+    border-radius: 0.5rem;
+    background-color: #1f2937;
+  }
+
+  .global-strings-entry-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .global-strings-entry-header code {
+    flex-shrink: 0;
+    color: #93c5fd;
+  }
+
+  .global-strings-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .global-strings-count {
+    flex-shrink: 0;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .global-strings-functions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+  }
+
+  .global-strings-function {
+    padding: 0.3rem 0.6rem;
+    border: 1px solid #3b82f6;
+    border-radius: 999px;
+    background-color: #172554;
+    color: #bfdbfe;
+    font-size: 0.8rem;
+    font-weight: 400;
+    cursor: pointer;
+  }
+
+  .global-strings-function:hover:not(:disabled) {
+    background-color: #1e3a8a;
+  }
+
+  .global-strings-function:disabled {
+    background-color: #1e3a5f;
+    color: #f9fafb;
+    cursor: default;
+    opacity: 1;
   }
 
   .backend-check {

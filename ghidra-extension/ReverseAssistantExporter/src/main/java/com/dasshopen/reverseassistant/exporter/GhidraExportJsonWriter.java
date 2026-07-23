@@ -11,7 +11,7 @@ import com.google.gson.JsonObject;
 
 public final class GhidraExportJsonWriter {
 
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
 
     private final Gson gson;
 
@@ -25,7 +25,8 @@ public final class GhidraExportJsonWriter {
 
     public String write(
         ProgramMetadata metadata,
-        List<FunctionMetadata> functions
+        List<FunctionMetadata> functions,
+        List<GlobalStringMetadata> strings
     ) {
         Objects.requireNonNull(
             metadata,
@@ -35,11 +36,16 @@ public final class GhidraExportJsonWriter {
             functions,
             "functions must not be null"
         );
+        Objects.requireNonNull(
+            strings,
+            "strings must not be null"
+        );
 
         JsonObject root = new JsonObject();
         root.addProperty("schema_version", SCHEMA_VERSION);
         root.add("program", createProgramObject(metadata));
         root.add("functions", createFunctionsArray(functions));
+        root.add("strings", createGlobalStringsArray(strings));
 
         return gson.toJson(root) + "\n";
     }
@@ -132,10 +138,6 @@ public final class GhidraExportJsonWriter {
             "calls",
             createCallsArray(metadata.calls())
         );
-        function.add(
-            "strings",
-            createStringsArray(metadata.strings())
-        );
 
         return function;
     }
@@ -195,13 +197,54 @@ public final class GhidraExportJsonWriter {
         return array;
     }
 
-    private static JsonArray createStringsArray(
-        List<String> strings
+    private static JsonArray createGlobalStringsArray(
+        List<GlobalStringMetadata> strings
     ) {
         JsonArray array = new JsonArray();
 
-        for (String value : strings) {
-            array.add(value);
+        for (GlobalStringMetadata string : strings) {
+            JsonObject stringObject = new JsonObject();
+
+            stringObject.addProperty("address", string.address());
+            stringObject.addProperty("value", string.value());
+            stringObject.add(
+                "references",
+                createStringReferencesArray(string.references())
+            );
+
+            array.add(stringObject);
+        }
+
+        return array;
+    }
+
+    private static JsonArray createStringReferencesArray(
+        List<StringReferenceMetadata> references
+    ) {
+        JsonArray array = new JsonArray();
+
+        for (StringReferenceMetadata reference : references) {
+            JsonObject referenceObject = new JsonObject();
+
+            referenceObject.addProperty(
+                "instruction_address",
+                reference.instructionAddress()
+            );
+
+            if (reference.functionAddress() == null) {
+                referenceObject.add(
+                    "function_address",
+                    JsonNull.INSTANCE
+                );
+            }
+            else {
+                referenceObject.addProperty(
+                    "function_address",
+                    reference.functionAddress()
+                );
+            }
+
+            array.add(referenceObject);
         }
 
         return array;

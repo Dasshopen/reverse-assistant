@@ -14,6 +14,7 @@ use services::ghidra_decompile::{self, DecompiledFunctionDetails};
 use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
 use services::ghidra_installation::{self, GhidraInstallationStatus};
+use services::global_strings::{self, GlobalStringView};
 
 #[derive(Debug, Clone, Serialize)]
 struct AutomaticAnalysisResult {
@@ -130,6 +131,22 @@ fn get_call_graph(
     call_graph::compute_neighborhood(export, &entry_address, direction, max_depth)
 }
 
+#[tauri::command]
+fn get_global_strings(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+) -> Result<Vec<GlobalStringView>, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+
+    let export = export.as_ref().ok_or_else(|| {
+        "No analysis is loaded. Analyze or import a binary before requesting its strings."
+            .to_owned()
+    })?;
+
+    Ok(global_strings::build_global_strings_view(export))
+}
+
 #[tauri::command(async)]
 fn decompile_function(
     app: AppHandle,
@@ -167,7 +184,8 @@ pub fn run() {
             get_ghidra_installation_status,
             analyze_binary_with_ghidra,
             decompile_function,
-            get_call_graph
+            get_call_graph,
+            get_global_strings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

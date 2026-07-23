@@ -1,0 +1,748 @@
+{
+  "schema_version": 2,
+  "program": {
+    "name": "01-fauxware.elf",
+    "sha256": "c2d90645a45e99221593547e55c601a901b80f807ae96f94c60a7661df0b3e0b",
+    "format": "ELF",
+    "architecture": "x86_64",
+    "endianness": "little",
+    "image_base": "0x400000",
+    "entry_points": [
+      "0x4004e0",
+      "0x400580",
+      "0x400664",
+      "0x4006ed",
+      "0x4006fd",
+      "0x40071d",
+      "0x4007e0",
+      "0x400870",
+      "0x4008b8",
+      "0x4008c8",
+      "0x600e40",
+      "0x601038",
+      "0x601040",
+      "0x601048",
+      "0x601050",
+      "0x601060"
+    ]
+  },
+  "functions": [
+    {
+      "entry_address": "0x1",
+      "name": "puts",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x2",
+      "name": "printf",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__format",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x3",
+      "name": "read",
+      "return_type": "ssize_t",
+      "parameters": [
+        {
+          "name": "__fd",
+          "data_type": "int"
+        },
+        {
+          "name": "__buf",
+          "data_type": "void *"
+        },
+        {
+          "name": "__nbytes",
+          "data_type": "size_t"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x4",
+      "name": "__libc_start_main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x5",
+      "name": "strcmp",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s1",
+          "data_type": "char *"
+        },
+        {
+          "name": "__s2",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x6",
+      "name": "open",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__file",
+          "data_type": "char *"
+        },
+        {
+          "name": "__oflag",
+          "data_type": "int"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x7",
+      "name": "exit",
+      "return_type": "void",
+      "parameters": [
+        {
+          "name": "__status",
+          "data_type": "int"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x8",
+      "name": "__gmon_start__",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x4004e0",
+      "name": "_init",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "ctx",
+          "data_type": "EVP_PKEY_CTX *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x4005ac",
+          "target_name": "call_gmon_start"
+        },
+        {
+          "target_address": "0x400640",
+          "target_name": "frame_dummy"
+        },
+        {
+          "target_address": "0x400880",
+          "target_name": "__do_global_ctors_aux"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400500",
+      "name": "FUN_00400500",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x400510",
+      "name": "puts",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602000",
+          "target_name": "puts"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400520",
+      "name": "printf",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__format",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602008",
+          "target_name": "printf"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400530",
+      "name": "read",
+      "return_type": "ssize_t",
+      "parameters": [
+        {
+          "name": "__fd",
+          "data_type": "int"
+        },
+        {
+          "name": "__buf",
+          "data_type": "void *"
+        },
+        {
+          "name": "__nbytes",
+          "data_type": "size_t"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602010",
+          "target_name": "read"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400540",
+      "name": "__libc_start_main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602018",
+          "target_name": "__libc_start_main"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400550",
+      "name": "strcmp",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s1",
+          "data_type": "char *"
+        },
+        {
+          "name": "__s2",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602020",
+          "target_name": "strcmp"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400560",
+      "name": "open",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__file",
+          "data_type": "char *"
+        },
+        {
+          "name": "__oflag",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602030",
+          "target_name": "open"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400570",
+      "name": "exit",
+      "return_type": "void",
+      "parameters": [
+        {
+          "name": "__status",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602038",
+          "target_name": "exit"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400580",
+      "name": "_start",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x400540",
+          "target_name": "__libc_start_main"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x4005ac",
+      "name": "call_gmon_start",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602028",
+          "target_name": "__gmon_start__"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x4005d0",
+      "name": "__do_global_dtors_aux",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x400640",
+      "name": "frame_dummy",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x400664",
+      "name": "authenticate",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x400530",
+          "target_name": "read"
+        },
+        {
+          "target_address": "0x400550",
+          "target_name": "strcmp"
+        },
+        {
+          "target_address": "0x400560",
+          "target_name": "open"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x4006ed",
+      "name": "accepted",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x400510",
+          "target_name": "puts"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x4006fd",
+      "name": "rejected",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x400520",
+          "target_name": "printf"
+        },
+        {
+          "target_address": "0x400570",
+          "target_name": "exit"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x40071d",
+      "name": "main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x400510",
+          "target_name": "puts"
+        },
+        {
+          "target_address": "0x400530",
+          "target_name": "read"
+        },
+        {
+          "target_address": "0x400664",
+          "target_name": "authenticate"
+        },
+        {
+          "target_address": "0x4006ed",
+          "target_name": "accepted"
+        },
+        {
+          "target_address": "0x4006fd",
+          "target_name": "rejected"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x4007e0",
+      "name": "__libc_csu_init",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x4004e0",
+          "target_name": "_init"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x400870",
+      "name": "__libc_csu_fini",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x400880",
+      "name": "__do_global_ctors_aux",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x4008b8",
+      "name": "_fini",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x4005d0",
+          "target_name": "__do_global_dtors_aux"
+        }
+      ]
+    },
+    {
+      "entry_address": "0x602000",
+      "name": "puts",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x602008",
+      "name": "printf",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__format",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x602010",
+      "name": "read",
+      "return_type": "ssize_t",
+      "parameters": [
+        {
+          "name": "__fd",
+          "data_type": "int"
+        },
+        {
+          "name": "__buf",
+          "data_type": "void *"
+        },
+        {
+          "name": "__nbytes",
+          "data_type": "size_t"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x602018",
+      "name": "__libc_start_main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x602020",
+      "name": "strcmp",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s1",
+          "data_type": "char *"
+        },
+        {
+          "name": "__s2",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x602028",
+      "name": "__gmon_start__",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x602030",
+      "name": "open",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__file",
+          "data_type": "char *"
+        },
+        {
+          "name": "__oflag",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    },
+    {
+      "entry_address": "0x602038",
+      "name": "exit",
+      "return_type": "void",
+      "parameters": [
+        {
+          "name": "__status",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": []
+    }
+  ],
+  "strings": [
+    {
+      "address": "0x0",
+      "value": "GCC: (Ubuntu/Linaro 4.6.3-1ubuntu5) 4.6.3",
+      "references": [
+        {
+          "instruction_address": "0x690",
+          "function_address": null
+        }
+      ]
+    },
+    {
+      "address": "0x400238",
+      "value": "/lib64/ld-linux-x86-64.so.2",
+      "references": [
+        {
+          "instruction_address": "0x50",
+          "function_address": null
+        },
+        {
+          "instruction_address": "0x400088",
+          "function_address": null
+        }
+      ]
+    },
+    {
+      "address": "0x4008d0",
+      "value": "SOSNEAKY",
+      "references": [
+        {
+          "instruction_address": "0x400678",
+          "function_address": "0x400664"
+        },
+        {
+          "instruction_address": "0x400683",
+          "function_address": "0x400664"
+        },
+        {
+          "instruction_address": "0x601048",
+          "function_address": null
+        }
+      ]
+    },
+    {
+      "address": "0x4008e0",
+      "value": "Welcome to the admin console, trusted user!",
+      "references": [
+        {
+          "instruction_address": "0x4006f1",
+          "function_address": "0x4006ed"
+        }
+      ]
+    },
+    {
+      "address": "0x40090c",
+      "value": "Go away!",
+      "references": [
+        {
+          "instruction_address": "0x400701",
+          "function_address": "0x4006fd"
+        },
+        {
+          "instruction_address": "0x400706",
+          "function_address": "0x4006fd"
+        }
+      ]
+    },
+    {
+      "address": "0x400915",
+      "value": "Username: ",
+      "references": [
+        {
+          "instruction_address": "0x400734",
+          "function_address": "0x40071d"
+        }
+      ]
+    },
+    {
+      "address": "0x400920",
+      "value": "Password: ",
+      "references": [
+        {
+          "instruction_address": "0x40076a",
+          "function_address": "0x40071d"
+        }
+      ]
+    }
+  ]
+}

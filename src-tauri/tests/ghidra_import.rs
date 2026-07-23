@@ -62,7 +62,10 @@ fn unsupported_schema_version_file_returns_validation_error() {
     let error = import_ghidra_export(&unsupported_path)
         .expect_err("an unsupported schema version should be rejected");
 
-    assert_eq!(error, "unsupported schema version: 5; supported version: 1");
+    assert_eq!(
+        error,
+        "unsupported schema version: 5; supported versions: 1, 2"
+    );
 }
 
 #[test]

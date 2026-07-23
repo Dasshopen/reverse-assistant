@@ -6,17 +6,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeSet;
 
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
-import ghidra.program.model.listing.Data;
-import ghidra.program.model.listing.Instruction;
-import ghidra.program.model.listing.InstructionIterator;
-import ghidra.program.model.listing.Listing;
-import ghidra.program.model.symbol.Reference;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.exception.CancelledException;
 
@@ -65,7 +59,7 @@ public final class FunctionMetadataCollector {
             );
 
             FunctionMetadata metadata =
-                collectFunction(program, function);
+                collectFunction(function);
 
             if (!entryAddresses.add(metadata.entryAddress())) {
                 throw new IllegalStateException(
@@ -123,7 +117,6 @@ public final class FunctionMetadataCollector {
     }
 
     private static FunctionMetadata collectFunction(
-        Program program,
         Function function
     ) {
         // Decompiling every function during bulk export was the dominant cost of
@@ -137,8 +130,7 @@ public final class FunctionMetadataCollector {
             function.isExternal(),
             function.isThunk(),
             null,
-            collectCalls(function),
-            collectStrings(program, function)
+            collectCalls(function)
         );
     }
 
@@ -173,49 +165,6 @@ public final class FunctionMetadataCollector {
         }
 
         return List.copyOf(calls);
-    }
-
-    private static List<String> collectStrings(
-        Program program,
-        Function function
-    ) {
-        if (function.isExternal()) {
-            return List.of();
-        }
-
-        Listing listing = program.getListing();
-
-        InstructionIterator instructions =
-            listing.getInstructions(
-                function.getBody(),
-                true
-            );
-
-        Set<String> strings = new TreeSet<>();
-
-        while (instructions.hasNext()) {
-            Instruction instruction = instructions.next();
-
-            for (Reference reference :
-                instruction.getReferencesFrom()) {
-
-                Data data = listing.getDefinedDataContaining(
-                    reference.getToAddress()
-                );
-
-                if (data == null || !data.hasStringValue()) {
-                    continue;
-                }
-
-                Object value = data.getValue();
-
-                if (value instanceof String stringValue) {
-                    strings.add(stringValue);
-                }
-            }
-        }
-
-        return List.copyOf(strings);
     }
 
     private static String formatAddress(Function function) {
