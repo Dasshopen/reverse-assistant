@@ -10825,7 +10825,7 @@
       "name": "sqlite3_stmt",
       "kind": "struct",
       "category": "/sqlite3.pdb",
-      "size": 1,
+      "size": null,
       "is_opaque": true,
       "is_anonymous": false,
       "fields": [],

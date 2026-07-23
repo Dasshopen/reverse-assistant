@@ -229,8 +229,12 @@ public final class ProgramTypesCollector {
         DataType dataType,
         List<TypeUsageMetadata> usages
     ) {
+        boolean isOpaque = dataType.isNotYetDefined();
         int length = dataType.getLength();
-        Integer size = length > 0 ? length : null;
+        // Ghidra reports a minimal placeholder length (commonly 1) for a
+        // not-yet-defined/opaque type -- it's not a real measurement, so it
+        // must never be presented as a reliable size.
+        Integer size = (!isOpaque && length > 0) ? length : null;
         boolean isAnonymous = dataType.getName().startsWith(ANONYMOUS_NAME_PREFIX);
 
         List<TypeFieldMetadata> fields = List.of();
@@ -263,7 +267,7 @@ public final class ProgramTypesCollector {
             kind,
             dataType.getCategoryPath().getPath(),
             size,
-            dataType.isNotYetDefined(),
+            isOpaque,
             isAnonymous,
             fields,
             enumValues,

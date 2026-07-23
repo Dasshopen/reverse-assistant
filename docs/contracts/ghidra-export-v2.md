@@ -157,7 +157,7 @@ already avoids elsewhere.
 | `name` | string | Yes | No | Type name as known by Ghidra. May be a compiler-generated placeholder (see `is_anonymous`). |
 | `kind` | string | Yes | No | `struct`, `union`, `enum`, or `typedef`. |
 | `category` | string | Yes | No | Ghidra's category path for this type (e.g. `/sqlite3.pdb`), useful for telling program-local types apart from imported archive types. |
-| `size` | integer or null | Yes | Yes | Size in bytes, or `null` when Ghidra has no concrete length for it. |
+| `size` | integer or null | Yes | Yes | Size in bytes, or `null` when Ghidra has no concrete length for it, or when `is_opaque` is true. An opaque/not-yet-defined type gets a minimal placeholder length from Ghidra (commonly `1`) that is not a real measurement, so it is never presented as a reliable size. |
 | `is_opaque` | boolean | Yes | No | Declared but with no known layout (a forward declaration Ghidra never resolved to a body). `fields`/`enum_values` are empty in this case, not fabricated. |
 | `is_anonymous` | boolean | Yes | No | Ghidra assigned a placeholder name (observed as `<unnamed-tag_...>`/`<unnamed-enum-...>`) because no real symbol name was available -- common for compiler-generated anonymous structs/unions in real debug info. |
 | `fields` | array | Yes | No | Populated for `struct`/`union` kinds; empty otherwise. See Type field object below. |

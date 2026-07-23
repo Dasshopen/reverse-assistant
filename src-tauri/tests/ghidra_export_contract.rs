@@ -286,6 +286,10 @@ fn real_pe_export_detects_an_opaque_handle_struct_with_real_usages() {
     assert!(sqlite3_stmt.is_opaque);
     assert!(sqlite3_stmt.fields.is_empty());
     assert!(!sqlite3_stmt.usages.is_empty());
+    // Ghidra reports a minimal placeholder length (observed as 1) for this
+    // opaque type -- not a real measurement, so it must not be presented
+    // as a reliable size.
+    assert_eq!(sqlite3_stmt.size, None);
 
     let sqlite3_struct = export
         .types

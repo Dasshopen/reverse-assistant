@@ -471,6 +471,11 @@ interface DetectedType {
     }
   }
 
+  function formatTypeSize(size: number | null): string {
+    if (size === null) return "size unknown";
+    return size === 1 ? "1 byte" : `${size} bytes`;
+  }
+
   $effect(() => {
     const func = selectedFunction;
 
@@ -1086,7 +1091,7 @@ interface DetectedType {
                     {#if type.is_opaque}<em>(opaque)</em>{/if}
                     {#if type.is_anonymous}<em>(anonymous)</em>{/if}
                     <span class="global-strings-count">
-                      {type.size === null ? "size unknown" : `${type.size} bytes`}
+                      {formatTypeSize(type.size)}
                     </span>
                     <span class="global-strings-count">{type.usages.length} usages</span>
                     <button
