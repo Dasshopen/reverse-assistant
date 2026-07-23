@@ -338,8 +338,15 @@ interface ApplyRenamesResult {
   let functionSearch = $state("");
   let functionPage = $state(1);
   const functionPageSize = 15;
+  let identificationPage = $state(1);
+  const identificationPageSize = 10;
+  let ignoredIdentificationAddresses = $state(new Set<string>());
+  let isApplyingAutomaticRenames = $state(false);
+  let automaticRenameError = $state("");
+  let automaticRenameSuccess = $state("");
   let graphNavigationHistory = $state<string[]>([]);
   let graphHistoryProgramSha: string | null = null;
+  let identificationProgramSha: string | null = null;
 
   let selectedFunction = $derived(
     importedExport?.functions.find(
@@ -369,6 +376,28 @@ interface ApplyRenamesResult {
     ),
   );
 
+  let unidentifiedFunctions = $derived(
+    importedExport?.functions.filter(
+      (func) => !func.is_external && isGeneratedFunctionName(func.name),
+    ) ?? [],
+  );
+  let identificationQueue = $derived(
+    unidentifiedFunctions.filter(
+      (func) => !ignoredIdentificationAddresses.has(func.entry_address),
+    ),
+  );
+  let identificationPageCount = $derived(
+    Math.max(1, Math.ceil(identificationQueue.length / identificationPageSize)),
+  );
+  let currentIdentificationPage = $derived(
+    Math.min(identificationPage, identificationPageCount),
+  );
+  let paginatedIdentificationQueue = $derived(
+    identificationQueue.slice(
+      (currentIdentificationPage - 1) * identificationPageSize,
+      currentIdentificationPage * identificationPageSize,
+    ),
+  );
   let importError = $state("");
   let isImporting = $state(false);
 
@@ -382,6 +411,7 @@ interface ApplyRenamesResult {
   let activeProjectId = $state<string | null>(null);
   type WorkspaceView =
     | "overview"
+    | "identification"
     | "functions"
     | "strings"
     | "imports"
@@ -395,6 +425,7 @@ interface ApplyRenamesResult {
 
   const primaryViews: { id: WorkspaceView; label: string; icon: string }[] = [
     { id: "overview", label: "Aperçu", icon: "⌂" },
+    { id: "identification", label: "Identification", icon: "✦" },
     { id: "functions", label: "Fonctions", icon: "ƒ" },
     { id: "strings", label: "Chaînes", icon: "\"" },
     { id: "types", label: "Structures", icon: "◇" },
@@ -438,6 +469,15 @@ interface ApplyRenamesResult {
   let functionRenameError = $state("");
   let functionRenameSuccess = $state("");
   let renameDraftAddress: string | null = null;
+
+  let automaticRenameCandidates = $derived.by(() =>
+    unidentifiedFunctions.flatMap((func) => {
+      const candidates = identifications.get(func.entry_address) ?? [];
+      const uniqueNames = [...new Set(candidates.map((candidate) => candidate.name))];
+      if (uniqueNames.length !== 1 || candidates.length === 0) return [];
+      return [{ func, candidate: candidates[0] }];
+    }),
+  );
 
   let selectedIdentificationCandidates = $derived(
     selectedFunctionAddress
@@ -807,6 +847,26 @@ interface ApplyRenamesResult {
   });
 
   $effect(() => {
+    const currentProgramSha = importedExport?.program.sha256 ?? null;
+    if (currentProgramSha !== identificationProgramSha) {
+      identificationProgramSha = currentProgramSha;
+      ignoredIdentificationAddresses = new Set();
+      identificationPage = 1;
+      automaticRenameError = "";
+      automaticRenameSuccess = "";
+    }
+  });
+
+  $effect(() => {
+    if (activeWorkspaceView !== "identification") return;
+    const queue = identificationQueue;
+    if (queue.length === 0) return;
+    if (!queue.some((func) => func.entry_address === selectedFunctionAddress)) {
+      selectedFunctionAddress = queue[0].entry_address;
+    }
+  });
+
+  $effect(() => {
     loadGhidraInstallationStatus();
   });
 
@@ -1082,6 +1142,10 @@ interface ApplyRenamesResult {
     return size === 1 ? "1 byte" : `${size} bytes`;
   }
 
+  function isGeneratedFunctionName(name: string): boolean {
+    return /^(?:thunk_)?FUN_[0-9a-f]+$/i.test(name) || /^sub_[0-9a-f]+$/i.test(name);
+  }
+
   function formatProjectDate(createdAtUnixSeconds: number): string {
     return new Date(createdAtUnixSeconds * 1000).toLocaleString();
   }
@@ -1223,15 +1287,15 @@ interface ApplyRenamesResult {
     }
   }
 
-  async function applySelectedFunctionRename() {
+  async function applySelectedFunctionRename(): Promise<boolean> {
     if (!selectedFunction || !activeProjectId || analysisSource !== "automatic") {
       functionRenameError = "Open a live saved project before applying a rename.";
-      return;
+      return false;
     }
     const newName = functionRenameDraft.trim();
     if (!newName || newName === selectedFunction.name) {
       functionRenameError = "Enter a different non-empty function name.";
-      return;
+      return false;
     }
 
     functionRenameError = "";
@@ -1250,10 +1314,77 @@ interface ApplyRenamesResult {
       decompileErrors = new Map();
       functionRenameSuccess = `Renamed in Ghidra: ${result.applied[0].old_name} → ${result.applied[0].new_name}`;
       await requestProjectList();
+      return true;
     } catch (error) {
       functionRenameError = String(error);
+      return false;
     } finally {
       isApplyingFunctionRename = false;
+    }
+  }
+
+  async function applyIdentificationRenameAndNext() {
+    if (!selectedFunction) return;
+    const queueBeforeRename = identificationQueue;
+    const currentIndex = queueBeforeRename.findIndex(
+      (func) => func.entry_address === selectedFunction?.entry_address,
+    );
+    const nextAddress =
+      queueBeforeRename[currentIndex + 1]?.entry_address ??
+      queueBeforeRename[currentIndex - 1]?.entry_address ??
+      null;
+    if (await applySelectedFunctionRename()) {
+      selectedFunctionAddress = nextAddress;
+    }
+  }
+
+  function ignoreIdentificationAndNext() {
+    if (!selectedFunction) return;
+    const currentAddress = selectedFunction.entry_address;
+    const currentIndex = identificationQueue.findIndex(
+      (func) => func.entry_address === currentAddress,
+    );
+    const nextAddress =
+      identificationQueue[currentIndex + 1]?.entry_address ??
+      identificationQueue[currentIndex - 1]?.entry_address ??
+      null;
+    ignoredIdentificationAddresses = new Set(ignoredIdentificationAddresses).add(currentAddress);
+    selectedFunctionAddress = nextAddress;
+  }
+
+  async function applyAutomaticFunctionRenames() {
+    if (!activeProjectId || analysisSource !== "automatic") {
+      automaticRenameError = "Le mode automatique demande un projet Ghidra local actif.";
+      return;
+    }
+    const batch = automaticRenameCandidates.slice(0, 500);
+    if (batch.length === 0) return;
+    if (!window.confirm(
+      `Appliquer ${batch.length} renommage(s) dans Ghidra ? Seules les fonctions avec un nom FunctionID unique sont incluses.`,
+    )) return;
+
+    automaticRenameError = "";
+    automaticRenameSuccess = "";
+    isApplyingAutomaticRenames = true;
+    try {
+      const result = await invoke<ApplyRenamesResult>("apply_function_renames", {
+        projectId: activeProjectId,
+        renames: batch.map(({ func, candidate }) => ({
+          entry_address: func.entry_address,
+          new_name: candidate.name,
+        })),
+      });
+      importedExport = result.imported.export;
+      importSummary = result.imported.summary;
+      decompileCache = new Map();
+      decompileErrors = new Map();
+      automaticRenameSuccess = `${result.applied.length} fonction(s) renommée(s) dans Ghidra.`;
+      selectedFunctionAddress = null;
+      await requestProjectList();
+    } catch (error) {
+      automaticRenameError = String(error);
+    } finally {
+      isApplyingAutomaticRenames = false;
     }
   }
 
@@ -2651,6 +2782,157 @@ interface ApplyRenamesResult {
 
     {#if importedExport}
       <section
+        class="identification-workspace"
+        class:view-hidden={activeWorkspaceView !== "identification"}
+        aria-labelledby="identification-title"
+      >
+        <header class="identification-header">
+          <div>
+            <p class="detail-label">Fonction principale</p>
+            <h2 id="identification-title">Identifier et renommer les fonctions</h2>
+            <p>Examine les preuves, choisis un nom, puis avance dans la file sans quitter cet écran.</p>
+          </div>
+          <dl>
+            <div><dt>Non nommées</dt><dd>{unidentifiedFunctions.length}</dd></div>
+            <div><dt>Avec FunctionID</dt><dd>{unidentifiedFunctions.filter((func) => (identifications.get(func.entry_address)?.length ?? 0) > 0).length}</dd></div>
+            <div><dt>Ignorées</dt><dd>{ignoredIdentificationAddresses.size}</dd></div>
+          </dl>
+        </header>
+
+        <section class="automatic-rename-panel">
+          <div>
+            <strong>Renommage automatique contrôlé</strong>
+            <span>
+              {automaticRenameCandidates.length} proposition(s) prête(s). Règle actuelle : un seul nom
+              FunctionID possible pour la fonction. Aucun choix ambigu n'est inclus.
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
+            onclick={applyAutomaticFunctionRenames}
+          >{isApplyingAutomaticRenames ? "Application en cours…" : `Vérifier et appliquer (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
+        </section>
+        {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
+        {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
+
+        {#if identificationQueue.length === 0}
+          <div class="identification-complete">
+            <span aria-hidden="true">✓</span>
+            <h3>La file est terminée</h3>
+            <p>Toutes les fonctions génériques ont été renommées ou ignorées pour cette session.</p>
+          </div>
+        {:else}
+          <div class="identification-layout">
+            <aside class="identification-queue">
+              <header>
+                <div><strong>File de renommage</strong><span>{identificationQueue.length} restante(s)</span></div>
+                <small>Page {currentIdentificationPage} sur {identificationPageCount}</small>
+              </header>
+              <ol>
+                {#each paginatedIdentificationQueue as func (func.entry_address)}
+                  {@const candidate = topIdentificationFor(func.entry_address)}
+                  <li>
+                    <button
+                      type="button"
+                      class:active={func.entry_address === selectedFunctionAddress}
+                      onclick={() => openFunction(func.entry_address, false)}
+                    >
+                      <span><strong>{func.name}</strong><code>{func.entry_address}</code></span>
+                      {#if candidate}
+                        <span class="queue-candidate"><small>Proposition</small><b>{candidate.name}</b></span>
+                      {:else}
+                        <span class="queue-no-evidence">Sans correspondance</span>
+                      {/if}
+                    </button>
+                  </li>
+                {/each}
+              </ol>
+              <nav class="identification-pagination" aria-label="Pages de la file de renommage">
+                <button type="button" disabled={currentIdentificationPage === 1} onclick={() => (identificationPage = Math.max(1, currentIdentificationPage - 1))}>←</button>
+                <span>{currentIdentificationPage} / {identificationPageCount}</span>
+                <button type="button" disabled={currentIdentificationPage === identificationPageCount} onclick={() => (identificationPage = Math.min(identificationPageCount, currentIdentificationPage + 1))}>→</button>
+              </nav>
+            </aside>
+
+            {#if selectedFunction && isGeneratedFunctionName(selectedFunction.name)}
+              <article class="identification-review">
+                <header>
+                  <div><p class="detail-label">Fonction à identifier</p><h3>{selectedFunction.name}</h3><code>{selectedFunction.entry_address}</code></div>
+                  <span class="review-position">{unidentifiedFunctions.length} fonction(s) encore non nommée(s)</span>
+                </header>
+
+                <div class="identification-review-grid">
+                  <section class="identification-evidence">
+                    <div class="review-section-heading"><h4>Propositions et preuves</h4><span>Clique sur une proposition pour la choisir</span></div>
+
+                    {#if selectedIdentificationCandidates.length > 0}
+                      <div class="evidence-source-group">
+                        <h5>FunctionID</h5>
+                        {#each selectedIdentificationCandidates as candidate}
+                          <button type="button" class:selected={functionRenameDraft === candidate.name} onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
+                            <span><strong>{candidate.name}</strong><small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small></span>
+                            <span><code>score {candidate.overall_score.toFixed(1)}</code><small>{candidate.match_mode}</small></span>
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+
+                    {#if selectedBsimResult?.status === "available" && selectedBsimResult.matches.length > 0}
+                      <div class="evidence-source-group">
+                        <h5>BSim</h5>
+                        {#each selectedBsimResult.matches as candidate}
+                          <button type="button" class:selected={functionRenameDraft === candidate.name} onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
+                            <span><strong>{candidate.name}</strong><small>{candidate.executable}</small></span>
+                            <span><code>{candidate.similarity.toFixed(3)}</code><small>significativité {candidate.significance.toFixed(1)}</small></span>
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+
+                    {#if selectedIdentificationCandidates.length === 0 && (selectedBsimResult?.matches.length ?? 0) === 0}
+                      <div class="no-identification-evidence"><strong>Aucune preuve automatique disponible</strong><span>Tu peux lire le pseudocode et saisir un nom manuellement, ou ignorer cette fonction.</span></div>
+                    {/if}
+                  </section>
+
+                  <section class="identification-code">
+                    <div class="review-section-heading"><h4>Pseudocode de contrôle</h4><span>{selectedPrototype}</span></div>
+                    {#if isDecompilingSelected}
+                      <p>Ghidra décompile cette fonction…</p>
+                    {:else if selectedDecompileError}
+                      <p class="error" role="alert">{selectedDecompileError}</p>
+                    {:else if selectedDecompiledCode}
+                      <pre><code>{selectedDecompiledCode}</code></pre>
+                    {:else}
+                      <p>Aucun pseudocode disponible.</p>
+                    {/if}
+                  </section>
+                </div>
+
+                <footer class="identification-actions">
+                  <div>
+                    <label for="identification-name">Nom retenu</label>
+                    <input id="identification-name" type="text" maxlength="512" bind:value={functionRenameDraft} />
+                  </div>
+                  <button type="button" class="ignore-action" onclick={ignoreIdentificationAndNext}>Ignorer pour l'instant</button>
+                  <button
+                    type="button"
+                    class="apply-next-action"
+                    disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name || analysisSource !== "automatic" || !activeProjectId}
+                    onclick={applyIdentificationRenameAndNext}
+                  >{isApplyingFunctionRename ? "Application…" : "Renommer et suivante →"}</button>
+                </footer>
+                {#if functionRenameError}<p class="error identification-message" role="alert">{functionRenameError}</p>{/if}
+                {#if functionRenameSuccess}<p class="status identification-message">{functionRenameSuccess}</p>{/if}
+              </article>
+            {/if}
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    {#if importedExport}
+      <section
         class="graph-workspace"
         class:view-hidden={activeWorkspaceView !== "graph"}
         aria-labelledby="graph-workspace-title"
@@ -2935,51 +3217,6 @@ interface ApplyRenamesResult {
                     {/if}
                   </section>
 
-                  <section class="function-section primary-identification-card">
-                    <div class="function-section-heading">
-                      <div>
-                        <h4>Preuves et renommage</h4>
-                        <span>FunctionID et BSim, sans renommage automatique</span>
-                      </div>
-                      <button type="button" onclick={() => (activeDetailTab = "evidence")}>Toutes les preuves →</button>
-                    </div>
-
-                    {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
-                      <div class="primary-rename-row">
-                        <input type="text" maxlength="512" aria-label="Nom de fonction à appliquer" bind:value={functionRenameDraft} />
-                        <button
-                          type="button"
-                          disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
-                          onclick={applySelectedFunctionRename}
-                        >{isApplyingFunctionRename ? "Application…" : "Appliquer dans Ghidra"}</button>
-                      </div>
-                      {#if functionRenameError}<p class="error" role="alert">{functionRenameError}</p>{/if}
-                      {#if functionRenameSuccess}<p class="status">{functionRenameSuccess}</p>{/if}
-                    {:else}
-                      <p class="rename-unavailable">Le renommage demande un projet Ghidra local actif et une fonction interne.</p>
-                    {/if}
-
-                    <div class="primary-evidence-list">
-                      {#each selectedIdentificationCandidates.slice(0, 2) as candidate}
-                        <button type="button" onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
-                          <span><strong>{candidate.name}</strong><small>FunctionID · {candidate.library_family} {candidate.library_version}</small></span>
-                          <code>score {candidate.overall_score.toFixed(1)}</code>
-                        </button>
-                      {/each}
-                      {#if selectedBsimResult?.status === "available"}
-                        {#each selectedBsimResult.matches.slice(0, 2) as candidate}
-                          <button type="button" onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
-                            <span><strong>{candidate.name}</strong><small>BSim · {candidate.executable}</small></span>
-                            <code>{candidate.similarity.toFixed(3)}</code>
-                          </button>
-                        {/each}
-                      {/if}
-                    </div>
-
-                    {#if selectedIdentificationCandidates.length === 0 && (selectedBsimResult?.matches.length ?? 0) === 0}
-                      <p class="no-primary-evidence">Aucune correspondance suffisamment fiable n'a été trouvée.</p>
-                    {/if}
-                  </section>
                 </div>
 
                 <section class="function-section function-graph-preview">
@@ -5602,94 +5839,199 @@ interface ApplyRenamesResult {
     color: #ffffff;
   }
 
-  .primary-identification-card {
-    padding: 0.7rem;
-    border: 1px solid #30415f;
+  .identification-workspace {
+    display: grid;
+    gap: 0.7rem;
+  }
+
+  .identification-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .identification-header h2 { margin: 0.2rem 0; font-size: 1.25rem; }
+  .identification-header > div > p:last-child { margin: 0; color: #8292ad; font-size: 0.72rem; }
+
+  .identification-header dl {
+    display: flex;
+    margin: 0;
+    gap: 0.45rem;
+  }
+
+  .identification-header dl div {
+    min-width: 88px;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid #263750;
     border-radius: 7px;
     background: #0e1a2d;
   }
 
-  .primary-rename-row {
+  .identification-header dt { color: #8292ad; font-size: 0.58rem; }
+  .identification-header dd { margin: 0.12rem 0 0; color: #67e8f9; font-size: 1rem; font-weight: 800; }
+
+  .automatic-rename-panel {
     display: flex;
-    gap: 0.4rem;
-    margin-top: 0.65rem;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid #4c3a83;
+    border-radius: 8px;
+    background: linear-gradient(90deg, rgb(76 29 149 / 20%), #0d182a 55%);
   }
 
-  .primary-rename-row input {
-    min-width: 0;
-    flex: 1 1 auto;
-    padding: 0.48rem 0.6rem;
-    border: 1px solid #3a4c69;
-    border-radius: 6px;
-    background: #091423;
-    color: #f8fafc;
-    font-size: 0.7rem;
-  }
+  .automatic-rename-panel > div { display: grid; gap: 0.18rem; }
+  .automatic-rename-panel strong { color: #ddd6fe; font-size: 0.75rem; }
+  .automatic-rename-panel span { color: #91a0b8; font-size: 0.64rem; }
+  .automatic-rename-panel button { flex: 0 0 auto; padding: 0.5rem 0.7rem; background: #6d28d9; color: white; font-size: 0.66rem; }
+  .automatic-rename-panel button:hover:not(:disabled) { background: #7c3aed; }
 
-  .primary-rename-row button {
-    flex: 0 0 auto;
-    padding: 0.48rem 0.6rem;
-    background: #6d28d9;
-    color: #fff;
-    font-size: 0.66rem;
-  }
-
-  .primary-rename-row button:hover:not(:disabled) { background: #7c3aed; }
-
-  .primary-evidence-list {
+  .identification-layout {
     display: grid;
-    gap: 0.35rem;
-    margin-top: 0.55rem;
+    grid-template-columns: minmax(280px, 0.66fr) minmax(650px, 2.34fr);
+    gap: 0.7rem;
+    align-items: start;
   }
 
-  .primary-evidence-list button {
+  .identification-queue,
+  .identification-review {
+    border: 1px solid #22324a;
+    border-radius: 8px;
+    background: #0b1423;
+  }
+
+  .identification-queue > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.65rem;
+    border-bottom: 1px solid #22324a;
+  }
+
+  .identification-queue > header div { display: grid; gap: 0.12rem; }
+  .identification-queue > header strong { font-size: 0.75rem; }
+  .identification-queue > header span,
+  .identification-queue > header small { color: #8292ad; font-size: 0.58rem; }
+  .identification-queue ol { display: grid; margin: 0; padding: 0; list-style: none; }
+  .identification-queue li { border-bottom: 1px solid #1d2a40; }
+
+  .identification-queue li > button {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr);
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.53rem 0.65rem;
+    border-radius: 0;
+    background: transparent;
+    color: #e5edf8;
+    text-align: left;
+  }
+
+  .identification-queue li > button:hover:not(:disabled) { background: #13243a; }
+  .identification-queue li > button.active { box-shadow: inset 3px 0 #8b5cf6; background: #172746; }
+  .identification-queue li > button > span { display: grid; min-width: 0; gap: 0.1rem; }
+  .identification-queue strong,
+  .queue-candidate b { overflow: hidden; font-size: 0.68rem; text-overflow: ellipsis; white-space: nowrap; }
+  .identification-queue code { color: #79b9ee; font-size: 0.56rem; }
+  .queue-candidate small { color: #6ee7b7; font-size: 0.5rem; }
+  .queue-candidate b { color: #bbf7d0; }
+  .queue-no-evidence { color: #66758d; font-size: 0.56rem; }
+
+  .identification-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.65rem;
+    padding: 0.5rem;
+  }
+
+  .identification-pagination button { padding: 0.25rem 0.55rem; border: 1px solid #354765; background: #111e31; color: #d6e0ee; }
+  .identification-pagination button:disabled { cursor: default; opacity: 0.3; }
+  .identification-pagination span { color: #8292ad; font-size: 0.62rem; }
+
+  .identification-review { min-width: 0; }
+  .identification-review > header { display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 0.8rem; border-bottom: 1px solid #22324a; }
+  .identification-review > header h3 { margin: 0.15rem 0; font-size: 1.05rem; }
+  .identification-review > header code { color: #8abce9; font-size: 0.62rem; }
+  .review-position { color: #8292ad; font-size: 0.62rem; }
+
+  .identification-review-grid {
+    display: grid;
+    grid-template-columns: minmax(310px, 0.88fr) minmax(420px, 1.12fr);
+    min-height: 410px;
+  }
+
+  .identification-evidence,
+  .identification-code { min-width: 0; padding: 0.75rem; }
+  .identification-code { border-left: 1px solid #22324a; }
+  .review-section-heading { display: grid; gap: 0.12rem; margin-bottom: 0.55rem; }
+  .review-section-heading h4 { margin: 0; color: #c4b5fd; font-size: 0.78rem; }
+  .review-section-heading span { color: #7f8faa; font-size: 0.56rem; overflow-wrap: anywhere; }
+
+  .evidence-source-group { display: grid; gap: 0.35rem; margin-bottom: 0.65rem; }
+  .evidence-source-group h5 { margin: 0.15rem 0; color: #67e8f9; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .evidence-source-group button {
     display: flex;
     width: 100%;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.45rem 0.55rem;
-    border: 1px solid #293a55;
+    gap: 0.6rem;
+    padding: 0.55rem 0.6rem;
+    border: 1px solid #2a3a54;
     background: #101d30;
-    color: #e8eef8;
+    color: #edf3fb;
     text-align: left;
   }
+  .evidence-source-group button:hover:not(:disabled) { border-color: #22d3ee; background: #13283b; }
+  .evidence-source-group button.selected { border-color: #8b5cf6; box-shadow: 0 0 0 1px #8b5cf6; background: #241b48; }
+  .evidence-source-group button > span { display: grid; min-width: 0; gap: 0.12rem; }
+  .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
+  .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+  .evidence-source-group small { color: #8292ad; font-size: 0.54rem; }
+  .evidence-source-group code { color: #a7f3d0; font-size: 0.58rem; }
 
-  .primary-evidence-list button:hover:not(:disabled) {
-    border-color: #22d3ee;
-    background: #13283b;
-  }
+  .identification-code pre { max-height: 345px; margin: 0; padding: 0.7rem; border: 1px solid #24344c; border-radius: 7px; background: #050b14; overflow: auto; }
+  .identification-code pre code { color: #cce8dc; font: 0.66rem/1.5 Consolas, monospace; white-space: pre; }
+  .identification-code > p { color: #8292ad; font-size: 0.7rem; }
 
-  .primary-evidence-list button span {
+  .no-identification-evidence { display: grid; gap: 0.2rem; padding: 0.7rem; border: 1px dashed #394861; border-radius: 7px; color: #8292ad; }
+  .no-identification-evidence strong { color: #cbd5e1; font-size: 0.7rem; }
+  .no-identification-evidence span { font-size: 0.62rem; }
+
+  .identification-actions {
     display: grid;
-    min-width: 0;
-    gap: 0.1rem;
+    grid-template-columns: minmax(220px, 1fr) auto auto;
+    align-items: end;
+    gap: 0.5rem;
+    padding: 0.7rem 0.8rem;
+    border-top: 1px solid #22324a;
+    background: #0e1a2d;
   }
+  .identification-actions > div { display: grid; gap: 0.25rem; }
+  .identification-actions label { color: #94a3b8; font-size: 0.58rem; }
+  .identification-actions input { padding: 0.5rem 0.6rem; font-size: 0.7rem; }
+  .identification-actions button { padding: 0.5rem 0.65rem; font-size: 0.65rem; }
+  .ignore-action { border: 1px solid #3a4b68; background: transparent; color: #cbd5e1; }
+  .ignore-action:hover:not(:disabled) { background: #1c2a3e; }
+  .apply-next-action { background: #6d28d9; color: white; }
+  .apply-next-action:hover:not(:disabled) { background: #7c3aed; }
+  .identification-message { margin: 0.45rem 0.8rem; padding: 0.45rem 0.6rem; font-size: 0.65rem; }
 
-  .primary-evidence-list strong {
-    overflow: hidden;
-    font-size: 0.7rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .primary-evidence-list small,
-  .primary-evidence-list code {
-    color: #8fa1bd;
-    font-size: 0.58rem;
-  }
-
-  .rename-unavailable,
-  .no-primary-evidence {
-    margin: 0.55rem 0 0;
-    color: #7f90aa;
-    font-size: 0.66rem;
-  }
+  .identification-complete { display: grid; place-items: center; min-height: 430px; align-content: center; text-align: center; }
+  .identification-complete > span { display: grid; width: 50px; height: 50px; place-items: center; border-radius: 50%; background: #064e3b; color: #6ee7b7; font-size: 1.5rem; }
+  .identification-complete h3 { margin: 0.8rem 0 0.2rem; }
+  .identification-complete p { margin: 0; color: #8292ad; font-size: 0.72rem; }
 
   @media (max-width: 1320px) {
     .function-explorer { grid-template-columns: minmax(370px, 0.9fr) minmax(580px, 2fr); }
     .function-overview-grid { grid-template-columns: 1fr; }
     .function-graph-preview { padding-left: 0; border-top: 1px solid #1d2a40; border-left: 0; }
+    .identification-layout { grid-template-columns: minmax(260px, 0.7fr) minmax(560px, 2fr); }
+    .identification-review-grid { grid-template-columns: 1fr; }
+    .identification-code { border-top: 1px solid #22324a; border-left: 0; }
   }
 
   @media (max-width: 980px) {
@@ -5697,6 +6039,9 @@ interface ApplyRenamesResult {
     .function-list-heading { grid-column: 1; }
     .function-table-wrap { max-height: 400px; }
     .function-details { max-height: none; }
+    .identification-header { align-items: flex-start; flex-direction: column; }
+    .identification-layout { grid-template-columns: 1fr; }
+    .identification-actions { grid-template-columns: 1fr; }
   }
 
 
