@@ -113,10 +113,13 @@ same-executable near-1.0 equivalent is a real validation failure.
 **Not yet done:**
 - Publishing the built `.mv.db` as a GitHub Release asset (a public action
   requiring explicit sign-off, not automated by these scripts).
-- Wiring BSim queries into the actual app (the Rust `services::bsim_corpus`
-  module currently only knows how to download/verify/cache a published
-  corpus asset — no query command is wired to the UI yet, mirroring how
-  FunctionID was built in a previous phase).
+
+The app integration queries BSim on demand in the same Ghidra launch used to
+decompile the selected function, then shows the candidate name, reference
+executable, similarity, and significance without renaming anything. During
+development it discovers this locally generated database under `build/`;
+release builds will use the verified app-data cache after the database is
+published.
 
 ## Adding more libraries later
 

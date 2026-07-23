@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -6,6 +7,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 const CORPUS_FILE_NAME: &str = "reverse-assistant-seed.mv.db";
+const CORPUS_PATH_ENV: &str = "REVERSE_ASSISTANT_BSIM_CORPUS_PATH";
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -27,6 +29,83 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), String> {
 
 pub fn cached_db_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("bsim-corpus").join(CORPUS_FILE_NAME)
+}
+
+pub fn database_url(database_path: &Path) -> Result<String, String> {
+    let path = database_path.to_string_lossy();
+    let base = path.strip_suffix(".mv.db").ok_or_else(|| {
+        format!(
+            "BSim corpus path must end with .mv.db: {}",
+            database_path.display()
+        )
+    })?;
+
+    let normalized = base.replace('\\', "/");
+    let normalized = if let Some(unc) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else {
+        normalized
+            .strip_prefix("//?/")
+            .unwrap_or(&normalized)
+            .to_owned()
+    };
+
+    Ok(format!("file:/{normalized}"))
+}
+
+// Until the corpus is published as a release asset, development builds use
+// the reproducibly generated database under bsim-corpus/build. An explicit
+// environment override and the future app-data cache take precedence.
+pub fn locate_available_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    if let Some(configured) = env::var_os(CORPUS_PATH_ENV) {
+        let path = PathBuf::from(configured);
+
+        if !path.is_file() {
+            return Err(format!(
+                "{CORPUS_PATH_ENV} points to a missing BSim corpus: {}",
+                path.display()
+            ));
+        }
+
+        return fs::canonicalize(&path).map(Some).map_err(|error| {
+            format!(
+                "failed to resolve the configured BSim corpus '{}': {error}",
+                path.display()
+            )
+        });
+    }
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("unable to resolve the application data directory: {error}"))?;
+    let cached = cached_db_path(&app_data_dir);
+
+    if cached.is_file() {
+        return fs::canonicalize(&cached).map(Some).map_err(|error| {
+            format!(
+                "failed to resolve the cached BSim corpus '{}': {error}",
+                cached.display()
+            )
+        });
+    }
+
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("bsim-corpus")
+        .join("build")
+        .join(CORPUS_FILE_NAME);
+
+    if development.is_file() {
+        return fs::canonicalize(&development).map(Some).map_err(|error| {
+            format!(
+                "failed to resolve the development BSim corpus '{}': {error}",
+                development.display()
+            )
+        });
+    }
+
+    Ok(None)
 }
 
 // Downloads the BSim seed corpus from a GitHub Release asset on first use,
@@ -186,11 +265,44 @@ mod tests {
 
     #[test]
     fn cached_db_path_is_stable() {
-        let path = cached_db_path(Path::new("C:/Users/test-user/AppData/Roaming/reverse-assistant"));
+        let path = cached_db_path(Path::new(
+            "C:/Users/test-user/AppData/Roaming/reverse-assistant",
+        ));
 
         assert_eq!(
             path,
             PathBuf::from("C:/Users/test-user/AppData/Roaming/reverse-assistant/bsim-corpus/reverse-assistant-seed.mv.db")
         );
+    }
+
+    #[test]
+    fn database_url_removes_the_h2_file_suffix() {
+        let url = database_url(Path::new(
+            "C:/Reverse Assistant/bsim/reverse-assistant-seed.mv.db",
+        ))
+        .expect("a valid H2 database path should become a BSim URL");
+
+        assert_eq!(
+            url,
+            "file:/C:/Reverse Assistant/bsim/reverse-assistant-seed"
+        );
+    }
+
+    #[test]
+    fn database_url_rejects_a_non_h2_path() {
+        let error = database_url(Path::new("C:/corpus/database.sqlite"))
+            .expect_err("a non-H2 path should be rejected");
+
+        assert!(error.contains("must end with .mv.db"));
+    }
+
+    #[test]
+    fn database_url_normalizes_a_windows_verbatim_path() {
+        let url = database_url(Path::new(
+            r"\\?\C:\Reverse Assistant\reverse-assistant-seed.mv.db",
+        ))
+        .expect("a canonical Windows path should become a regular file URL");
+
+        assert_eq!(url, "file:/C:/Reverse Assistant/reverse-assistant-seed");
     }
 }

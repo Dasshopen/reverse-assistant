@@ -19,7 +19,7 @@ public class DecompileFunctionJson extends GhidraScript {
         String[] args = getScriptArgs();
 
         if (args.length < 2 || args[0].isBlank() || args[1].isBlank()) {
-            printerr("Usage: DecompileFunctionJson <entry-address> <destination-json-path>");
+            printerr("Usage: DecompileFunctionJson <entry-address> <destination-json-path> [bsim-database-url]");
             throw new IllegalArgumentException(
                 "missing entry address or destination path for DecompileFunctionJson"
             );
@@ -38,12 +38,14 @@ public class DecompileFunctionJson extends GhidraScript {
         }
 
         Path destination = Paths.get(args[1]);
+        String bsimDatabaseUrl = args.length >= 3 ? args[2] : null;
 
         try {
             new DecompileFunctionService().decompileAndWrite(
                 currentProgram,
                 entryAddress,
                 destination,
+                bsimDatabaseUrl,
                 monitor
             );
 

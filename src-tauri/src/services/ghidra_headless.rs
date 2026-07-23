@@ -202,7 +202,14 @@ pub fn run_headless_analysis(
 pub fn analyze_binary(
     app: &AppHandle,
     binary_path: &Path,
-) -> Result<(ImportedGhidraExport, Vec<FunctionIdentification>, AnalysisSession), String> {
+) -> Result<
+    (
+        ImportedGhidraExport,
+        Vec<FunctionIdentification>,
+        AnalysisSession,
+    ),
+    String,
+> {
     let install_dir = load_persisted_install_dir(app)?.ok_or_else(|| {
         "No Ghidra installation is configured. Configure one before analyzing a binary.".to_owned()
     })?;

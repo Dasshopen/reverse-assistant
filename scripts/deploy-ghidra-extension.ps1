@@ -135,6 +135,19 @@ try {
         -Recurse `
         -Force
 
+    # ZIP entries produced by Ghidra's extension build can carry timestamps
+    # older than Ghidra's compiled-script cache. Refresh installed files so an
+    # upgraded .java script is recompiled instead of calling an obsolete JAR
+    # method signature from a stale cached .class file.
+    $deploymentTime = Get-Date
+    Get-ChildItem `
+        -LiteralPath $installedExtension `
+        -File `
+        -Recurse |
+        ForEach-Object {
+            $_.LastWriteTime = $deploymentTime
+        }
+
     Write-Host ""
     Write-Host "Deployment successful:"
     Write-Host $installedExtension

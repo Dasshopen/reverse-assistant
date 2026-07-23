@@ -69,6 +69,20 @@ interface DecompiledFunctionDetails {
   return_type: string;
   parameters: FunctionParameter[];
   calling_convention: string;
+  bsim: BsimQueryResult;
+}
+
+interface BsimCandidate {
+  name: string;
+  executable: string;
+  similarity: number;
+  significance: number;
+}
+
+interface BsimQueryResult {
+  status: "available" | "unavailable" | "error";
+  matches: BsimCandidate[];
+  message: string | null;
 }
 
 interface FidCandidate {
@@ -158,6 +172,7 @@ interface AutomaticAnalysisResult {
   );
 
   let displayedCallingConvention = $derived(enrichedDetails?.calling_convention ?? null);
+  let selectedBsimResult = $derived(enrichedDetails?.bsim ?? null);
 
   $effect(() => {
     loadGhidraInstallationStatus();
@@ -598,6 +613,39 @@ interface AutomaticAnalysisResult {
               </section>
             {/if}
 
+            {#if selectedBsimResult}
+              <section class="function-section">
+                <h4>Similar functions (BSim)</h4>
+
+                {#if selectedBsimResult.status === "available"}
+                  {#if selectedBsimResult.matches.length === 0}
+                    <p>No sufficiently similar function was found in the seed corpus.</p>
+                  {:else}
+                    <ul>
+                      {#each selectedBsimResult.matches as candidate}
+                        <li>
+                          <span>
+                            {candidate.name}
+                            <em>({candidate.executable})</em>
+                          </span>
+                          <code>
+                            similarity {candidate.similarity.toFixed(3)} · significance
+                            {candidate.significance.toFixed(1)}
+                          </code>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                {:else if selectedBsimResult.status === "unavailable"}
+                  <p>{selectedBsimResult.message ?? "The BSim seed corpus is unavailable."}</p>
+                {:else}
+                  <p class="bsim-error">
+                    BSim query failed: {selectedBsimResult.message ?? "unknown error"}
+                  </p>
+                {/if}
+              </section>
+            {/if}
+
             <section class="function-section">
             <h4>Parameters</h4>
 
@@ -1029,6 +1077,16 @@ interface AutomaticAnalysisResult {
 
   .function-section p {
     color: #94a3b8;
+  }
+
+  .function-section .bsim-error {
+    color: #fca5a5;
+  }
+
+  .function-section li span em {
+    margin-left: 0.35rem;
+    color: #94a3b8;
+    font-style: normal;
   }
 
   .function-section ul {

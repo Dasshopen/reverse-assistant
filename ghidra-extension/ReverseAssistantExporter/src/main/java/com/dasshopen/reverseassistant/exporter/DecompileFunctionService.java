@@ -15,10 +15,12 @@ public final class DecompileFunctionService {
 
     private final DecompileResultJsonWriter jsonWriter;
     private final AtomicUtf8FileWriter fileWriter;
+    private final BsimFunctionQueryService bsimQueryService;
 
     public DecompileFunctionService() {
         jsonWriter = new DecompileResultJsonWriter();
         fileWriter = new AtomicUtf8FileWriter();
+        bsimQueryService = new BsimFunctionQueryService();
     }
 
     // Match Ghidra's native Decompiler window by returning the transient
@@ -30,6 +32,7 @@ public final class DecompileFunctionService {
         Program program,
         Address entryAddress,
         Path destination,
+        String bsimDatabaseUrl,
         TaskMonitor monitor
     ) throws IOException, CancelledException {
         Objects.requireNonNull(program, "program must not be null");
@@ -53,7 +56,34 @@ public final class DecompileFunctionService {
             DecompiledFunctionDetails details =
                 FunctionDecompiler.decompile(function, decompiler, monitor);
 
-            fileWriter.write(destination, jsonWriter.write(details));
+            BsimQueryResult bsimResult;
+
+            if (bsimDatabaseUrl == null || bsimDatabaseUrl.isBlank()) {
+                bsimResult = BsimQueryResult.unavailable(
+                    "The BSim seed corpus is not installed."
+                );
+            }
+            else {
+                try {
+                    bsimResult = bsimQueryService.query(
+                        program,
+                        function,
+                        bsimDatabaseUrl,
+                        monitor
+                    );
+                }
+                catch (CancelledException exception) {
+                    throw exception;
+                }
+                catch (Exception exception) {
+                    bsimResult = BsimQueryResult.error(exception.getMessage());
+                }
+            }
+
+            fileWriter.write(
+                destination,
+                jsonWriter.write(details, bsimResult)
+            );
         }
         finally {
             decompiler.dispose();

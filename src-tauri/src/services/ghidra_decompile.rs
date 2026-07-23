@@ -8,6 +8,7 @@ use tauri::AppHandle;
 use crate::models::ghidra_export::{is_valid_address, FunctionParameter};
 use crate::models::ghidra_installation::GhidraInstallation;
 use crate::models::ghidra_session::AnalysisSession;
+use crate::services::bsim_corpus::{database_url, locate_available_corpus};
 use crate::services::ghidra_headless::{tail, HEADLESS_MAX_HEAP};
 use crate::services::ghidra_installation::{load_persisted_install_dir, validate_installation};
 
@@ -16,7 +17,7 @@ const STDERR_TAIL_BYTES: usize = 4000;
 // Bump this value whenever the Java result semantics change. Keeping the
 // version in the file name makes persistent cached results safe across app
 // upgrades without having to delete a user's analyzed Ghidra project.
-const DECOMPILE_CACHE_VERSION: &str = "native-prototype-v1";
+const DECOMPILE_CACHE_VERSION: &str = "native-prototype-bsim-v2";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecompileFunctionInvocation {
@@ -29,6 +30,7 @@ pub fn build_decompile_function_args(
     session: &AnalysisSession,
     entry_address: &str,
     destination_json: &Path,
+    bsim_database_url: Option<&str>,
 ) -> DecompileFunctionInvocation {
     let program = installation
         .install_dir
@@ -37,7 +39,7 @@ pub fn build_decompile_function_args(
 
     let scripts_dir = installation.extensions_dir.join("ghidra_scripts");
 
-    let args = vec![
+    let mut args = vec![
         session.project_dir.to_string_lossy().into_owned(),
         session.project_name.clone(),
         "-process".to_owned(),
@@ -52,6 +54,10 @@ pub fn build_decompile_function_args(
         destination_json.to_string_lossy().into_owned(),
     ];
 
+    if let Some(url) = bsim_database_url {
+        args.push(url.to_owned());
+    }
+
     DecompileFunctionInvocation { program, args }
 }
 
@@ -61,6 +67,22 @@ pub struct DecompiledFunctionDetails {
     pub return_type: String,
     pub parameters: Vec<FunctionParameter>,
     pub calling_convention: String,
+    pub bsim: BsimQueryResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BsimQueryResult {
+    pub status: String,
+    pub matches: Vec<BsimCandidate>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BsimCandidate {
+    pub name: String,
+    pub executable: String,
+    pub similarity: f64,
+    pub significance: f64,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +91,7 @@ struct DecompileResultJson {
     return_type: String,
     parameters: Vec<FunctionParameter>,
     calling_convention: String,
+    bsim: BsimQueryResult,
 }
 
 impl From<DecompileResultJson> for DecompiledFunctionDetails {
@@ -78,6 +101,7 @@ impl From<DecompileResultJson> for DecompiledFunctionDetails {
             return_type: parsed.return_type,
             parameters: parsed.parameters,
             calling_convention: parsed.calling_convention,
+            bsim: parsed.bsim,
         }
     }
 }
@@ -86,6 +110,13 @@ fn parse_decompile_result(json: &str) -> Result<DecompiledFunctionDetails, Strin
     serde_json::from_str::<DecompileResultJson>(json)
         .map(DecompiledFunctionDetails::from)
         .map_err(|error| format!("invalid decompile result JSON from Ghidra: {error}"))
+}
+
+fn should_reuse_cached_result(
+    cached: &DecompiledFunctionDetails,
+    bsim_database_available: bool,
+) -> bool {
+    !bsim_database_available || cached.bsim.status == "available"
 }
 
 fn decompile_cache_path(cache_dir: &Path, entry_address: &str) -> PathBuf {
@@ -109,6 +140,7 @@ pub fn run_decompile_function(
     installation: &GhidraInstallation,
     session: &AnalysisSession,
     entry_address: &str,
+    bsim_database_path: Option<&Path>,
 ) -> Result<DecompiledFunctionDetails, String> {
     validate_entry_address(entry_address)?;
 
@@ -129,15 +161,26 @@ pub fn run_decompile_function(
     // first click or after restarting the Tauri application.
     if let Ok(json) = fs::read_to_string(&destination_json) {
         if let Ok(cached) = parse_decompile_result(&json) {
-            return Ok(cached);
+            // A missing corpus or a transient BSim failure must not become a
+            // permanent cached result. Retry once a corpus is available;
+            // successful matches (including an empty match list) stay cached.
+            if should_reuse_cached_result(&cached, bsim_database_path.is_some()) {
+                return Ok(cached);
+            }
         }
 
         // Ignore an incomplete/corrupt cache entry and regenerate it below.
         let _ = fs::remove_file(&destination_json);
     }
 
-    let invocation =
-        build_decompile_function_args(installation, session, entry_address, &destination_json);
+    let bsim_database_url = bsim_database_path.map(database_url).transpose()?;
+    let invocation = build_decompile_function_args(
+        installation,
+        session,
+        entry_address,
+        &destination_json,
+        bsim_database_url.as_deref(),
+    );
 
     let output = Command::new(&invocation.program)
         .args(&invocation.args)
@@ -187,7 +230,14 @@ pub fn decompile_function(
 
     let installation = validate_installation(app, &install_dir)?;
 
-    run_decompile_function(&installation, session, entry_address)
+    let bsim_database = locate_available_corpus(app).ok().flatten();
+
+    run_decompile_function(
+        &installation,
+        session,
+        entry_address,
+        bsim_database.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -198,7 +248,7 @@ mod tests {
     fn cache_path_is_stable_and_versioned() {
         assert_eq!(
             decompile_cache_path(Path::new("cache"), "0x140001170"),
-            PathBuf::from("cache/140001170-native-prototype-v1.json")
+            PathBuf::from("cache/140001170-native-prototype-bsim-v2.json")
         );
     }
 
@@ -209,7 +259,17 @@ mod tests {
                 "decompiled_code": "int example(int param_1) { return param_1; }",
                 "return_type": "int",
                 "parameters": [{ "name": "param_1", "data_type": "int" }],
-                "calling_convention": "__cdecl"
+                "calling_convention": "__cdecl",
+                "bsim": {
+                    "status": "available",
+                    "matches": [{
+                        "name": "example",
+                        "executable": "sqlite3.dll",
+                        "similarity": 0.91,
+                        "significance": 42.0
+                    }],
+                    "message": null
+                }
             }"#,
         )
         .expect("a valid native prototype result should parse");
@@ -219,6 +279,7 @@ mod tests {
         assert_eq!(details.parameters.len(), 1);
         assert_eq!(details.parameters[0].name, "param_1");
         assert_eq!(details.parameters[0].data_type, "int");
+        assert_eq!(details.bsim.matches[0].name, "example");
     }
 
     #[test]
@@ -240,7 +301,12 @@ mod tests {
                 "decompiled_code": "int cached(void) { return 1; }",
                 "return_type": "int",
                 "parameters": [],
-                "calling_convention": "__cdecl"
+                "calling_convention": "__cdecl",
+                "bsim": {
+                    "status": "unavailable",
+                    "matches": [],
+                    "message": "The BSim seed corpus is not installed."
+                }
             }"#,
         )
         .expect("the cached result should be written");
@@ -256,12 +322,33 @@ mod tests {
             program_path_in_project: "cached-test.exe".to_owned(),
         };
 
-        let result = run_decompile_function(&installation, &session, entry_address)
+        let result = run_decompile_function(&installation, &session, entry_address, None)
             .expect("a valid cached result should bypass the missing Ghidra executable");
 
         assert_eq!(result.return_type, "int");
         assert_eq!(result.calling_convention, "__cdecl");
 
         fs::remove_dir_all(&project_dir).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn cached_unavailable_result_is_not_reused_when_a_corpus_appears() {
+        let parsed = parse_decompile_result(
+            r#"{
+                "decompiled_code": null,
+                "return_type": "undefined",
+                "parameters": [],
+                "calling_convention": "unknown",
+                "bsim": {
+                    "status": "unavailable",
+                    "matches": [],
+                    "message": "The BSim seed corpus is not installed."
+                }
+            }"#,
+        )
+        .expect("the unavailable result should parse");
+
+        assert!(should_reuse_cached_result(&parsed, false));
+        assert!(!should_reuse_cached_result(&parsed, true));
     }
 }

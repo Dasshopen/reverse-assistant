@@ -41,8 +41,13 @@ fn builds_the_expected_argument_order_and_values() {
         .join("decompile-cache")
         .join("123456789.json");
 
-    let invocation =
-        build_decompile_function_args(&installation, &session, "0x140001000", &destination_json);
+    let invocation = build_decompile_function_args(
+        &installation,
+        &session,
+        "0x140001000",
+        &destination_json,
+        Some("file:/C:/corpus/reverse-assistant-seed"),
+    );
 
     assert_eq!(
         invocation.program,
@@ -68,6 +73,7 @@ fn builds_the_expected_argument_order_and_values() {
             "DecompileFunctionJson.java".to_owned(),
             "0x140001000".to_owned(),
             destination_json.to_string_lossy().into_owned(),
+            "file:/C:/corpus/reverse-assistant-seed".to_owned(),
         ]
     );
 
@@ -97,9 +103,18 @@ fn handles_paths_containing_spaces_as_separate_arguments() {
         .join("decompile-cache")
         .join("1.json");
 
-    let invocation =
-        build_decompile_function_args(&installation, &session, "0x140001000", &destination_json);
+    let invocation = build_decompile_function_args(
+        &installation,
+        &session,
+        "0x140001000",
+        &destination_json,
+        Some("file:/C:/My Corpus/reverse-assistant-seed"),
+    );
 
     assert_eq!(invocation.args[3], "sample under test.exe");
-    assert_eq!(invocation.args.len(), 12);
+    assert_eq!(invocation.args.len(), 13);
+    assert_eq!(
+        invocation.args[12],
+        "file:/C:/My Corpus/reverse-assistant-seed"
+    );
 }

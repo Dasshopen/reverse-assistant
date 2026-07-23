@@ -20,7 +20,10 @@ public final class DecompileResultJsonWriter {
             .create();
     }
 
-    public String write(DecompiledFunctionDetails details) {
+    public String write(
+        DecompiledFunctionDetails details,
+        BsimQueryResult bsimResult
+    ) {
         JsonObject root = new JsonObject();
 
         if (details.decompiledCode() == null) {
@@ -45,6 +48,30 @@ public final class DecompileResultJsonWriter {
         }
 
         root.add("parameters", parameters);
+
+        JsonObject bsim = new JsonObject();
+        bsim.addProperty("status", bsimResult.status());
+
+        if (bsimResult.message() == null) {
+            bsim.add("message", JsonNull.INSTANCE);
+        }
+        else {
+            bsim.addProperty("message", bsimResult.message());
+        }
+
+        JsonArray bsimMatches = new JsonArray();
+
+        for (BsimCandidate candidate : bsimResult.matches()) {
+            JsonObject candidateObject = new JsonObject();
+            candidateObject.addProperty("name", candidate.name());
+            candidateObject.addProperty("executable", candidate.executable());
+            candidateObject.addProperty("similarity", candidate.similarity());
+            candidateObject.addProperty("significance", candidate.significance());
+            bsimMatches.add(candidateObject);
+        }
+
+        bsim.add("matches", bsimMatches);
+        root.add("bsim", bsim);
 
         return gson.toJson(root) + "\n";
     }
