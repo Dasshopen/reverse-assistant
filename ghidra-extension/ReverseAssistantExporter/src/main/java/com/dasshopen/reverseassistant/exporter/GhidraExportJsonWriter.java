@@ -26,7 +26,8 @@ public final class GhidraExportJsonWriter {
     public String write(
         ProgramMetadata metadata,
         List<FunctionMetadata> functions,
-        List<GlobalStringMetadata> strings
+        List<GlobalStringMetadata> strings,
+        List<DetectedTypeMetadata> types
     ) {
         Objects.requireNonNull(
             metadata,
@@ -40,12 +41,17 @@ public final class GhidraExportJsonWriter {
             strings,
             "strings must not be null"
         );
+        Objects.requireNonNull(
+            types,
+            "types must not be null"
+        );
 
         JsonObject root = new JsonObject();
         root.addProperty("schema_version", SCHEMA_VERSION);
         root.add("program", createProgramObject(metadata));
         root.add("functions", createFunctionsArray(functions));
         root.add("strings", createGlobalStringsArray(strings));
+        root.add("types", createDetectedTypesArray(types));
 
         return gson.toJson(root) + "\n";
     }
@@ -295,5 +301,119 @@ public final class GhidraExportJsonWriter {
         }
 
         return array;
+    }
+
+    private static JsonArray createDetectedTypesArray(
+        List<DetectedTypeMetadata> types
+    ) {
+        JsonArray array = new JsonArray();
+
+        for (DetectedTypeMetadata type : types) {
+            JsonObject typeObject = new JsonObject();
+
+            typeObject.addProperty("name", type.name());
+            typeObject.addProperty("kind", type.kind());
+            typeObject.addProperty("category", type.category());
+
+            if (type.size() == null) {
+                typeObject.add("size", JsonNull.INSTANCE);
+            }
+            else {
+                typeObject.addProperty("size", type.size());
+            }
+
+            typeObject.addProperty("is_opaque", type.isOpaque());
+            typeObject.addProperty("is_anonymous", type.isAnonymous());
+            typeObject.add("fields", createTypeFieldsArray(type.fields()));
+            typeObject.add("enum_values", createEnumValuesArray(type.enumValues()));
+
+            if (type.targetTypeName() == null) {
+                typeObject.add("target_type_name", JsonNull.INSTANCE);
+            }
+            else {
+                typeObject.addProperty("target_type_name", type.targetTypeName());
+            }
+
+            typeObject.add("usages", createTypeUsagesArray(type.usages()));
+
+            array.add(typeObject);
+        }
+
+        return array;
+    }
+
+    private static JsonArray createTypeFieldsArray(
+        List<TypeFieldMetadata> fields
+    ) {
+        JsonArray array = new JsonArray();
+
+        for (TypeFieldMetadata field : fields) {
+            JsonObject fieldObject = new JsonObject();
+
+            if (field.name() == null) {
+                fieldObject.add("name", JsonNull.INSTANCE);
+            }
+            else {
+                fieldObject.addProperty("name", field.name());
+            }
+
+            fieldObject.addProperty("data_type", field.dataType());
+            fieldObject.addProperty("offset", field.offset());
+
+            array.add(fieldObject);
+        }
+
+        return array;
+    }
+
+    private static JsonArray createEnumValuesArray(
+        List<EnumValueMetadata> enumValues
+    ) {
+        JsonArray array = new JsonArray();
+
+        for (EnumValueMetadata enumValue : enumValues) {
+            JsonObject enumValueObject = new JsonObject();
+
+            enumValueObject.addProperty("name", enumValue.name());
+            enumValueObject.addProperty("value", enumValue.value());
+
+            array.add(enumValueObject);
+        }
+
+        return array;
+    }
+
+    private static JsonArray createTypeUsagesArray(
+        List<TypeUsageMetadata> usages
+    ) {
+        JsonArray array = new JsonArray();
+
+        for (TypeUsageMetadata usage : usages) {
+            JsonObject usageObject = new JsonObject();
+
+            usageObject.addProperty("kind", usage.kind());
+            addNullableProperty(usageObject, "function_address", usage.functionAddress());
+            addNullableProperty(usageObject, "function_name", usage.functionName());
+            addNullableProperty(usageObject, "parameter_name", usage.parameterName());
+            addNullableProperty(usageObject, "data_address", usage.dataAddress());
+            addNullableProperty(usageObject, "data_label", usage.dataLabel());
+
+            array.add(usageObject);
+        }
+
+        return array;
+    }
+
+    private static void addNullableProperty(
+        JsonObject object,
+        String property,
+        String value
+    ) {
+        if (value == null) {
+            object.add(property, JsonNull.INSTANCE);
+        }
+        else {
+            object.addProperty(property, value);
+        }
     }
 }

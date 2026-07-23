@@ -15,6 +15,7 @@ public final class ReverseAssistantExportService {
     private final AtomicUtf8FileWriter fileWriter;
     private final FunctionMetadataCollector functionCollector;
     private final ProgramStringsCollector stringsCollector;
+    private final ProgramTypesCollector typesCollector;
 
     public ReverseAssistantExportService() {
         metadataCollector = new ProgramMetadataCollector();
@@ -22,6 +23,7 @@ public final class ReverseAssistantExportService {
         fileWriter = new AtomicUtf8FileWriter();
         functionCollector = new FunctionMetadataCollector();
         stringsCollector = new ProgramStringsCollector();
+        typesCollector = new ProgramTypesCollector();
     }
 
     public void export(
@@ -49,7 +51,8 @@ public final class ReverseAssistantExportService {
         String json = jsonWriter.write(
             metadata,
             functionCollector.collect(program, monitor),
-            stringsCollector.collect(program, monitor)
+            stringsCollector.collect(program, monitor),
+            typesCollector.collect(program, monitor)
         );
 
         fileWriter.write(destination, json);

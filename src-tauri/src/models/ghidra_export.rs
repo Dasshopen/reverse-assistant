@@ -30,6 +30,92 @@ pub struct GhidraExport {
     // Whole-program string cross-reference table. Always empty for
     // v1-sourced data (v1 never captured string addresses).
     pub strings: Vec<GlobalString>,
+    // Structures, unions, enums and typedefs reachable from the program's
+    // functions (parameter/return types) or global data, plus the
+    // transitive closure of their own field/target types. Always empty for
+    // v1-sourced data (v1 never captured type information).
+    pub types: Vec<DetectedType>,
+}
+
+// A struct, union, enum or typedef either directly used by a function
+// signature or global data (see `usages`), or pulled in transitively
+// because a directly-used type references it (a struct field, a nested
+// union, a typedef's target). `usages` is empty for a type only reached
+// this second way -- it isn't fabricated as "used by" its referencing
+// type, since that relationship is already visible through the referencing
+// type's own `fields`/`target_type_name`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DetectedType {
+    pub name: String,
+    pub kind: DetectedTypeKind,
+    pub category: String,
+    pub size: Option<u32>,
+    // Declared but with no known layout (a forward declaration Ghidra never
+    // resolved to a body). `fields`/`enum_values` are empty in this case,
+    // not fabricated.
+    pub is_opaque: bool,
+    // Ghidra assigned a placeholder name (e.g. `<unnamed-tag_...>`) because
+    // no real symbol name was available -- observed for compiler-generated
+    // anonymous structs/unions/enums in real PDB data.
+    pub is_anonymous: bool,
+    // Populated for Struct/Union kinds; empty for Enum/Typedef.
+    pub fields: Vec<TypeField>,
+    // Populated for the Enum kind; empty otherwise.
+    pub enum_values: Vec<EnumValue>,
+    // Populated for the Typedef kind (the immediate aliased type's display
+    // name, not stripped of pointer/array layers); `None` otherwise.
+    pub target_type_name: Option<String>,
+    pub usages: Vec<TypeUsage>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DetectedTypeKind {
+    Struct,
+    Union,
+    Enum,
+    Typedef,
+}
+
+// A field's `data_type` is the raw Ghidra display name (may include `*`/
+// `[]`), matching the existing convention for `FunctionParameter.data_type`
+// -- consumers resolve it against another `DetectedType.name` themselves
+// rather than this contract pre-resolving it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TypeField {
+    // `None` for a field Ghidra never assigned a name (e.g. an anonymous
+    // nested union), not a fabricated placeholder.
+    pub name: Option<String>,
+    pub data_type: String,
+    pub offset: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EnumValue {
+    pub name: String,
+    pub value: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeUsageKind {
+    FunctionParameter,
+    FunctionReturn,
+    GlobalData,
+}
+
+// Which kind-specific fields are populated depends on `kind`:
+// `function_address`/`function_name` for FunctionParameter/FunctionReturn
+// (plus `parameter_name` for FunctionParameter only), `data_address`/
+// `data_label` for GlobalData. Never all populated at once.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TypeUsage {
+    pub kind: TypeUsageKind,
+    pub function_address: Option<String>,
+    pub function_name: Option<String>,
+    pub parameter_name: Option<String>,
+    pub data_address: Option<String>,
+    pub data_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -177,6 +263,28 @@ impl GhidraExport {
             }
         }
 
+        let mut type_keys = HashSet::new();
+        for (type_index, detected_type) in self.types.iter().enumerate() {
+            if !type_keys.insert((detected_type.category.as_str(), detected_type.name.as_str())) {
+                return Err(format!(
+                    "duplicate detected type: {}/{}",
+                    detected_type.category, detected_type.name
+                ));
+            }
+
+            for (usage_index, usage) in detected_type.usages.iter().enumerate() {
+                let usage_field = format!("types[{type_index}].usages[{usage_index}]");
+
+                if let Some(function_address) = &usage.function_address {
+                    validate_address(function_address, &format!("{usage_field}.function_address"))?;
+                }
+
+                if let Some(data_address) = &usage.data_address {
+                    validate_address(data_address, &format!("{usage_field}.data_address"))?;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -270,6 +378,7 @@ impl From<RawExportV1> for GhidraExport {
                 })
                 .collect(),
             strings: Vec::new(),
+            types: Vec::new(),
         }
     }
 }
@@ -287,6 +396,56 @@ struct RawExportV2 {
     program: RawProgramMetadataV2,
     functions: Vec<RawFunctionV2>,
     strings: Vec<RawGlobalString>,
+    types: Vec<RawDetectedType>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawDetectedType {
+    name: String,
+    kind: DetectedTypeKind,
+    category: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    size: Option<u32>,
+    is_opaque: bool,
+    is_anonymous: bool,
+    fields: Vec<RawTypeField>,
+    enum_values: Vec<RawEnumValue>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    target_type_name: Option<String>,
+    usages: Vec<RawTypeUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawTypeField {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    name: Option<String>,
+    data_type: String,
+    offset: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawEnumValue {
+    name: String,
+    value: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RawTypeUsage {
+    kind: TypeUsageKind,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    function_address: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    function_name: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    parameter_name: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    data_address: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    data_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -411,6 +570,49 @@ impl From<RawExportV2> for GhidraExport {
             })
             .collect();
 
+        let types = raw
+            .types
+            .into_iter()
+            .map(|raw_type| DetectedType {
+                name: raw_type.name,
+                kind: raw_type.kind,
+                category: raw_type.category,
+                size: raw_type.size,
+                is_opaque: raw_type.is_opaque,
+                is_anonymous: raw_type.is_anonymous,
+                fields: raw_type
+                    .fields
+                    .into_iter()
+                    .map(|raw_field| TypeField {
+                        name: raw_field.name,
+                        data_type: raw_field.data_type,
+                        offset: raw_field.offset,
+                    })
+                    .collect(),
+                enum_values: raw_type
+                    .enum_values
+                    .into_iter()
+                    .map(|raw_enum_value| EnumValue {
+                        name: raw_enum_value.name,
+                        value: raw_enum_value.value,
+                    })
+                    .collect(),
+                target_type_name: raw_type.target_type_name,
+                usages: raw_type
+                    .usages
+                    .into_iter()
+                    .map(|raw_usage| TypeUsage {
+                        kind: raw_usage.kind,
+                        function_address: raw_usage.function_address,
+                        function_name: raw_usage.function_name,
+                        parameter_name: raw_usage.parameter_name,
+                        data_address: raw_usage.data_address,
+                        data_label: raw_usage.data_label,
+                    })
+                    .collect(),
+            })
+            .collect();
+
         GhidraExport {
             schema_version: raw.schema_version,
             program: ProgramMetadata {
@@ -434,6 +636,7 @@ impl From<RawExportV2> for GhidraExport {
             },
             functions,
             strings,
+            types,
         }
     }
 }

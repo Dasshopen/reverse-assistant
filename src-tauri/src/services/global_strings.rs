@@ -112,6 +112,7 @@ mod tests {
             },
             functions,
             strings,
+            types: Vec::new(),
         }
     }
 

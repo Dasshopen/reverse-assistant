@@ -263,6 +263,7 @@ mod tests {
             },
             functions,
             strings: Vec::new(),
+            types: Vec::new(),
         }
     }
 

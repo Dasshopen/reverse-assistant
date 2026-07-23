@@ -158,6 +158,43 @@ interface ImportView {
   used_by_function_count: number;
 }
 
+type DetectedTypeKind = "struct" | "union" | "enum" | "typedef";
+
+interface TypeField {
+  name: string | null;
+  data_type: string;
+  offset: number;
+}
+
+interface EnumValue {
+  name: string;
+  value: number;
+}
+
+type TypeUsageKind = "function_parameter" | "function_return" | "global_data";
+
+interface TypeUsage {
+  kind: TypeUsageKind;
+  function_address: string | null;
+  function_name: string | null;
+  parameter_name: string | null;
+  data_address: string | null;
+  data_label: string | null;
+}
+
+interface DetectedType {
+  name: string;
+  kind: DetectedTypeKind;
+  category: string;
+  size: number | null;
+  is_opaque: boolean;
+  is_anonymous: boolean;
+  fields: TypeField[];
+  enum_values: EnumValue[];
+  target_type_name: string | null;
+  usages: TypeUsage[];
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -244,6 +281,29 @@ interface ImportView {
       if (!query) return true;
 
       return (entry.name ?? "").toLowerCase().includes(query);
+    });
+  });
+
+  let detectedTypes = $state<DetectedType[] | null>(null);
+  let detectedTypesError = $state("");
+  let isLoadingDetectedTypes = $state(false);
+  let detectedTypesSearch = $state("");
+  let detectedTypesKindFilter = $state<DetectedTypeKind | "all">("all");
+  let expandedDetectedTypeKey = $state<string | null>(null);
+
+  let filteredDetectedTypes = $derived.by(() => {
+    if (!detectedTypes) return [];
+
+    const query = detectedTypesSearch.trim().toLowerCase();
+
+    return detectedTypes.filter((type) => {
+      if (detectedTypesKindFilter !== "all" && type.kind !== detectedTypesKindFilter) {
+        return false;
+      }
+
+      if (!query) return true;
+
+      return type.name.toLowerCase().includes(query);
     });
   });
 
@@ -384,6 +444,30 @@ interface ImportView {
       externalEntryPointsError = String(error);
     } finally {
       isLoadingExternalEntryPoints = false;
+    }
+  }
+
+  $effect(() => {
+    if (!importedExport) {
+      detectedTypes = null;
+      detectedTypesError = "";
+      return;
+    }
+
+    requestDetectedTypes();
+  });
+
+  async function requestDetectedTypes() {
+    isLoadingDetectedTypes = true;
+    detectedTypesError = "";
+
+    try {
+      detectedTypes = await invoke<DetectedType[]>("get_detected_types");
+    } catch (error) {
+      detectedTypes = null;
+      detectedTypesError = String(error);
+    } finally {
+      isLoadingDetectedTypes = false;
     }
   }
 
@@ -944,6 +1028,131 @@ interface ImportView {
                       >
                         Select function
                       </button>
+                    </div>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+      </section>
+
+      <section class="global-strings" aria-labelledby="detected-types-title">
+        <h2 id="detected-types-title">Detected structures/types</h2>
+
+        <p class="global-strings-stats">
+          Structures, unions, enums and typedefs actually used by a function signature or
+          global data, plus the types they themselves reference (struct fields, a typedef's
+          target). A type only reached that second way has no usages listed here -- that
+          relationship is already visible in the referencing type's fields.
+        </p>
+
+        <div class="external-entry-points-controls">
+          <input
+            type="text"
+            class="global-strings-search"
+            placeholder="Filter by name..."
+            bind:value={detectedTypesSearch}
+          />
+
+          <select bind:value={detectedTypesKindFilter}>
+            <option value="all">All kinds</option>
+            <option value="struct">Struct</option>
+            <option value="union">Union</option>
+            <option value="enum">Enum</option>
+            <option value="typedef">Typedef</option>
+          </select>
+        </div>
+
+        {#if isLoadingDetectedTypes}
+          <p>Loading detected types...</p>
+        {:else if detectedTypesError}
+          <p class="error" role="alert">{detectedTypesError}</p>
+        {:else if detectedTypes}
+          <p class="global-strings-stats">
+            {filteredDetectedTypes.length} of {detectedTypes.length} types
+          </p>
+
+          {#if filteredDetectedTypes.length === 0}
+            <p>No type matches this filter.</p>
+          {:else}
+            <ul class="global-strings-list">
+              {#each filteredDetectedTypes as type (type.category + "|" + type.name)}
+                {@const typeKey = type.category + "|" + type.name}
+                <li>
+                  <div class="global-strings-entry-header">
+                    <span class="global-strings-count">{type.kind}</span>
+                    <span class="global-strings-value">{type.name}</span>
+                    {#if type.is_opaque}<em>(opaque)</em>{/if}
+                    {#if type.is_anonymous}<em>(anonymous)</em>{/if}
+                    <span class="global-strings-count">
+                      {type.size === null ? "size unknown" : `${type.size} bytes`}
+                    </span>
+                    <span class="global-strings-count">{type.usages.length} usages</span>
+                    <button
+                      type="button"
+                      class="global-strings-function"
+                      onclick={() => {
+                        expandedDetectedTypeKey =
+                          expandedDetectedTypeKey === typeKey ? null : typeKey;
+                      }}
+                    >
+                      {expandedDetectedTypeKey === typeKey ? "Hide details" : "Show details"}
+                    </button>
+                  </div>
+
+                  {#if expandedDetectedTypeKey === typeKey}
+                    <div class="global-strings-functions">
+                      {#if type.kind === "typedef"}
+                        <p>Alias for <code>{type.target_type_name}</code></p>
+                      {:else if type.kind === "enum"}
+                        <ul>
+                          {#each type.enum_values as enumValue (enumValue.name)}
+                            <li><code>{enumValue.name}</code> = {enumValue.value}</li>
+                          {/each}
+                        </ul>
+                      {:else if type.fields.length > 0}
+                        <ul>
+                          {#each type.fields as field (field.offset + (field.name ?? ""))}
+                            <li>
+                              +{field.offset}
+                              <code>{field.name ?? "(anonymous)"}</code>:
+                              <code>{field.data_type}</code>
+                            </li>
+                          {/each}
+                        </ul>
+                      {:else}
+                        <p>No known fields (opaque).</p>
+                      {/if}
+
+                      {#if type.usages.length > 0}
+                        <p class="global-strings-stats">Usages</p>
+                        <ul>
+                          {#each type.usages as usage, index (index)}
+                            <li>
+                              {#if usage.kind === "global_data"}
+                                global data <code>{usage.data_address}</code>
+                                {usage.data_label ? `(${usage.data_label})` : ""}
+                              {:else}
+                                {usage.kind === "function_parameter"
+                                  ? `parameter "${usage.parameter_name}" of`
+                                  : "return type of"}
+                                <code>{usage.function_name}</code>
+                                <button
+                                  type="button"
+                                  class="global-strings-function"
+                                  disabled={usage.function_address === selectedFunctionAddress}
+                                  onclick={() => {
+                                    selectedFunctionAddress = usage.function_address;
+                                  }}
+                                >
+                                  Select function
+                                </button>
+                              {/if}
+                            </li>
+                          {/each}
+                        </ul>
+                      {/if}
                     </div>
                   {/if}
                 </li>

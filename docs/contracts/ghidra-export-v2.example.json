@@ -27,11 +27,15 @@
                 {
                     "name": "input",
                     "data_type": "char *"
+                },
+                {
+                    "name": "config",
+                    "data_type": "Config *"
                 }
             ],
             "is_external": false,
             "is_thunk": false,
-            "decompiled_code": "int FUN_140001150(char *input) {\n  return strcmp(input, \"secret\");\n}",
+            "decompiled_code": "int FUN_140001150(char *input, Config *config) {\n  return strcmp(input, \"secret\");\n}",
             "calls": [
                 {
                     "target_address": "0x140002000",
@@ -62,6 +66,134 @@
                 {
                     "instruction_address": "0x140001160",
                     "function_address": "0x140001150"
+                }
+            ]
+        }
+    ],
+    "types": [
+        {
+            "name": "Config",
+            "kind": "struct",
+            "category": "/",
+            "size": 16,
+            "is_opaque": false,
+            "is_anonymous": false,
+            "fields": [
+                {
+                    "name": "retries",
+                    "data_type": "int",
+                    "offset": 0
+                },
+                {
+                    "name": "mode",
+                    "data_type": "Mode",
+                    "offset": 4
+                },
+                {
+                    "name": "handle",
+                    "data_type": "Handle *",
+                    "offset": 8
+                }
+            ],
+            "enum_values": [],
+            "target_type_name": null,
+            "usages": [
+                {
+                    "kind": "function_parameter",
+                    "function_address": "0x140001150",
+                    "function_name": "FUN_140001150",
+                    "parameter_name": "config",
+                    "data_address": null,
+                    "data_label": null
+                }
+            ]
+        },
+        {
+            "name": "Mode",
+            "kind": "enum",
+            "category": "/",
+            "size": 4,
+            "is_opaque": false,
+            "is_anonymous": false,
+            "fields": [],
+            "enum_values": [
+                { "name": "Strict", "value": 0 },
+                { "name": "Lenient", "value": 1 }
+            ],
+            "target_type_name": null,
+            "usages": []
+        },
+        {
+            "name": "Handle",
+            "kind": "typedef",
+            "category": "/",
+            "size": 8,
+            "is_opaque": false,
+            "is_anonymous": false,
+            "fields": [],
+            "enum_values": [],
+            "target_type_name": "int",
+            "usages": [
+                {
+                    "kind": "global_data",
+                    "function_address": null,
+                    "function_name": null,
+                    "parameter_name": null,
+                    "data_address": "0x140004000",
+                    "data_label": "g_handle"
+                }
+            ]
+        },
+        {
+            "name": "Logger",
+            "kind": "struct",
+            "category": "/",
+            "size": null,
+            "is_opaque": true,
+            "is_anonymous": false,
+            "fields": [],
+            "enum_values": [],
+            "target_type_name": null,
+            "usages": [
+                {
+                    "kind": "global_data",
+                    "function_address": null,
+                    "function_name": null,
+                    "parameter_name": null,
+                    "data_address": "0x140004010",
+                    "data_label": "g_logger"
+                }
+            ]
+        },
+        {
+            "name": "<unnamed-tag_00000001>",
+            "kind": "union",
+            "category": "/",
+            "size": 8,
+            "is_opaque": false,
+            "is_anonymous": true,
+            "fields": [
+                {
+                    "name": "raw",
+                    "data_type": "int",
+                    "offset": 0
+                },
+                {
+                    "name": "pointer",
+                    "data_type": "void *",
+                    "offset": 0
+                }
+            ],
+            "enum_values": [],
+            "target_type_name": null,
+            "usages": [
+                {
+                    "kind": "global_data",
+                    "function_address": null,
+                    "function_name": null,
+                    "parameter_name": null,
+                    "data_address": "0x140004020",
+                    "data_label": null
                 }
             ]
         }

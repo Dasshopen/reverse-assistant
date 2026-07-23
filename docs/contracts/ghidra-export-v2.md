@@ -29,7 +29,8 @@ cross-reference data at all, since v1 never captured string addresses.
 - Functions are sorted by ascending entry address; strings and external entry points are
   sorted by ascending address.
 - Duplicate function entry addresses are not accepted; duplicate string addresses are not
-  accepted; duplicate external entry point addresses are not accepted.
+  accepted; duplicate external entry point addresses are not accepted; a duplicate
+  `(category, name)` pair across `types` is not accepted.
 
 ## Root object
 
@@ -39,6 +40,7 @@ cross-reference data at all, since v1 never captured string addresses.
 | `program` | object | Yes | Metadata identifying the analyzed program. |
 | `functions` | array | Yes | Functions discovered by Ghidra. May be empty. |
 | `strings` | array | Yes | Every string constant with at least one reference. May be empty. |
+| `types` | array | Yes | Structures, unions, enums and typedefs relevant to the program (see below). May be empty. |
 
 ## Program object
 
@@ -133,6 +135,62 @@ string from more than one instruction (e.g. the same check duplicated across a f
 branches) — this is expected, and is exactly why the count isn't the same thing as the
 number of distinct referencing functions.
 
+## Detected type object
+
+A program's full `DataTypeManager` is mostly noise: compiler/runtime internals (RTTI helpers,
+CRT scaffolding), and library headers pulled in by debug info but never actually touched by
+this particular binary's own code. `types` is not a dump of that whole manager -- it starts
+from every structure, union, enum or typedef directly used by a function's parameter/return
+type or by a defined global data item (a "usage", see below), then recursively includes
+whatever those types themselves reference: a struct's field types, a nested union, a typedef's
+target. A type only reached this second way (e.g. a struct field's type) has an empty
+`usages` -- that relationship is already visible through the referencing type's own
+`fields`/`target_type_name`, so it is not fabricated as a usage in its own right.
+
+Local variables inside a function body are not a source of usages here, by the same
+reasoning `decompiled_code` is on-demand rather than bulk: discovering their types would
+require decompiling every function during export, reintroducing the cost this contract
+already avoids elsewhere.
+
+| Property | Type | Required | Nullable | Description |
+|---|---|---:|---:|---|
+| `name` | string | Yes | No | Type name as known by Ghidra. May be a compiler-generated placeholder (see `is_anonymous`). |
+| `kind` | string | Yes | No | `struct`, `union`, `enum`, or `typedef`. |
+| `category` | string | Yes | No | Ghidra's category path for this type (e.g. `/sqlite3.pdb`), useful for telling program-local types apart from imported archive types. |
+| `size` | integer or null | Yes | Yes | Size in bytes, or `null` when Ghidra has no concrete length for it. |
+| `is_opaque` | boolean | Yes | No | Declared but with no known layout (a forward declaration Ghidra never resolved to a body). `fields`/`enum_values` are empty in this case, not fabricated. |
+| `is_anonymous` | boolean | Yes | No | Ghidra assigned a placeholder name (observed as `<unnamed-tag_...>`/`<unnamed-enum-...>`) because no real symbol name was available -- common for compiler-generated anonymous structs/unions in real debug info. |
+| `fields` | array | Yes | No | Populated for `struct`/`union` kinds; empty otherwise. See Type field object below. |
+| `enum_values` | array | Yes | No | Populated for the `enum` kind; empty otherwise. See Enum value object below. |
+| `target_type_name` | string or null | Yes | Yes | Populated for the `typedef` kind: the immediate aliased type's raw display name (not stripped of pointer/array layers). `null` otherwise. |
+| `usages` | array | Yes | No | Every direct use of this type by a function signature or global data item. May be empty (see above). |
+
+## Type field object
+
+| Property | Type | Required | Nullable | Description |
+|---|---|---:|---:|---|
+| `name` | string or null | Yes | Yes | Field name, or `null` when Ghidra never assigned one (e.g. an anonymous nested union). |
+| `data_type` | string | Yes | No | Raw Ghidra display name of the field's type (may include `*`/`[]`), same convention as a function parameter's `data_type` -- not pre-resolved against another `types` entry. |
+| `offset` | integer | Yes | No | Byte offset of this field within the struct/union. |
+
+## Enum value object
+
+| Property | Type | Required | Description |
+|---|---|---:|---|
+| `name` | string | Yes | Member name. |
+| `value` | integer | Yes | Member's numeric value (signed 64-bit). |
+
+## Type usage object
+
+| Property | Type | Required | Nullable | Description |
+|---|---|---:|---:|---|
+| `kind` | string | Yes | No | `function_parameter`, `function_return`, or `global_data`. |
+| `function_address` | string or null | Yes | Yes | Populated for `function_parameter`/`function_return`; `null` for `global_data`. |
+| `function_name` | string or null | Yes | Yes | Populated for `function_parameter`/`function_return`; `null` for `global_data`. |
+| `parameter_name` | string or null | Yes | Yes | Populated for `function_parameter` only; `null` otherwise. |
+| `data_address` | string or null | Yes | Yes | Populated for `global_data`; `null` for `function_parameter`/`function_return`. |
+| `data_label` | string or null | Yes | Yes | Populated for `global_data` when Ghidra has a label for the address; `null` otherwise (including for the other two kinds). |
+
 ## Decompilation is on-demand
 
 Unchanged from v1 — see [v1's note](ghidra-export-v1.md#decompilation-is-on-demand).
@@ -140,7 +198,8 @@ Unchanged from v1 — see [v1's note](ghidra-export-v1.md#decompilation-is-on-de
 ## Null and empty values
 
 Unchanged from v1 — see [v1's note](ghidra-export-v1.md#null-and-empty-values), with `strings`
-added as a root-level array that follows the same "empty array, not a missing property" rule.
+and `types` added as root-level arrays that follow the same "empty array, not a missing
+property" rule.
 
 ## Data intentionally excluded from version 2
 

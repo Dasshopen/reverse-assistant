@@ -1,5 +1,5 @@
 use reverse_assistant_lib::models::ghidra_export::{
-    Endianness, ExternalEntryPointKind, GhidraExport,
+    DetectedTypeKind, Endianness, ExternalEntryPointKind, GhidraExport, TypeUsageKind,
 };
 
 const V1_EXAMPLE_JSON: &str = include_str!("../../docs/contracts/ghidra-export-v1.example.json");
@@ -52,6 +52,56 @@ fn valid_ghidra_export_v2_deserializes() {
 
     assert_eq!(export.strings.len(), 1);
     assert_eq!(export.strings[0].address, "0x140003000");
+
+    assert_eq!(export.types.len(), 5);
+
+    let config = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "Config")
+        .expect("Config should be present");
+    assert_eq!(config.kind, DetectedTypeKind::Struct);
+    assert_eq!(config.fields.len(), 3);
+    assert_eq!(config.fields[1].data_type, "Mode");
+    assert_eq!(config.usages.len(), 1);
+    assert_eq!(config.usages[0].kind, TypeUsageKind::FunctionParameter);
+    assert_eq!(config.usages[0].parameter_name.as_deref(), Some("config"));
+
+    // Mode is only reachable through Config's `mode` field -- it must not
+    // be fabricated a usage of its own.
+    let mode = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "Mode")
+        .expect("Mode should be present");
+    assert_eq!(mode.kind, DetectedTypeKind::Enum);
+    assert_eq!(mode.enum_values.len(), 2);
+    assert!(mode.usages.is_empty());
+
+    let handle = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "Handle")
+        .expect("Handle should be present");
+    assert_eq!(handle.kind, DetectedTypeKind::Typedef);
+    assert_eq!(handle.target_type_name.as_deref(), Some("int"));
+    assert_eq!(handle.usages[0].kind, TypeUsageKind::GlobalData);
+
+    let logger = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "Logger")
+        .expect("Logger should be present");
+    assert!(logger.is_opaque);
+    assert!(logger.fields.is_empty());
+    assert_eq!(logger.size, None);
+
+    let anonymous_union = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.kind == DetectedTypeKind::Union)
+        .expect("the anonymous union should be present");
+    assert!(anonymous_union.is_anonymous);
 }
 
 #[test]
@@ -74,6 +124,9 @@ fn v1_export_still_imports_with_honest_gaps() {
 
     // v1 never captured thunk targets either.
     assert_eq!(export.functions[0].thunk_target_address, None);
+
+    // v1 never captured type information at all.
+    assert!(export.types.is_empty());
 
     // v1's bare entry_points addresses become honestly-unknown entries,
     // not guessed names/kinds.
@@ -178,6 +231,70 @@ fn real_pe_export_attributes_imports_to_the_real_dll_and_lists_clean_exports() {
         sqlite3_open_thunk.thunk_target_address.as_deref(),
         Some("0x180006890")
     );
+}
+
+#[test]
+fn real_elf_export_detects_the_elf_header_struct_and_its_field_closure() {
+    let export = GhidraExport::parse_and_validate(REAL_ELF_EXPORT_JSON)
+        .expect("a real headless ELF v2 export should be valid");
+
+    let ehdr = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "Elf64_Ehdr")
+        .expect("Elf64_Ehdr should be detected as global data (the ELF header itself)");
+    assert_eq!(ehdr.kind, DetectedTypeKind::Struct);
+    assert_eq!(ehdr.usages[0].kind, TypeUsageKind::GlobalData);
+    assert_eq!(ehdr.usages[0].data_address.as_deref(), Some("0x400000"));
+
+    // Elf64_Dyn has a field of type Elf64_DynTag (an enum) -- the closure
+    // must have pulled that enum in too, with no fabricated usage of its
+    // own since nothing directly uses it as a parameter/return/global.
+    let dyn_struct = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "Elf64_Dyn")
+        .expect("Elf64_Dyn should be present");
+    assert!(dyn_struct
+        .fields
+        .iter()
+        .any(|field| field.data_type == "Elf64_DynTag"));
+
+    let dyn_tag_enum = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "Elf64_DynTag")
+        .expect("Elf64_DynTag should be pulled in transitively via Elf64_Dyn's field");
+    assert_eq!(dyn_tag_enum.kind, DetectedTypeKind::Enum);
+    assert!(!dyn_tag_enum.enum_values.is_empty());
+    assert!(dyn_tag_enum.usages.is_empty());
+}
+
+#[test]
+fn real_pe_export_detects_an_opaque_handle_struct_with_real_usages() {
+    let export = GhidraExport::parse_and_validate(REAL_PE_EXPORT_JSON)
+        .expect("a real headless PE v2 export should be valid");
+
+    // sqlite3_stmt is the classic opaque-handle C API pattern: forward
+    // declared, no known fields, but used as a parameter throughout the
+    // public API.
+    let sqlite3_stmt = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "sqlite3_stmt")
+        .expect("sqlite3_stmt should be detected");
+    assert!(sqlite3_stmt.is_opaque);
+    assert!(sqlite3_stmt.fields.is_empty());
+    assert!(!sqlite3_stmt.usages.is_empty());
+
+    let sqlite3_struct = export
+        .types
+        .iter()
+        .find(|detected_type| detected_type.name == "sqlite3")
+        .expect("sqlite3 should be detected");
+    assert_eq!(sqlite3_struct.kind, DetectedTypeKind::Struct);
+    assert!(!sqlite3_struct.fields.is_empty());
+    assert!(!sqlite3_struct.usages.is_empty());
 }
 
 #[test]
@@ -294,6 +411,41 @@ fn duplicate_external_entry_point_address_is_rejected() {
         .expect_err("duplicate external entry point addresses should be rejected");
 
     assert_eq!(error, "duplicate external entry point address: 0x140001150");
+}
+
+#[test]
+fn duplicate_detected_type_is_rejected() {
+    let mut export = parsed_v2_example();
+    let duplicate = export.types[0].clone();
+    export.types.push(duplicate);
+
+    let error = export
+        .validate()
+        .expect_err("a duplicate (category, name) detected type should be rejected");
+
+    assert_eq!(error, "duplicate detected type: //Config");
+}
+
+#[test]
+fn invalid_type_usage_address_is_rejected() {
+    let mut export = parsed_v2_example();
+    let handle_index = export
+        .types
+        .iter()
+        .position(|detected_type| detected_type.name == "Handle")
+        .expect("Handle should be present in the example");
+    export.types[handle_index].usages[0].data_address = Some(String::from("not-an-address"));
+
+    let error = export
+        .validate()
+        .expect_err("an invalid type usage address should be rejected");
+
+    assert_eq!(
+        error,
+        format!(
+            "types[{handle_index}].usages[0].data_address must be a lowercase hexadecimal string beginning with 0x"
+        )
+    );
 }
 
 #[test]
