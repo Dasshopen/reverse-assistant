@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 use crate::models::ghidra_identification::{parse_identifications, FunctionIdentification};
+use crate::models::ghidra_installation::configure_java_environment;
 use crate::models::ghidra_installation::GhidraInstallation;
 use crate::models::ghidra_session::AnalysisSession;
 use crate::services::ghidra_import::{import_ghidra_export, ImportedGhidraExport};
@@ -167,16 +168,17 @@ pub fn run_headless_analysis(
         &identifications_json,
     );
 
-    let output = Command::new(&invocation.program)
+    let mut command = Command::new(&invocation.program);
+    command
         .args(&invocation.args)
-        .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP)
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to launch Ghidra headless analyzer '{}': {error}",
-                invocation.program.display()
-            )
-        })?;
+        .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);
+    configure_java_environment(&mut command, installation);
+    let output = command.output().map_err(|error| {
+        format!(
+            "failed to launch Ghidra headless analyzer '{}': {error}",
+            invocation.program.display()
+        )
+    })?;
 
     if !output.status.success() {
         return Err(format!(

@@ -11,6 +11,8 @@ const CONFIG_FILE_NAME: &str = "ghidra-installation.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedConfig {
     install_dir: PathBuf,
+    #[serde(default)]
+    java_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -26,7 +28,7 @@ pub enum GhidraInstallationStatus {
     },
 }
 
-fn real_ghidra_config_root(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn ghidra_config_root(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .config_dir()
         .map(|dir| dir.join("ghidra"))
@@ -46,12 +48,16 @@ pub fn validate_installation(
     app: &AppHandle,
     install_dir: &Path,
 ) -> Result<GhidraInstallation, String> {
-    let ghidra_config_root = real_ghidra_config_root(app)?;
+    let ghidra_config_root = ghidra_config_root(app)?;
 
-    validate_ghidra_installation(install_dir, &ghidra_config_root)
+    let mut installation = validate_ghidra_installation(install_dir, &ghidra_config_root)?;
+    installation.java_home = load_persisted_config(app)?
+        .filter(|config| config.install_dir == install_dir)
+        .and_then(|config| config.java_home);
+    Ok(installation)
 }
 
-pub fn load_persisted_install_dir(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+fn load_persisted_config(app: &AppHandle) -> Result<Option<PersistedConfig>, String> {
     let config_path = config_file_path(app)?;
 
     if !config_path.is_file() {
@@ -65,17 +71,27 @@ pub fn load_persisted_install_dir(app: &AppHandle) -> Result<Option<PathBuf>, St
         )
     })?;
 
-    let config: PersistedConfig = serde_json::from_str(&contents).map_err(|error| {
+    serde_json::from_str(&contents).map(Some).map_err(|error| {
         format!(
             "persisted Ghidra installation config is corrupt '{}': {error}",
             config_path.display()
         )
-    })?;
+    })
+}
 
-    Ok(Some(config.install_dir))
+pub fn load_persisted_install_dir(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    Ok(load_persisted_config(app)?.map(|config| config.install_dir))
 }
 
 pub fn persist_install_dir(app: &AppHandle, install_dir: &Path) -> Result<(), String> {
+    persist_installation(app, install_dir, None)
+}
+
+pub fn persist_installation(
+    app: &AppHandle,
+    install_dir: &Path,
+    java_home: Option<&Path>,
+) -> Result<(), String> {
     let config_path = config_file_path(app)?;
 
     if let Some(parent) = config_path.parent() {
@@ -89,6 +105,7 @@ pub fn persist_install_dir(app: &AppHandle, install_dir: &Path) -> Result<(), St
 
     let config = PersistedConfig {
         install_dir: install_dir.to_path_buf(),
+        java_home: java_home.map(Path::to_path_buf),
     };
 
     let json = serde_json::to_string_pretty(&config)

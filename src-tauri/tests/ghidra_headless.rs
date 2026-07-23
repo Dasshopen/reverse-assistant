@@ -8,6 +8,7 @@ fn fake_installation(install_dir: &str, extensions_dir: &str) -> GhidraInstallat
         install_dir: PathBuf::from(install_dir),
         version_label: "ghidra_12.1.2_PUBLIC".to_owned(),
         extensions_dir: PathBuf::from(extensions_dir),
+        java_home: None,
     }
 }
 

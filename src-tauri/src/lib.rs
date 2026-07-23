@@ -22,6 +22,7 @@ use services::imports_exports::{self, ImportView};
 use services::program_overview::{self, ProgramOverview};
 use services::project_storage::{self, ProjectSummary};
 use services::report::{self, PdfReportResult};
+use services::setup::{self, SetupInstallPlan, SetupOverview};
 
 #[derive(Debug, Clone, Serialize)]
 struct AutomaticAnalysisResult {
@@ -126,6 +127,34 @@ fn configure_ghidra_installation(
 #[tauri::command]
 fn get_ghidra_installation_status(app: AppHandle) -> Result<GhidraInstallationStatus, String> {
     ghidra_installation::current_installation_status(&app)
+}
+
+#[tauri::command]
+fn get_setup_overview(app: AppHandle) -> Result<SetupOverview, String> {
+    setup::inspect_setup(&app)
+}
+
+#[tauri::command]
+fn get_managed_setup_plan(app: AppHandle) -> Result<SetupInstallPlan, String> {
+    setup::managed_install_plan(&app)
+}
+
+#[tauri::command(async)]
+fn install_managed_setup(
+    app: AppHandle,
+    coordinator: tauri::State<'_, DecompileCoordinator>,
+    licenses_accepted: bool,
+) -> Result<SetupOverview, String> {
+    coordinator.run_exclusive(|| setup::install_managed_setup(&app, licenses_accepted))
+}
+
+#[tauri::command(async)]
+fn adopt_existing_ghidra(
+    app: AppHandle,
+    coordinator: tauri::State<'_, DecompileCoordinator>,
+    install_dir: String,
+) -> Result<SetupOverview, String> {
+    coordinator.run_exclusive(|| setup::adopt_existing_ghidra(&app, Path::new(&install_dir)))
 }
 
 #[tauri::command(async)]
@@ -427,6 +456,10 @@ pub fn run() {
             import_ghidra_export_details,
             configure_ghidra_installation,
             get_ghidra_installation_status,
+            get_setup_overview,
+            get_managed_setup_plan,
+            install_managed_setup,
+            adopt_existing_ghidra,
             analyze_binary_with_ghidra,
             decompile_function,
             get_call_graph,

@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::ghidra_installation::GhidraInstallation;
+use crate::models::ghidra_installation::{configure_java_environment, GhidraInstallation};
 use crate::models::ghidra_session::AnalysisSession;
 use crate::services::ghidra_headless::{tail, HEADLESS_MAX_HEAP};
 use crate::services::ghidra_import::{import_ghidra_export, ImportedGhidraExport};
@@ -182,16 +182,17 @@ pub fn run_apply_renames(
             &result_path,
             &refreshed_export_path,
         );
-        let output = Command::new(&invocation.program)
+        let mut command = Command::new(&invocation.program);
+        command
             .args(&invocation.args)
-            .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "failed to launch Ghidra function rename process '{}': {error}",
-                    invocation.program.display()
-                )
-            })?;
+            .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);
+        configure_java_environment(&mut command, installation);
+        let output = command.output().map_err(|error| {
+            format!(
+                "failed to launch Ghidra function rename process '{}': {error}",
+                invocation.program.display()
+            )
+        })?;
 
         if !output.status.success() || !result_path.is_file() || !refreshed_export_path.is_file() {
             return Err(format!(
@@ -241,6 +242,7 @@ mod tests {
             install_dir: PathBuf::from("C:/Tools/Ghidra"),
             version_label: "ghidra_12.1.2_PUBLIC".to_owned(),
             extensions_dir: PathBuf::from("C:/Users/test/Extensions/ReverseAssistantExporter"),
+            java_home: None,
         }
     }
 

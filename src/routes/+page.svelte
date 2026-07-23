@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open, save } from "@tauri-apps/plugin-dialog";
+  import SetupAssistant from "$lib/SetupAssistant.svelte";
 
   interface GhidraImportSummary {
     function_count: number;
@@ -350,6 +351,29 @@ interface ApplyRenamesResult {
 
   let analysisSource = $state<"none" | "automatic" | "manual">("none");
   let activeProjectId = $state<string | null>(null);
+  type WorkspaceView =
+    | "overview"
+    | "functions"
+    | "strings"
+    | "imports"
+    | "types"
+    | "graph"
+    | "projects"
+    | "comparison"
+    | "reports"
+    | "settings";
+  let activeWorkspaceView = $state<WorkspaceView>("overview");
+
+  const primaryViews: { id: WorkspaceView; label: string; icon: string }[] = [
+    { id: "overview", label: "Aperçu", icon: "⌂" },
+    { id: "functions", label: "Fonctions", icon: "ƒ" },
+    { id: "strings", label: "Chaînes", icon: "\"" },
+    { id: "types", label: "Structures", icon: "◇" },
+    { id: "imports", label: "Imports / Exports", icon: "⇄" },
+    { id: "graph", label: "Graphes", icon: "⌘" },
+    { id: "comparison", label: "Comparaison", icon: "≋" },
+    { id: "reports", label: "Rapports", icon: "▤" },
+  ];
 
   let savedProjects = $state<ProjectSummary[] | null>(null);
   let savedProjectsError = $state("");
@@ -597,6 +621,7 @@ interface ApplyRenamesResult {
       // project is unreachable this time -- behaves like a manual import.
       analysisSource = loaded.project.session_available ? "automatic" : "manual";
       activeProjectId = loaded.project.id;
+      activeWorkspaceView = "overview";
     } catch (error) {
       projectActionError = String(error);
     }
@@ -997,6 +1022,12 @@ interface ApplyRenamesResult {
     functionRenameSuccess = "";
   }
 
+  function openFunction(entryAddress: string | null) {
+    if (!entryAddress) return;
+    selectedFunctionAddress = entryAddress;
+    activeWorkspaceView = "functions";
+  }
+
   async function checkBackendStatus() {
     backendStatus = await invoke<string>("get_backend_status");
   }
@@ -1034,12 +1065,8 @@ interface ApplyRenamesResult {
     isConfiguringGhidra = true;
 
     try {
-      const installation = await invoke<GhidraInstallation>(
-        "configure_ghidra_installation",
-        { installDir },
-      );
-
-      ghidraInstallationStatus = { status: "valid", installation };
+      await invoke("adopt_existing_ghidra", { installDir });
+      await loadGhidraInstallationStatus();
     } catch (error) {
       ghidraConfigError = String(error);
     } finally {
@@ -1090,6 +1117,7 @@ interface ApplyRenamesResult {
         result.imported.export.functions[0]?.entry_address ?? null;
       analysisSource = "automatic";
       activeProjectId = result.saved_project?.id ?? null;
+      activeWorkspaceView = "overview";
       identifications = new Map(
         result.identifications.map((identification) => [
           identification.entry_address,
@@ -1162,6 +1190,7 @@ interface ApplyRenamesResult {
         imported.export.functions[0]?.entry_address ?? null;
       analysisSource = "manual";
       activeProjectId = null;
+      activeWorkspaceView = "overview";
       requestProjectList();
       } catch (error) {
       importError = String(error);
@@ -1179,8 +1208,93 @@ interface ApplyRenamesResult {
   />
 </svelte:head>
 
-<main class="container">
-  <section class="panel">
+<main class="app-shell">
+  <SetupAssistant onready={loadGhidraInstallationStatus} />
+  <aside class="app-sidebar">
+    <div class="brand">
+      <span class="brand-mark">RA</span>
+      <span>Reverse Assistant</span>
+      <small>BETA</small>
+    </div>
+
+    <button type="button" class="new-analysis" onclick={selectAndAnalyzeBinary} disabled={isAnalyzing}>
+      <span>+</span>{isAnalyzing ? "Analyse en cours" : "Nouvelle analyse"}
+    </button>
+
+    <nav class="sidebar-nav" aria-label="Navigation principale">
+      <button
+        type="button"
+        class:active={activeWorkspaceView === "projects"}
+        onclick={() => (activeWorkspaceView = "projects")}
+      ><span>▣</span>Projets</button>
+      <button
+        type="button"
+        class:active={activeWorkspaceView === "comparison"}
+        onclick={() => (activeWorkspaceView = "comparison")}
+      ><span>≋</span>Comparaisons</button>
+      <button
+        type="button"
+        class:active={activeWorkspaceView === "reports"}
+        onclick={() => (activeWorkspaceView = "reports")}
+      ><span>▤</span>Rapports</button>
+      <button
+        type="button"
+        class:active={activeWorkspaceView === "settings"}
+        onclick={() => (activeWorkspaceView = "settings")}
+      ><span>⚙</span>Paramètres</button>
+    </nav>
+
+    <div class="sidebar-status">
+      <span class:ready={ghidraInstallationStatus?.status === "valid"}></span>
+      <div>
+        <strong>Environnement local</strong>
+        <small>{ghidraInstallationStatus?.status === "valid" ? "Prêt" : "À configurer"}</small>
+      </div>
+    </div>
+  </aside>
+
+  <section class="workspace">
+    <header class="workspace-header">
+      <div>
+        <p>{activeProjectId ? "ANALYSE LOCALE" : "ESPACE DE TRAVAIL"}</p>
+        <h1>{importedExport?.program.name ?? "Reverse Assistant"}</h1>
+        {#if importedExport}
+          <span>
+            {importedExport.program.format} · {importedExport.program.architecture} ·
+            {importedExport.functions.length.toLocaleString()} fonctions
+          </span>
+        {:else}
+          <span>Sélectionne un projet ou analyse un nouveau binaire.</span>
+        {/if}
+      </div>
+      <div class="header-actions">
+        <button type="button" class="secondary-button" onclick={selectAndAnalyzeBinary} disabled={isAnalyzing}>
+          {isAnalyzing ? "Analyse en cours..." : "Importer un binaire"}
+        </button>
+        <button
+          type="button"
+          disabled={!importedExport || isExportingPdfReport}
+          onclick={exportPdfReport}
+        >
+          {isExportingPdfReport ? "Export..." : "Rapport PDF"}
+        </button>
+      </div>
+    </header>
+
+    {#if importedExport}
+      <nav class="workspace-tabs" aria-label="Navigation de l’analyse">
+        {#each primaryViews as view (view.id)}
+          <button
+            type="button"
+            class:active={activeWorkspaceView === view.id}
+            onclick={() => (activeWorkspaceView = view.id)}
+          ><span>{view.icon}</span>{view.label}</button>
+        {/each}
+      </nav>
+    {/if}
+
+    <div class="workspace-scroll">
+      <section class="panel">
     <p class="phase">Phase 7 — Ghidra Headless automation</p>
 
     <h1>Reverse Assistant</h1>
@@ -1189,7 +1303,35 @@ interface ApplyRenamesResult {
       Analyze a binary directly, or import an existing Ghidra JSON export.
     </p>
 
-    <section class="saved-projects" aria-labelledby="saved-projects-title">
+    {#if !importedExport && activeWorkspaceView === "overview"}
+      <section class="empty-workspace">
+        <span aria-hidden="true">⌁</span>
+        <p>NOUVELLE ANALYSE</p>
+        <h2>Commence avec un binaire</h2>
+        <p>
+          L’analyse reste sur cette machine. Ghidra, les signatures et le corpus BSim sont
+          utilisés localement.
+        </p>
+        <button type="button" onclick={selectAndAnalyzeBinary} disabled={isAnalyzing}>
+          {isAnalyzing ? "Analyse en cours..." : "Choisir un binaire"}
+        </button>
+      </section>
+    {/if}
+
+    {#if !importedExport && activeWorkspaceView === "reports"}
+      <section class="empty-workspace compact">
+        <span aria-hidden="true">▤</span>
+        <h2>Aucun rapport disponible</h2>
+        <p>Ouvre une analyse existante ou importe un binaire avant de générer un rapport.</p>
+      </section>
+    {/if}
+
+    <section
+      class="saved-projects"
+      class:view-hidden={activeWorkspaceView !== "projects" && activeWorkspaceView !== "comparison"}
+      class:comparison-mode={activeWorkspaceView === "comparison"}
+      aria-labelledby="saved-projects-title"
+    >
       <h2 id="saved-projects-title">Saved projects (local)</h2>
 
       <p class="saved-projects-note">
@@ -1294,7 +1436,11 @@ interface ApplyRenamesResult {
       {/if}
 
       {#if savedProjects && savedProjects.length >= 2}
-        <section class="project-comparison" aria-labelledby="project-comparison-title">
+        <section
+          class="project-comparison"
+          class:view-hidden={activeWorkspaceView !== "comparison"}
+          aria-labelledby="project-comparison-title"
+        >
           <h3 id="project-comparison-title">Compare two saved projects</h3>
           <p class="saved-projects-note">
             This first comparison matches unique, meaningful symbols. Automatic Ghidra names
@@ -1476,10 +1622,20 @@ interface ApplyRenamesResult {
             </div>
           {/if}
         </section>
+      {:else if activeWorkspaceView === "comparison"}
+        <div class="comparison-empty empty-workspace compact">
+          <span aria-hidden="true">≋</span>
+          <h2>Deux projets sont nécessaires</h2>
+          <p>Analyse ou importe un second binaire pour activer la comparaison locale.</p>
+        </div>
       {/if}
     </section>
 
-    <section class="ghidra-setup" aria-labelledby="ghidra-setup-title">
+    <section
+      class="ghidra-setup"
+      class:view-hidden={activeWorkspaceView !== "settings"}
+      aria-labelledby="ghidra-setup-title"
+    >
       <h2 id="ghidra-setup-title">Ghidra installation</h2>
 
       {#if ghidraInstallationStatus?.status === "valid"}
@@ -1528,10 +1684,13 @@ interface ApplyRenamesResult {
       {/if}
     </section>
 
-    <h2 class="manual-import-title">Manual JSON import (debug)</h2>
+    <h2 class="manual-import-title" class:view-hidden={activeWorkspaceView !== "settings"}>
+      Manual JSON import (debug)
+    </h2>
 
     <form
       class="import-form"
+      class:view-hidden={activeWorkspaceView !== "settings"}
       onsubmit={(event) => {
         event.preventDefault();
         importGhidraExport();
@@ -1559,11 +1718,17 @@ interface ApplyRenamesResult {
     </form>
 
     {#if importError}
-      <p class="error" role="alert">{importError}</p>
+      <p class="error" class:view-hidden={activeWorkspaceView !== "settings"} role="alert">
+        {importError}
+      </p>
     {/if}
 
     {#if importSummary}
-      <section class="summary" aria-labelledby="summary-title">
+      <section
+        class="summary"
+        class:view-hidden={activeWorkspaceView !== "overview"}
+        aria-labelledby="summary-title"
+      >
         <h2 id="summary-title">Import summary</h2>
 
         <dl class="summary-grid">
@@ -1591,7 +1756,11 @@ interface ApplyRenamesResult {
     {/if}
 
     {#if importedExport}
-      <section class="summary" aria-labelledby="program-overview-title">
+      <section
+        class="summary"
+        class:view-hidden={activeWorkspaceView !== "overview" && activeWorkspaceView !== "reports"}
+        aria-labelledby="program-overview-title"
+      >
         <h2 id="program-overview-title">Overview</h2>
 
         <div class="report-export-controls">
@@ -1682,7 +1851,11 @@ interface ApplyRenamesResult {
         {/if}
       </section>
 
-      <section class="global-strings" aria-labelledby="global-strings-title">
+      <section
+        class="global-strings"
+        class:view-hidden={activeWorkspaceView !== "strings"}
+        aria-labelledby="global-strings-title"
+      >
         <h2 id="global-strings-title">Strings (global)</h2>
 
         <input
@@ -1722,10 +1895,7 @@ interface ApplyRenamesResult {
                         <button
                           type="button"
                           class="global-strings-function"
-                          disabled={fn.entry_address === selectedFunctionAddress}
-                          onclick={() => {
-                            selectedFunctionAddress = fn.entry_address;
-                          }}
+                          onclick={() => openFunction(fn.entry_address)}
                         >
                           {fn.name}
                         </button>
@@ -1741,7 +1911,11 @@ interface ApplyRenamesResult {
     {/if}
 
     {#if importedExport}
-      <section class="global-strings" aria-labelledby="imports-title">
+      <section
+        class="global-strings"
+        class:view-hidden={activeWorkspaceView !== "imports"}
+        aria-labelledby="imports-title"
+      >
         <h2 id="imports-title">Imports (global)</h2>
 
         <input
@@ -1782,10 +1956,7 @@ interface ApplyRenamesResult {
                     <button
                       type="button"
                       class="global-strings-function"
-                      disabled={entry.entry_address === selectedFunctionAddress}
-                      onclick={() => {
-                        selectedFunctionAddress = entry.entry_address;
-                      }}
+                      onclick={() => openFunction(entry.entry_address)}
                     >
                       Select function
                     </button>
@@ -1799,7 +1970,11 @@ interface ApplyRenamesResult {
     {/if}
 
     {#if importedExport}
-      <section class="global-strings" aria-labelledby="external-entry-points-title">
+      <section
+        class="global-strings"
+        class:view-hidden={activeWorkspaceView !== "imports"}
+        aria-labelledby="external-entry-points-title"
+      >
         <h2 id="external-entry-points-title">External entry points (exports)</h2>
 
         <p class="global-strings-stats">
@@ -1847,10 +2022,7 @@ interface ApplyRenamesResult {
                       <button
                         type="button"
                         class="global-strings-function"
-                        disabled={entry.address === selectedFunctionAddress}
-                        onclick={() => {
-                          selectedFunctionAddress = entry.address;
-                        }}
+                        onclick={() => openFunction(entry.address)}
                       >
                         Select function
                       </button>
@@ -1863,7 +2035,11 @@ interface ApplyRenamesResult {
         {/if}
       </section>
 
-      <section class="global-strings" aria-labelledby="detected-types-title">
+      <section
+        class="global-strings"
+        class:view-hidden={activeWorkspaceView !== "types"}
+        aria-labelledby="detected-types-title"
+      >
         <h2 id="detected-types-title">Detected structures/types</h2>
 
         <p class="global-strings-stats">
@@ -1967,10 +2143,7 @@ interface ApplyRenamesResult {
                                 <button
                                   type="button"
                                   class="global-strings-function"
-                                  disabled={usage.function_address === selectedFunctionAddress}
-                                  onclick={() => {
-                                    selectedFunctionAddress = usage.function_address;
-                                  }}
+                                  onclick={() => openFunction(usage.function_address)}
                                 >
                                   Select function
                                 </button>
@@ -1990,7 +2163,11 @@ interface ApplyRenamesResult {
     {/if}
 
     {#if importedExport}
-      <section class="function-explorer" aria-labelledby="functions-title">
+      <section
+        class="function-explorer"
+        class:view-hidden={activeWorkspaceView !== "functions" && activeWorkspaceView !== "graph"}
+        aria-labelledby="functions-title"
+      >
         <h2 id="functions-title">Functions</h2>
 
         {#if importedExport.functions.length === 0}
@@ -2003,9 +2180,7 @@ interface ApplyRenamesResult {
                   type="button"
                   class:active={func.entry_address === selectedFunctionAddress}
                   aria-pressed={func.entry_address === selectedFunctionAddress}
-                  onclick={() => {
-                    selectedFunctionAddress = func.entry_address;
-                  }}
+                  onclick={() => openFunction(func.entry_address)}
                 >
                   <span>{func.name}</span>
                   <code>{func.entry_address}</code>
@@ -2211,9 +2386,7 @@ interface ApplyRenamesResult {
                             type="button"
                             class="call-graph-node"
                             disabled={node.entry_address === selectedFunctionAddress}
-                            onclick={() => {
-                              selectedFunctionAddress = node.entry_address;
-                            }}
+                            onclick={() => openFunction(node.entry_address)}
                           >
                             <span>
                               {node.name}
@@ -2302,7 +2475,7 @@ interface ApplyRenamesResult {
 </section>
 {/if}
 
-    <div class="backend-check">
+    <div class="backend-check" class:view-hidden={activeWorkspaceView !== "settings"}>
       <button type="button" class="secondary-button" onclick={checkBackendStatus}>
         Check Rust backend
       </button>
@@ -2310,6 +2483,8 @@ interface ApplyRenamesResult {
       {#if backendStatus}
         <p class="status">{backendStatus}</p>
       {/if}
+        </div>
+      </section>
     </div>
   </section>
 </main>
@@ -2326,12 +2501,6 @@ interface ApplyRenamesResult {
   button,
   input {
     font: inherit;
-  }
-
-  .container {
-    min-height: 100vh;
-    box-sizing: border-box;
-    padding: 3rem 1.5rem;
   }
 
   .panel {
@@ -3215,6 +3384,364 @@ interface ApplyRenamesResult {
 
     .function-metadata {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  .view-hidden {
+    display: none !important;
+  }
+
+  .app-shell {
+    display: grid;
+    grid-template-columns: 224px minmax(0, 1fr);
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+    background: #07101e;
+  }
+
+  .app-sidebar {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    padding: 1rem 0.8rem;
+    border-right: 1px solid #1f2b40;
+    background: #080f1c;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-height: 2.5rem;
+    padding: 0 0.35rem;
+    font-weight: 800;
+  }
+
+  .brand-mark {
+    display: grid;
+    width: 1.9rem;
+    height: 1.9rem;
+    place-items: center;
+    border: 1px solid #7c3aed;
+    border-radius: 7px;
+    background: linear-gradient(135deg, #6d28d9, #312e81);
+    font-size: 0.68rem;
+  }
+
+  .brand small {
+    padding: 0.12rem 0.35rem;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    color: #8fa0bb;
+    font-size: 0.55rem;
+  }
+
+  .new-analysis {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    margin-top: 1.25rem;
+    padding: 0.68rem 0.8rem;
+    background: #6d28d9;
+    color: white;
+  }
+
+  .sidebar-nav {
+    display: grid;
+    gap: 0.25rem;
+    margin-top: 1.25rem;
+  }
+
+  .sidebar-nav button {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.7rem;
+    padding: 0.62rem 0.7rem;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #93a3bd;
+    font-size: 0.86rem;
+    font-weight: 600;
+    text-align: left;
+  }
+
+  .sidebar-nav button:hover:not(:disabled),
+  .sidebar-nav button.active {
+    border-color: #2d3a52;
+    background: #121c2e;
+    color: #f3f6fb;
+  }
+
+  .sidebar-nav button.active {
+    box-shadow: inset 3px 0 #7c3aed;
+  }
+
+  .sidebar-nav button span {
+    width: 1rem;
+    color: #a78bfa;
+    text-align: center;
+  }
+
+  .sidebar-status {
+    display: flex;
+    gap: 0.65rem;
+    align-items: center;
+    margin-top: auto;
+    padding: 0.8rem;
+    border: 1px solid #26334a;
+    border-radius: 10px;
+    background: #0d1626;
+  }
+
+  .sidebar-status > span {
+    width: 0.55rem;
+    height: 0.55rem;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: #f59e0b;
+  }
+
+  .sidebar-status > span.ready {
+    background: #10b981;
+    box-shadow: 0 0 10px rgb(16 185 129 / 55%);
+  }
+
+  .sidebar-status div {
+    display: grid;
+    gap: 0.15rem;
+  }
+
+  .sidebar-status strong {
+    color: #dbe5f5;
+    font-size: 0.75rem;
+  }
+
+  .sidebar-status small {
+    color: #8292ad;
+    font-size: 0.68rem;
+  }
+
+  .workspace {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    background: radial-gradient(circle at 75% -20%, rgb(76 29 149 / 13%), transparent 35%), #0a1322;
+  }
+
+  .workspace-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding: 1rem 1.4rem 0.85rem;
+    border-bottom: 1px solid #1e2b40;
+  }
+
+  .workspace-header p {
+    margin: 0 0 0.25rem;
+    color: #7f8faa;
+    font-size: 0.65rem;
+    font-weight: 800;
+    letter-spacing: 0.13em;
+  }
+
+  .workspace-header h1 {
+    margin: 0;
+    font-size: clamp(1.25rem, 2.5vw, 1.8rem);
+  }
+
+  .workspace-header > div:first-child > span {
+    display: block;
+    margin-top: 0.35rem;
+    color: #8292ad;
+    font-size: 0.78rem;
+  }
+
+  .header-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.55rem;
+  }
+
+  .header-actions button {
+    padding: 0.55rem 0.8rem;
+    font-size: 0.78rem;
+  }
+
+  .workspace-tabs {
+    display: flex;
+    gap: 0.15rem;
+    min-width: 0;
+    padding: 0.55rem 1.25rem 0;
+    border-bottom: 1px solid #1e2b40;
+    overflow-x: auto;
+  }
+
+  .workspace-tabs button {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: 0 0 auto;
+    padding: 0.62rem 0.72rem;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 7px 7px 0 0;
+    background: transparent;
+    color: #8292ad;
+    font-size: 0.76rem;
+    font-weight: 650;
+  }
+
+  .workspace-tabs button:hover:not(:disabled),
+  .workspace-tabs button.active {
+    border-bottom-color: #8b5cf6;
+    background: rgb(124 58 237 / 9%);
+    color: #f4f1ff;
+  }
+
+  .workspace-tabs button span {
+    color: #a78bfa;
+  }
+
+  .workspace-scroll {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .workspace-scroll > .panel {
+    width: 100%;
+    max-width: none;
+    min-height: 100%;
+    margin: 0;
+    padding: 1.25rem 1.4rem 3rem;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .workspace-scroll > .panel > .phase,
+  .workspace-scroll > .panel > h1,
+  .workspace-scroll > .panel > .description {
+    display: none;
+  }
+
+  .saved-projects,
+  .ghidra-setup,
+  .summary,
+  .global-strings,
+  .function-explorer {
+    margin-top: 0;
+  }
+
+  .saved-projects.comparison-mode > :not(.project-comparison):not(.comparison-empty) {
+    display: none;
+  }
+
+  .empty-workspace {
+    display: grid;
+    width: min(620px, 100%);
+    justify-items: center;
+    margin: clamp(3rem, 10vh, 7rem) auto 0;
+    padding: 2.5rem;
+    box-sizing: border-box;
+    border: 1px solid #26344d;
+    border-radius: 16px;
+    background: linear-gradient(145deg, rgb(17 27 46 / 90%), rgb(10 19 34 / 75%));
+    text-align: center;
+  }
+
+  .empty-workspace > span {
+    display: grid;
+    width: 3.5rem;
+    height: 3.5rem;
+    place-items: center;
+    border: 1px solid #6d28d9;
+    border-radius: 14px;
+    background: rgb(109 40 217 / 15%);
+    color: #a78bfa;
+    font-size: 1.6rem;
+  }
+
+  .empty-workspace > p:first-of-type {
+    margin: 1rem 0 0.3rem;
+    color: #8b5cf6;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+  }
+
+  .empty-workspace h2 {
+    margin: 0.25rem 0;
+  }
+
+  .empty-workspace p {
+    max-width: 480px;
+    color: #91a1ba;
+    line-height: 1.55;
+  }
+
+  .empty-workspace button {
+    margin-top: 0.6rem;
+  }
+
+  .empty-workspace.compact {
+    margin-top: 3rem;
+  }
+
+  @media (max-width: 1050px) {
+    .app-shell {
+      grid-template-columns: 76px minmax(0, 1fr);
+    }
+
+    .brand {
+      justify-content: center;
+      padding: 0;
+    }
+
+    .brand > span:not(.brand-mark),
+    .brand small,
+    .new-analysis:not(:disabled),
+    .sidebar-nav button:not(.active) {
+      font-size: 0;
+    }
+
+    .new-analysis span,
+    .sidebar-nav button span {
+      width: auto;
+      font-size: 1rem;
+    }
+
+    .sidebar-nav button,
+    .new-analysis {
+      justify-content: center;
+    }
+
+    .sidebar-status div {
+      display: none;
+    }
+
+    .sidebar-status {
+      justify-content: center;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .workspace-header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .header-actions {
+      width: 100%;
+    }
+
+    .header-actions button {
+      flex: 1 1 0;
     }
   }
 

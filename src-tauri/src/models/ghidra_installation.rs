@@ -1,4 +1,6 @@
+use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +18,24 @@ pub struct GhidraInstallation {
     pub install_dir: PathBuf,
     pub version_label: String,
     pub extensions_dir: PathBuf,
+    #[serde(default)]
+    pub java_home: Option<PathBuf>,
+}
+
+pub fn configure_java_environment(command: &mut Command, installation: &GhidraInstallation) {
+    let Some(java_home) = installation.java_home.as_ref() else {
+        return;
+    };
+
+    command.env("JAVA_HOME", java_home);
+    let java_bin = java_home.join("bin");
+    let mut paths = vec![java_bin];
+    if let Some(existing) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&existing));
+    }
+    if let Ok(joined) = env::join_paths(paths) {
+        command.env("PATH", joined);
+    }
 }
 
 pub fn derive_version_label(install_dir: &Path) -> Result<String, String> {
@@ -141,6 +161,7 @@ pub fn validate_ghidra_installation(
         install_dir: install_dir.to_path_buf(),
         version_label,
         extensions_dir,
+        java_home: None,
     })
 }
 

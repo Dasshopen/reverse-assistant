@@ -11,3 +11,4 @@ pub mod imports_exports;
 pub mod program_overview;
 pub mod project_storage;
 pub mod report;
+pub mod setup;

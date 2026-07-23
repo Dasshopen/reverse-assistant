@@ -13,8 +13,10 @@
     "windows": [
       {
         "title": "Reverse Assistant",
-        "width": 800,
-        "height": 600
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700
       }
     ],
     "security": {
@@ -24,6 +26,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../ghidra-extension/ReverseAssistantExporter/build.gradle": "managed/extension-source/build.gradle",
+      "../ghidra-extension/ReverseAssistantExporter/extension.properties": "managed/extension-source/extension.properties",
+      "../ghidra-extension/ReverseAssistantExporter/Module.manifest": "managed/extension-source/Module.manifest",
+      "../ghidra-extension/ReverseAssistantExporter/src": "managed/extension-source/src",
+      "../ghidra-extension/ReverseAssistantExporter/ghidra_scripts": "managed/extension-source/ghidra_scripts"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

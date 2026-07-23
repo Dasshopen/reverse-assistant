@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::models::ghidra_export::{is_valid_address, FunctionParameter};
-use crate::models::ghidra_installation::GhidraInstallation;
+use crate::models::ghidra_installation::{configure_java_environment, GhidraInstallation};
 use crate::models::ghidra_session::AnalysisSession;
 use crate::services::bsim_corpus::{database_url, locate_available_corpus};
 use crate::services::ghidra_headless::{tail, HEADLESS_MAX_HEAP};
@@ -182,16 +182,17 @@ pub fn run_decompile_function(
         bsim_database_url.as_deref(),
     );
 
-    let output = Command::new(&invocation.program)
+    let mut command = Command::new(&invocation.program);
+    command
         .args(&invocation.args)
-        .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP)
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to launch Ghidra headless analyzer '{}': {error}",
-                invocation.program.display()
-            )
-        })?;
+        .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);
+    configure_java_environment(&mut command, installation);
+    let output = command.output().map_err(|error| {
+        format!(
+            "failed to launch Ghidra headless analyzer '{}': {error}",
+            invocation.program.display()
+        )
+    })?;
 
     if !output.status.success() {
         return Err(format!(
@@ -315,6 +316,7 @@ mod tests {
             install_dir: PathBuf::from("Z:/this-ghidra-installation-does-not-exist"),
             version_label: "ghidra_12.1.2_PUBLIC".to_owned(),
             extensions_dir: PathBuf::from("Z:/this-extension-does-not-exist"),
+            java_home: None,
         };
         let session = AnalysisSession {
             project_dir: project_dir.clone(),
