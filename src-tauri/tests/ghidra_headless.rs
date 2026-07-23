@@ -42,14 +42,16 @@ fn builds_the_expected_argument_order_and_values() {
         vec![
             project_dir.to_string_lossy().into_owned(),
             "sample".to_owned(),
-            "-import".to_owned(),
-            binary_path.to_string_lossy().into_owned(),
             "-scriptPath".to_owned(),
             installation
                 .extensions_dir
                 .join("ghidra_scripts")
                 .to_string_lossy()
                 .into_owned(),
+            "-preScript".to_owned(),
+            "DisableSlowAnalyzers.java".to_owned(),
+            "-import".to_owned(),
+            binary_path.to_string_lossy().into_owned(),
             "-postScript".to_owned(),
             "ExportReverseAssistantJson.java".to_owned(),
             destination_json.to_string_lossy().into_owned(),
@@ -87,10 +89,10 @@ fn handles_paths_containing_spaces_as_separate_arguments() {
     );
 
     assert_eq!(
-        invocation.args[3],
+        invocation.args[7],
         binary_path.to_string_lossy().into_owned(),
         "the binary path must be passed as a single argument, not split on spaces"
     );
 
-    assert_eq!(invocation.args.len(), 9);
+    assert_eq!(invocation.args.len(), 11);
 }

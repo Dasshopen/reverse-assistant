@@ -8,11 +8,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 
-import ghidra.program.model.data.DataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
-import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Instruction;
@@ -134,40 +132,14 @@ public final class FunctionMetadataCollector {
         return new FunctionMetadata(
             formatAddress(function),
             function.getName(),
-            formatDataType(function.getReturnType()),
-            collectParameters(function),
+            FunctionDecompiler.formatDataType(function.getReturnType()),
+            FunctionDecompiler.extractParameters(function),
             function.isExternal(),
             function.isThunk(),
             null,
             collectCalls(function),
             collectStrings(program, function)
         );
-    }
-
-    private static List<FunctionParameterMetadata>
-        collectParameters(Function function) {
-
-        Parameter[] parameters = function.getParameters();
-
-        List<FunctionParameterMetadata> collectedParameters =
-            new ArrayList<>(parameters.length);
-
-        for (Parameter parameter : parameters) {
-            String parameterName = parameter.getName();
-
-            if (parameterName == null) {
-                parameterName = "";
-            }
-
-            collectedParameters.add(
-                new FunctionParameterMetadata(
-                    parameterName,
-                    formatDataType(parameter.getDataType())
-                )
-            );
-        }
-
-        return List.copyOf(collectedParameters);
     }
 
     private static List<FunctionCallMetadata> collectCalls(
@@ -244,14 +216,6 @@ public final class FunctionMetadataCollector {
         }
 
         return List.copyOf(strings);
-    }
-
-    private static String formatDataType(DataType dataType) {
-        if (dataType == null) {
-            return "unknown";
-        }
-
-        return dataType.getDisplayName();
     }
 
     private static String formatAddress(Function function) {

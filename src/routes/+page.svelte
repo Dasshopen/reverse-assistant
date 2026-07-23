@@ -64,6 +64,13 @@ type GhidraInstallationStatus =
   | { status: "invalid"; install_dir: string; reason: string }
   | { status: "valid"; installation: GhidraInstallation };
 
+interface DecompiledFunctionDetails {
+  decompiled_code: string | null;
+  return_type: string;
+  parameters: FunctionParameter[];
+  calling_convention: string;
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -86,7 +93,7 @@ type GhidraInstallationStatus =
   let isAnalyzing = $state(false);
 
   let analysisSource = $state<"none" | "automatic" | "manual">("none");
-  let decompileCache = $state(new Map<string, string | null>());
+  let decompileCache = $state(new Map<string, DecompiledFunctionDetails>());
   let pendingDecompiles = $state(new Set<string>());
   let decompileError = $state("");
 
@@ -101,8 +108,24 @@ type GhidraInstallationStatus =
     if (selectedFunction.decompiled_code !== null) {
       return selectedFunction.decompiled_code;
     }
-    return decompileCache.get(selectedFunction.entry_address) ?? null;
+    return decompileCache.get(selectedFunction.entry_address)?.decompiled_code ?? null;
   });
+
+  let enrichedDetails = $derived(
+    selectedFunction && analysisSource === "automatic"
+      ? decompileCache.get(selectedFunction.entry_address)
+      : undefined,
+  );
+
+  let displayedReturnType = $derived(
+    enrichedDetails?.return_type ?? selectedFunction?.return_type ?? "",
+  );
+
+  let displayedParameters = $derived(
+    enrichedDetails?.parameters ?? selectedFunction?.parameters ?? [],
+  );
+
+  let displayedCallingConvention = $derived(enrichedDetails?.calling_convention ?? null);
 
   $effect(() => {
     loadGhidraInstallationStatus();
@@ -127,11 +150,12 @@ type GhidraInstallationStatus =
     decompileError = "";
 
     try {
-      const code = await invoke<string | null>("decompile_function", {
-        entryAddress,
-      });
+      const details = await invoke<DecompiledFunctionDetails>(
+        "decompile_function",
+        { entryAddress },
+      );
 
-      decompileCache.set(entryAddress, code);
+      decompileCache.set(entryAddress, details);
     } catch (error) {
       decompileError = String(error);
     } finally {
@@ -482,12 +506,12 @@ type GhidraInstallationStatus =
             <dl class="function-metadata">
               <div>
                 <dt>Return type</dt>
-                <dd><code>{selectedFunction.return_type}</code></dd>
+                <dd><code>{displayedReturnType}</code></dd>
               </div>
 
               <div>
                 <dt>Parameters</dt>
-                <dd>{selectedFunction.parameters.length}</dd>
+                <dd>{displayedParameters.length}</dd>
               </div>
 
               <div>
@@ -499,16 +523,23 @@ type GhidraInstallationStatus =
                 <dt>Strings</dt>
                 <dd>{selectedFunction.strings.length}</dd>
               </div>
+
+              {#if displayedCallingConvention}
+                <div>
+                  <dt>Calling convention</dt>
+                  <dd><code>{displayedCallingConvention}</code></dd>
+                </div>
+              {/if}
             </dl>
 
             <section class="function-section">
             <h4>Parameters</h4>
 
-              {#if selectedFunction.parameters.length === 0}
+              {#if displayedParameters.length === 0}
                 <p>No parameters were identified.</p>
               {:else}
                 <ul>
-                  {#each selectedFunction.parameters as parameter}
+                  {#each displayedParameters as parameter}
                     <li>
                     <code>{parameter.data_type}</code>
                       <span>{parameter.name}</span>

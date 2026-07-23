@@ -21,6 +21,14 @@ public final class DecompileFunctionService {
         fileWriter = new AtomicUtf8FileWriter();
     }
 
+    // Scoping "Decompiler Parameter ID" to a single function (or even that
+    // function plus its direct callers) was tried and measured: it reports
+    // success but recovers zero parameters, because register-parameter
+    // identification needs whole-program call-site context that a bounded
+    // scope can't provide. Parameters/return type/calling convention below
+    // therefore reflect the function's existing signature as-is; pseudocode
+    // stays available and generally readable, but variables the analyzer
+    // would have bound to parameters may appear as raw registers (e.g. in_RCX).
     public void decompileAndWrite(
         Program program,
         Address entryAddress,
@@ -48,7 +56,16 @@ public final class DecompileFunctionService {
             String decompiledCode =
                 FunctionDecompiler.decompile(function, decompiler, monitor);
 
-            fileWriter.write(destination, jsonWriter.write(decompiledCode));
+            String callingConvention = function.getCallingConventionName();
+
+            DecompiledFunctionDetails details = new DecompiledFunctionDetails(
+                decompiledCode,
+                FunctionDecompiler.formatDataType(function.getReturnType()),
+                FunctionDecompiler.extractParameters(function),
+                callingConvention == null ? "unknown" : callingConvention
+            );
+
+            fileWriter.write(destination, jsonWriter.write(details));
         }
         finally {
             decompiler.dispose();

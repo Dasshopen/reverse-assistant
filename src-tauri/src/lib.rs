@@ -6,7 +6,7 @@ use tauri::AppHandle;
 
 use models::ghidra_installation::GhidraInstallation;
 use models::ghidra_session::AnalysisSession;
-use services::ghidra_decompile;
+use services::ghidra_decompile::{self, DecompiledFunctionDetails};
 use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
 use services::ghidra_installation::{self, GhidraInstallationStatus};
@@ -64,7 +64,7 @@ fn decompile_function(
     app: AppHandle,
     session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
     entry_address: String,
-) -> Result<Option<String>, String> {
+) -> Result<DecompiledFunctionDetails, String> {
     let session = session_state
         .lock()
         .map_err(|_| "the analysis session lock was poisoned".to_owned())?

@@ -72,6 +72,11 @@ fn install_extension(setup: &FakeGhidraSetup, version_label: &str) {
         &extensions_dir.join("ghidra_scripts/DecompileFunctionJson.java"),
         "// fake script\n",
     );
+
+    write_file(
+        &extensions_dir.join("ghidra_scripts/DisableSlowAnalyzers.java"),
+        "// fake script\n",
+    );
 }
 
 #[test]
@@ -203,6 +208,40 @@ fn missing_decompile_script_is_rejected() {
 
     assert!(
         error.contains("on-demand decompile script is missing"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn missing_disable_slow_analyzers_script_is_rejected() {
+    let setup = build_fake_installation("missing-disable-analyzers-script", "ghidra_12.1.2_PUBLIC");
+
+    let extensions_dir = setup
+        .config_root
+        .join("ghidra_12.1.2_PUBLIC")
+        .join("Extensions")
+        .join("ReverseAssistantExporter");
+
+    write_file(
+        &extensions_dir.join("lib/ReverseAssistantExporter.jar"),
+        "fake-jar-bytes",
+    );
+
+    write_file(
+        &extensions_dir.join("ghidra_scripts/ExportReverseAssistantJson.java"),
+        "// fake script\n",
+    );
+
+    write_file(
+        &extensions_dir.join("ghidra_scripts/DecompileFunctionJson.java"),
+        "// fake script\n",
+    );
+
+    let error = validate_ghidra_installation(&setup.install_dir, &setup.config_root)
+        .expect_err("a missing analyzer-tuning script should be rejected");
+
+    assert!(
+        error.contains("analyzer-tuning script is missing"),
         "unexpected error: {error}"
     );
 }

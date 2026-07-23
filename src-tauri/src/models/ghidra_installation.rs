@@ -7,6 +7,7 @@ const EXTENSION_NAME: &str = "ReverseAssistantExporter";
 const EXTENSION_JAR_NAME: &str = "ReverseAssistantExporter.jar";
 const HEADLESS_SCRIPT_NAME: &str = "ExportReverseAssistantJson.java";
 const DECOMPILE_SCRIPT_NAME: &str = "DecompileFunctionJson.java";
+const DISABLE_SLOW_ANALYZERS_SCRIPT_NAME: &str = "DisableSlowAnalyzers.java";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GhidraInstallation {
@@ -94,6 +95,18 @@ pub fn validate_ghidra_installation(
         return Err(format!(
             "the Reverse Assistant on-demand decompile script is missing (expected {}); run scripts/deploy-ghidra-extension.ps1 -GhidraInstallDir '{}'",
             decompile_script.display(),
+            install_dir.display()
+        ));
+    }
+
+    let disable_slow_analyzers_script = extensions_dir
+        .join("ghidra_scripts")
+        .join(DISABLE_SLOW_ANALYZERS_SCRIPT_NAME);
+
+    if !disable_slow_analyzers_script.is_file() {
+        return Err(format!(
+            "the Reverse Assistant analyzer-tuning script is missing (expected {}); run scripts/deploy-ghidra-extension.ps1 -GhidraInstallDir '{}'",
+            disable_slow_analyzers_script.display(),
             install_dir.display()
         ));
     }

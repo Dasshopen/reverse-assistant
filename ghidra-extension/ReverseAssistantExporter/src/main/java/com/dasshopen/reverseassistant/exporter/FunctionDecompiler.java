@@ -1,10 +1,15 @@
 package com.dasshopen.reverseassistant.exporter;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
+import ghidra.program.model.data.DataType;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -62,8 +67,7 @@ public final class FunctionDecompiler {
 
         monitor.checkCancelled();
 
-        if (results == null ||
-            !results.decompileCompleted()) {
+        if (results == null || !results.decompileCompleted()) {
             return null;
         }
 
@@ -81,5 +85,35 @@ public final class FunctionDecompiler {
         }
 
         return code;
+    }
+
+    public static List<FunctionParameterMetadata> extractParameters(
+        Function function
+    ) {
+        Parameter[] parameters = function.getParameters();
+
+        List<FunctionParameterMetadata> collectedParameters =
+            new ArrayList<>(parameters.length);
+
+        for (Parameter parameter : parameters) {
+            String parameterName = parameter.getName();
+
+            collectedParameters.add(
+                new FunctionParameterMetadata(
+                    parameterName == null ? "" : parameterName,
+                    formatDataType(parameter.getDataType())
+                )
+            );
+        }
+
+        return List.copyOf(collectedParameters);
+    }
+
+    public static String formatDataType(DataType dataType) {
+        if (dataType == null) {
+            return "unknown";
+        }
+
+        return dataType.getDisplayName();
     }
 }

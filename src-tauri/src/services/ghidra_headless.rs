@@ -11,6 +11,7 @@ use crate::services::ghidra_import::{import_ghidra_export, ImportedGhidraExport}
 use crate::services::ghidra_installation::{load_persisted_install_dir, validate_installation};
 
 const HEADLESS_SCRIPT_NAME: &str = "ExportReverseAssistantJson.java";
+const DISABLE_SLOW_ANALYZERS_SCRIPT_NAME: &str = "DisableSlowAnalyzers.java";
 const STDERR_TAIL_BYTES: usize = 4000;
 
 // analyzeHeadless.bat defaults to a 2G JVM heap (MAXMEM_DEFAULT in the script),
@@ -41,10 +42,12 @@ pub fn build_headless_analysis_args(
     let args = vec![
         project_dir.to_string_lossy().into_owned(),
         project_name.to_owned(),
-        "-import".to_owned(),
-        binary_path.to_string_lossy().into_owned(),
         "-scriptPath".to_owned(),
         scripts_dir.to_string_lossy().into_owned(),
+        "-preScript".to_owned(),
+        DISABLE_SLOW_ANALYZERS_SCRIPT_NAME.to_owned(),
+        "-import".to_owned(),
+        binary_path.to_string_lossy().into_owned(),
         "-postScript".to_owned(),
         HEADLESS_SCRIPT_NAME.to_owned(),
         destination_json.to_string_lossy().into_owned(),

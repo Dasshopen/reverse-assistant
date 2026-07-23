@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::models::ghidra_export::is_valid_address;
+use crate::models::ghidra_export::{is_valid_address, FunctionParameter};
 use crate::models::ghidra_installation::GhidraInstallation;
 use crate::models::ghidra_session::AnalysisSession;
 use crate::services::ghidra_headless::{tail, HEADLESS_MAX_HEAP};
@@ -52,9 +52,20 @@ pub fn build_decompile_function_args(
     DecompileFunctionInvocation { program, args }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DecompiledFunctionDetails {
+    pub decompiled_code: Option<String>,
+    pub return_type: String,
+    pub parameters: Vec<FunctionParameter>,
+    pub calling_convention: String,
+}
+
 #[derive(Deserialize)]
 struct DecompileResultJson {
     decompiled_code: Option<String>,
+    return_type: String,
+    parameters: Vec<FunctionParameter>,
+    calling_convention: String,
 }
 
 fn validate_entry_address(entry_address: &str) -> Result<(), String> {
@@ -71,7 +82,7 @@ pub fn run_decompile_function(
     installation: &GhidraInstallation,
     session: &AnalysisSession,
     entry_address: &str,
-) -> Result<Option<String>, String> {
+) -> Result<DecompiledFunctionDetails, String> {
     validate_entry_address(entry_address)?;
 
     let cache_dir = session.project_dir.join("decompile-cache");
@@ -133,14 +144,19 @@ pub fn run_decompile_function(
     let parsed: DecompileResultJson = serde_json::from_str(&json)
         .map_err(|error| format!("invalid decompile result JSON from Ghidra: {error}"))?;
 
-    Ok(parsed.decompiled_code)
+    Ok(DecompiledFunctionDetails {
+        decompiled_code: parsed.decompiled_code,
+        return_type: parsed.return_type,
+        parameters: parsed.parameters,
+        calling_convention: parsed.calling_convention,
+    })
 }
 
 pub fn decompile_function(
     app: &AppHandle,
     session: &AnalysisSession,
     entry_address: &str,
-) -> Result<Option<String>, String> {
+) -> Result<DecompiledFunctionDetails, String> {
     let install_dir = load_persisted_install_dir(app)?.ok_or_else(|| {
         "No Ghidra installation is configured. Configure one before decompiling a function."
             .to_owned()
