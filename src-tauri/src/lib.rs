@@ -5,9 +5,11 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::AppHandle;
 
+use models::ghidra_export::GhidraExport;
 use models::ghidra_identification::FunctionIdentification;
 use models::ghidra_installation::GhidraInstallation;
 use models::ghidra_session::AnalysisSession;
+use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
 use services::ghidra_decompile::{self, DecompiledFunctionDetails};
 use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
@@ -42,15 +44,36 @@ fn get_backend_status() -> String {
 }
 
 #[tauri::command]
-fn import_ghidra_export_summary(path: String) -> Result<GhidraImportSummary, String> {
+fn import_ghidra_export_summary(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    path: String,
+) -> Result<GhidraImportSummary, String> {
     let imported = import_ghidra_export(Path::new(&path))?;
+    store_export(&export_state, imported.export.clone())?;
 
     Ok(imported.summary)
 }
 
 #[tauri::command]
-fn import_ghidra_export_details(path: String) -> Result<ImportedGhidraExport, String> {
-    import_ghidra_export(Path::new(&path))
+fn import_ghidra_export_details(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    path: String,
+) -> Result<ImportedGhidraExport, String> {
+    let imported = import_ghidra_export(Path::new(&path))?;
+    store_export(&export_state, imported.export.clone())?;
+
+    Ok(imported)
+}
+
+fn store_export(
+    export_state: &tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    export: GhidraExport,
+) -> Result<(), String> {
+    *export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())? = Some(export);
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -70,6 +93,7 @@ fn get_ghidra_installation_status(app: AppHandle) -> Result<GhidraInstallationSt
 fn analyze_binary_with_ghidra(
     app: AppHandle,
     session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
     binary_path: String,
 ) -> Result<AutomaticAnalysisResult, String> {
     let (imported, identifications, session) =
@@ -79,10 +103,31 @@ fn analyze_binary_with_ghidra(
         .lock()
         .map_err(|_| "the analysis session lock was poisoned".to_owned())? = Some(session);
 
+    store_export(&export_state, imported.export.clone())?;
+
     Ok(AutomaticAnalysisResult {
         imported,
         identifications,
     })
+}
+
+#[tauri::command]
+fn get_call_graph(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    entry_address: String,
+    direction: CallGraphDirection,
+    max_depth: u32,
+) -> Result<CallGraphNeighborhood, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+
+    let export = export.as_ref().ok_or_else(|| {
+        "No analysis is loaded. Analyze or import a binary before requesting its call graph."
+            .to_owned()
+    })?;
+
+    call_graph::compute_neighborhood(export, &entry_address, direction, max_depth)
 }
 
 #[tauri::command(async)]
@@ -112,6 +157,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(None::<AnalysisSession>))
+        .manage(Mutex::new(None::<GhidraExport>))
         .manage(DecompileCoordinator::default())
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
@@ -120,7 +166,8 @@ pub fn run() {
             configure_ghidra_installation,
             get_ghidra_installation_status,
             analyze_binary_with_ghidra,
-            decompile_function
+            decompile_function,
+            get_call_graph
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

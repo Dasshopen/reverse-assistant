@@ -99,6 +99,30 @@ interface FunctionIdentification {
   candidates: FidCandidate[];
 }
 
+type CallGraphDirection = "outgoing" | "incoming" | "both";
+
+interface CallGraphNode {
+  entry_address: string;
+  name: string;
+  is_external: boolean;
+  is_thunk: boolean;
+  depth: number;
+}
+
+interface CallGraphEdge {
+  from: string;
+  to: string;
+}
+
+interface CallGraphNeighborhood {
+  root_address: string;
+  direction: CallGraphDirection;
+  requested_max_depth: number;
+  depth_reached: number;
+  nodes: CallGraphNode[];
+  edges: CallGraphEdge[];
+}
+
 interface AutomaticAnalysisResult {
   imported: ImportedGhidraExport;
   identifications: FunctionIdentification[];
@@ -136,6 +160,31 @@ interface AutomaticAnalysisResult {
       ? (identifications.get(selectedFunctionAddress) ?? [])
       : [],
   );
+
+  let callGraphDirection = $state<CallGraphDirection>("outgoing");
+  let callGraphDepth = $state(3);
+  let callGraphResult = $state<CallGraphNeighborhood | null>(null);
+  let callGraphError = $state("");
+  let isLoadingCallGraph = $state(false);
+  let callGraphRequestSeq = 0;
+
+  let callGraphNodesByDepth = $derived.by(() => {
+    if (!callGraphResult) return [];
+
+    const groups: { depth: number; nodes: CallGraphNode[] }[] = [];
+
+    for (const node of callGraphResult.nodes) {
+      const currentGroup = groups.at(-1);
+
+      if (currentGroup && currentGroup.depth === node.depth) {
+        currentGroup.nodes.push(node);
+      } else {
+        groups.push({ depth: node.depth, nodes: [node] });
+      }
+    }
+
+    return groups;
+  });
 
   let isDecompilingSelected = $derived(
     selectedFunctionAddress !== null &&
@@ -191,6 +240,51 @@ interface AutomaticAnalysisResult {
 
     requestDecompiledCode(func.entry_address);
   });
+
+  $effect(() => {
+    const address = selectedFunctionAddress;
+    const direction = callGraphDirection;
+    const depth = callGraphDepth;
+
+    if (!address || analysisSource === "none") {
+      callGraphResult = null;
+      callGraphError = "";
+      return;
+    }
+
+    requestCallGraph(address, direction, depth);
+  });
+
+  async function requestCallGraph(
+    entryAddress: string,
+    direction: CallGraphDirection,
+    maxDepth: number,
+  ) {
+    const requestId = ++callGraphRequestSeq;
+    isLoadingCallGraph = true;
+    callGraphError = "";
+
+    try {
+      const result = await invoke<CallGraphNeighborhood>("get_call_graph", {
+        entryAddress,
+        direction,
+        maxDepth,
+      });
+
+      if (requestId === callGraphRequestSeq) {
+        callGraphResult = result;
+      }
+    } catch (error) {
+      if (requestId === callGraphRequestSeq) {
+        callGraphResult = null;
+        callGraphError = String(error);
+      }
+    } finally {
+      if (requestId === callGraphRequestSeq) {
+        isLoadingCallGraph = false;
+      }
+    }
+  }
 
   async function requestDecompiledCode(entryAddress: string) {
     pendingDecompiles = new Set(pendingDecompiles).add(entryAddress);
@@ -647,6 +741,72 @@ interface AutomaticAnalysisResult {
             {/if}
 
             <section class="function-section">
+              <h4>Graphe d'appels</h4>
+
+              <div class="call-graph-controls">
+                <label>
+                  Direction
+                  <select bind:value={callGraphDirection}>
+                    <option value="outgoing">Appels sortants</option>
+                    <option value="incoming">Appels entrants</option>
+                    <option value="both">Les deux</option>
+                  </select>
+                </label>
+
+                <label>
+                  Profondeur
+                  <input
+                    type="number"
+                    min="1"
+                    max="5"
+                    bind:value={callGraphDepth}
+                  />
+                </label>
+              </div>
+
+              {#if isLoadingCallGraph}
+                <p>Chargement du graphe d'appels...</p>
+              {:else if callGraphError}
+                <p class="error" role="alert">{callGraphError}</p>
+              {:else if callGraphResult}
+                <p class="call-graph-stats">
+                  {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
+                  profondeur atteinte {callGraphResult.depth_reached}
+                </p>
+
+                {#each callGraphNodesByDepth as group (group.depth)}
+                  <div class="call-graph-depth-group">
+                    <p class="detail-label">
+                      {group.depth === 0 ? "Fonction sélectionnée" : `Niveau ${group.depth}`}
+                    </p>
+
+                    <ul class="call-graph-node-list">
+                      {#each group.nodes as node (node.entry_address)}
+                        <li>
+                          <button
+                            type="button"
+                            class="call-graph-node"
+                            disabled={node.entry_address === selectedFunctionAddress}
+                            onclick={() => {
+                              selectedFunctionAddress = node.entry_address;
+                            }}
+                          >
+                            <span>
+                              {node.name}
+                              {#if node.is_external}<em>(externe)</em>{/if}
+                              {#if node.is_thunk}<em>(thunk)</em>{/if}
+                            </span>
+                            <code>{node.entry_address}</code>
+                          </button>
+                        </li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/each}
+              {/if}
+            </section>
+
+            <section class="function-section">
             <h4>Parameters</h4>
 
               {#if displayedParameters.length === 0}
@@ -1081,6 +1241,91 @@ interface AutomaticAnalysisResult {
 
   .function-section .bsim-error {
     color: #fca5a5;
+  }
+
+  .call-graph-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .call-graph-controls label {
+    display: grid;
+    gap: 0.35rem;
+    color: #94a3b8;
+    font-size: 0.85rem;
+    font-weight: 400;
+  }
+
+  .call-graph-controls select,
+  .call-graph-controls input {
+    padding: 0.5rem 0.65rem;
+    border: 1px solid #475569;
+    border-radius: 0.5rem;
+    background-color: #0f172a;
+    color: #f8fafc;
+  }
+
+  .call-graph-stats {
+    margin: 0 0 0.75rem;
+    color: #94a3b8;
+    font-size: 0.85rem;
+  }
+
+  .call-graph-depth-group {
+    margin-bottom: 1rem;
+  }
+
+  .call-graph-depth-group:last-child {
+    margin-bottom: 0;
+  }
+
+  .call-graph-node-list {
+    display: grid;
+    margin: 0.35rem 0 0;
+    padding: 0;
+    gap: 0.5rem;
+    list-style: none;
+  }
+
+  .call-graph-node-list li {
+    display: contents;
+  }
+
+  .call-graph-node {
+    display: flex;
+    width: 100%;
+    box-sizing: border-box;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.65rem;
+    border: 1px solid #374151;
+    border-radius: 0.5rem;
+    background-color: #1f2937;
+    color: #f9fafb;
+    text-align: left;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+
+  .call-graph-node:hover:not(:disabled) {
+    border-color: #60a5fa;
+    background-color: #273449;
+  }
+
+  .call-graph-node:disabled {
+    border-color: #3b82f6;
+    background-color: #1e3a5f;
+    cursor: default;
+    opacity: 1;
+  }
+
+  .call-graph-node em {
+    margin-left: 0.35rem;
+    color: #94a3b8;
+    font-style: normal;
   }
 
   .function-section li span em {
