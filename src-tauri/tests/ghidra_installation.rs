@@ -74,6 +74,11 @@ fn install_extension(setup: &FakeGhidraSetup, version_label: &str) {
     );
 
     write_file(
+        &extensions_dir.join("ghidra_scripts/ApplyFunctionRenamesJson.java"),
+        "// fake script\n",
+    );
+
+    write_file(
         &extensions_dir.join("ghidra_scripts/DisableSlowAnalyzers.java"),
         "// fake script\n",
     );
@@ -101,6 +106,20 @@ fn valid_installation_with_extension_installed_is_accepted() {
             .join("Extensions")
             .join("ReverseAssistantExporter")
     );
+}
+
+#[test]
+fn missing_apply_renames_script_is_rejected() {
+    let setup = build_fake_installation("missing-apply-renames", "ghidra_12.1.2_PUBLIC");
+    install_extension(&setup, "ghidra_12.1.2_PUBLIC");
+    let script = setup
+        .config_root
+        .join("ghidra_12.1.2_PUBLIC/Extensions/ReverseAssistantExporter/ghidra_scripts/ApplyFunctionRenamesJson.java");
+    fs::remove_file(script).expect("the fake rename script should be removable");
+
+    let error = validate_ghidra_installation(&setup.install_dir, &setup.config_root)
+        .expect_err("a missing rename script should be rejected");
+    assert!(error.contains("function-rename script is missing"));
 }
 
 #[test]

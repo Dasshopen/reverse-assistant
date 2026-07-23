@@ -13,6 +13,7 @@ use models::project::ProjectMetadata;
 use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
 use services::comparison::{self, ProjectComparison};
 use services::ghidra_decompile::{self, DecompiledFunctionDetails};
+use services::ghidra_edits::{self, ApplyRenamesResult, FunctionRename};
 use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
 use services::ghidra_installation::{self, GhidraInstallationStatus};
@@ -20,11 +21,13 @@ use services::global_strings::{self, GlobalStringView};
 use services::imports_exports::{self, ImportView};
 use services::program_overview::{self, ProgramOverview};
 use services::project_storage::{self, ProjectSummary};
+use services::report::{self, PdfReportResult};
 
 #[derive(Debug, Clone, Serialize)]
 struct AutomaticAnalysisResult {
     imported: ImportedGhidraExport,
     identifications: Vec<FunctionIdentification>,
+    saved_project: Option<ProjectMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,9 +40,17 @@ struct LoadedProject {
 // fail the analysis/import the user is actively waiting on -- the data is
 // still fully usable for the rest of this session either way, it just
 // won't be reloadable in a future one.
-fn auto_save_project(app: &AppHandle, export: &GhidraExport, session: Option<AnalysisSession>) {
-    if let Err(error) = project_storage::save_project(app, &export.program.name, export, session) {
-        eprintln!("failed to save this analysis as a local project: {error}");
+fn auto_save_project(
+    app: &AppHandle,
+    export: &GhidraExport,
+    session: Option<AnalysisSession>,
+) -> Option<ProjectMetadata> {
+    match project_storage::save_project(app, &export.program.name, export, session) {
+        Ok(project) => Some(project),
+        Err(error) => {
+            eprintln!("failed to save this analysis as a local project: {error}");
+            None
+        }
     }
 }
 
@@ -75,7 +86,7 @@ fn import_ghidra_export_summary(
     store_export(&export_state, imported.export.clone())?;
     // A manual JSON import has no live Ghidra project behind it -- it can
     // only ever be a snapshot project.
-    auto_save_project(&app, &imported.export, None);
+    let _ = auto_save_project(&app, &imported.export, None);
 
     Ok(imported.summary)
 }
@@ -88,7 +99,7 @@ fn import_ghidra_export_details(
 ) -> Result<ImportedGhidraExport, String> {
     let imported = import_ghidra_export(Path::new(&path))?;
     store_export(&export_state, imported.export.clone())?;
-    auto_save_project(&app, &imported.export, None);
+    let _ = auto_save_project(&app, &imported.export, None);
 
     Ok(imported)
 }
@@ -132,11 +143,12 @@ fn analyze_binary_with_ghidra(
         .map_err(|_| "the analysis session lock was poisoned".to_owned())? = Some(session.clone());
 
     store_export(&export_state, imported.export.clone())?;
-    auto_save_project(&app, &imported.export, Some(session));
+    let saved_project = auto_save_project(&app, &imported.export, Some(session));
 
     Ok(AutomaticAnalysisResult {
         imported,
         identifications,
+        saved_project,
     })
 }
 
@@ -240,6 +252,21 @@ fn get_program_overview(
 }
 
 #[tauri::command]
+fn export_pdf_report(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    destination_path: String,
+) -> Result<PdfReportResult, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+    let export = export.as_ref().ok_or_else(|| {
+        "No analysis is loaded. Analyze or open a project before exporting a report.".to_owned()
+    })?;
+
+    report::export_pdf(export, Path::new(&destination_path))
+}
+
+#[tauri::command]
 fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
     project_storage::list_projects(&app)
 }
@@ -299,6 +326,46 @@ fn compare_projects(
     let (project_b, _) = project_storage::load_project(&app, &project_b_id)?;
 
     Ok(comparison::compare_projects(&project_a, &project_b))
+}
+
+#[tauri::command(async)]
+fn apply_function_renames(
+    app: AppHandle,
+    session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    decompile_coordinator: tauri::State<'_, DecompileCoordinator>,
+    project_id: String,
+    renames: Vec<FunctionRename>,
+) -> Result<ApplyRenamesResult, String> {
+    let session = session_state
+        .lock()
+        .map_err(|_| "the analysis session lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "A live Ghidra project must be open before applying renames.".to_owned())?;
+
+    project_storage::require_managed_session(&app, &session)?;
+    let (_, saved_project) = project_storage::load_project(&app, &project_id)?;
+    if !saved_project.session_available || saved_project.metadata.session.as_ref() != Some(&session)
+    {
+        return Err(
+            "The selected saved project does not match the active Ghidra session.".to_owned(),
+        );
+    }
+
+    let install_dir = ghidra_installation::load_persisted_install_dir(&app)?
+        .ok_or_else(|| "No Ghidra installation is configured.".to_owned())?;
+    let installation = ghidra_installation::validate_installation(&app, &install_dir)?;
+
+    let result = decompile_coordinator
+        .run_exclusive(|| ghidra_edits::run_apply_renames(&installation, &session, &renames))?;
+
+    // The Java transaction exported the updated program before committing,
+    // so the in-memory explorer and the durable local snapshot now advance
+    // together with the Ghidra project.
+    store_export(&export_state, result.imported.export.clone())?;
+    project_storage::replace_project_export(&app, &project_id, &result.imported.export)?;
+
+    Ok(result)
 }
 
 #[tauri::command(async)]
@@ -368,11 +435,13 @@ pub fn run() {
             get_external_entry_points,
             get_detected_types,
             get_program_overview,
+            export_pdf_report,
             list_projects,
             open_project,
             delete_project,
             rename_project,
-            compare_projects
+            compare_projects,
+            apply_function_renames
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

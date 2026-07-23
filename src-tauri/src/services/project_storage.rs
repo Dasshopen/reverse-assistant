@@ -82,6 +82,28 @@ pub fn rename_project(
     rename_project_at(&real_projects_root_dir(app)?, id, new_name)
 }
 
+pub fn replace_project_export(
+    app: &AppHandle,
+    id: &str,
+    export: &GhidraExport,
+) -> Result<(), String> {
+    replace_project_export_at(&real_projects_root_dir(app)?, id, export)
+}
+
+fn replace_project_export_at(root: &Path, id: &str, export: &GhidraExport) -> Result<(), String> {
+    require_safe_project_id(id)?;
+    let dir = project_dir_at(root, id);
+    if !dir.is_dir() {
+        return Err(format!("no saved project exists with id '{id}'"));
+    }
+    export.validate()?;
+    write_export(&dir, export)
+}
+
+pub fn require_managed_session(app: &AppHandle, session: &AnalysisSession) -> Result<(), String> {
+    require_managed_ghidra_project_dir(&session.project_dir, &ghidra_analysis_root_dir(app)?)
+}
+
 fn sanitize_name_for_id(name: &str) -> String {
     let sanitized: String = name
         .chars()
@@ -492,6 +514,23 @@ mod tests {
         assert!(!loaded_summary.session_available);
 
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn replacing_a_project_export_is_durable() {
+        let root = isolated_root("replace-export");
+        let original = sample_export("before.exe");
+        let saved = save_project_at(&root, "Editable", &original, None)
+            .expect("the original project should save");
+
+        let updated = sample_export("after.exe");
+        replace_project_export_at(&root, &saved.id, &updated)
+            .expect("the updated export should replace the snapshot");
+        let (loaded, _) =
+            load_project_at(&root, &saved.id).expect("the updated snapshot should remain readable");
+        assert_eq!(loaded, updated);
+
+        fs::remove_dir_all(root).expect("the isolated test directory should be removed");
     }
 
     #[test]

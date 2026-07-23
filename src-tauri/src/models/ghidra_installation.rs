@@ -7,6 +7,7 @@ const EXTENSION_NAME: &str = "ReverseAssistantExporter";
 const EXTENSION_JAR_NAME: &str = "ReverseAssistantExporter.jar";
 const HEADLESS_SCRIPT_NAME: &str = "ExportReverseAssistantJson.java";
 const DECOMPILE_SCRIPT_NAME: &str = "DecompileFunctionJson.java";
+const APPLY_RENAMES_SCRIPT_NAME: &str = "ApplyFunctionRenamesJson.java";
 const DISABLE_SLOW_ANALYZERS_SCRIPT_NAME: &str = "DisableSlowAnalyzers.java";
 const IDENTIFY_FUNCTIONS_SCRIPT_NAME: &str = "IdentifyFunctionsJson.java";
 
@@ -120,6 +121,18 @@ pub fn validate_ghidra_installation(
         return Err(format!(
             "the Reverse Assistant FunctionID identification script is missing (expected {}); run scripts/deploy-ghidra-extension.ps1 -GhidraInstallDir '{}'",
             identify_functions_script.display(),
+            install_dir.display()
+        ));
+    }
+
+    let apply_renames_script = extensions_dir
+        .join("ghidra_scripts")
+        .join(APPLY_RENAMES_SCRIPT_NAME);
+
+    if !apply_renames_script.is_file() {
+        return Err(format!(
+            "the Reverse Assistant function-rename script is missing (expected {}); run scripts/deploy-ghidra-extension.ps1 -GhidraInstallDir '{}'",
+            apply_renames_script.display(),
             install_dir.display()
         ));
     }

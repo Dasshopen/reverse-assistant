@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
 
   interface GhidraImportSummary {
     function_count: number;
@@ -174,6 +174,7 @@ interface CallGraphNeighborhood {
 interface AutomaticAnalysisResult {
   imported: ImportedGhidraExport;
   identifications: FunctionIdentification[];
+  saved_project: ProjectMetadata | null;
 }
 
 interface ReferencingFunction {
@@ -307,6 +308,25 @@ interface ProjectComparison {
   unmatched_b: UnmatchedFunction[];
 }
 
+interface PdfReportResult {
+  path: string;
+  page_count: number;
+  function_count_included: number;
+  string_count_included: number;
+  type_count_included: number;
+}
+
+interface AppliedFunctionRename {
+  entry_address: string;
+  old_name: string;
+  new_name: string;
+}
+
+interface ApplyRenamesResult {
+  applied: AppliedFunctionRename[];
+  imported: ImportedGhidraExport;
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -359,6 +379,11 @@ interface ProjectComparison {
   let pendingDecompiles = $state(new Set<string>());
   let decompileErrors = $state(new Map<string, string>());
   let identifications = $state(new Map<string, FidCandidate[]>());
+  let functionRenameDraft = $state("");
+  let isApplyingFunctionRename = $state(false);
+  let functionRenameError = $state("");
+  let functionRenameSuccess = $state("");
+  let renameDraftAddress: string | null = null;
 
   let selectedIdentificationCandidates = $derived(
     selectedFunctionAddress
@@ -448,6 +473,9 @@ interface ProjectComparison {
   let programOverview = $state<ProgramOverview | null>(null);
   let programOverviewError = $state("");
   let isLoadingProgramOverview = $state(false);
+  let isExportingPdfReport = $state(false);
+  let pdfReportError = $state("");
+  let pdfReportResult = $state<PdfReportResult | null>(null);
 
   let callGraphDirection = $state<CallGraphDirection>("outgoing");
   let callGraphDepth = $state(3);
@@ -510,6 +538,16 @@ interface ProjectComparison {
 
   let displayedCallingConvention = $derived(enrichedDetails?.calling_convention ?? null);
   let selectedBsimResult = $derived(enrichedDetails?.bsim ?? null);
+
+  $effect(() => {
+    const address = selectedFunctionAddress;
+    if (address === renameDraftAddress) return;
+    renameDraftAddress = address;
+    const func = selectedFunction;
+    functionRenameDraft = func?.name ?? "";
+    functionRenameError = "";
+    functionRenameSuccess = "";
+  });
 
   $effect(() => {
     loadGhidraInstallationStatus();
@@ -806,6 +844,29 @@ interface ProjectComparison {
     }
   }
 
+  async function exportPdfReport() {
+    pdfReportError = "";
+    pdfReportResult = null;
+
+    try {
+      const destinationPath = await save({
+        title: "Export analysis report",
+        defaultPath: `${importedExport?.program.name ?? "analysis"}-report.pdf`,
+        filters: [{ name: "PDF report", extensions: ["pdf"] }],
+      });
+      if (typeof destinationPath !== "string") return;
+
+      isExportingPdfReport = true;
+      pdfReportResult = await invoke<PdfReportResult>("export_pdf_report", {
+        destinationPath,
+      });
+    } catch (error) {
+      pdfReportError = String(error);
+    } finally {
+      isExportingPdfReport = false;
+    }
+  }
+
   $effect(() => {
     const func = selectedFunction;
 
@@ -893,6 +954,40 @@ interface ProjectComparison {
       const remainingDecompiles = new Set(pendingDecompiles);
       remainingDecompiles.delete(entryAddress);
       pendingDecompiles = remainingDecompiles;
+    }
+  }
+
+  async function applySelectedFunctionRename() {
+    if (!selectedFunction || !activeProjectId || analysisSource !== "automatic") {
+      functionRenameError = "Open a live saved project before applying a rename.";
+      return;
+    }
+    const newName = functionRenameDraft.trim();
+    if (!newName || newName === selectedFunction.name) {
+      functionRenameError = "Enter a different non-empty function name.";
+      return;
+    }
+
+    functionRenameError = "";
+    functionRenameSuccess = "";
+    isApplyingFunctionRename = true;
+    const entryAddress = selectedFunction.entry_address;
+
+    try {
+      const result = await invoke<ApplyRenamesResult>("apply_function_renames", {
+        projectId: activeProjectId,
+        renames: [{ entry_address: entryAddress, new_name: newName }],
+      });
+      importedExport = result.imported.export;
+      importSummary = result.imported.summary;
+      decompileCache = new Map();
+      decompileErrors = new Map();
+      functionRenameSuccess = `Renamed in Ghidra: ${result.applied[0].old_name} → ${result.applied[0].new_name}`;
+      await requestProjectList();
+    } catch (error) {
+      functionRenameError = String(error);
+    } finally {
+      isApplyingFunctionRename = false;
     }
   }
 
@@ -988,7 +1083,7 @@ interface ProjectComparison {
       selectedFunctionAddress =
         result.imported.export.functions[0]?.entry_address ?? null;
       analysisSource = "automatic";
-      activeProjectId = null;
+      activeProjectId = result.saved_project?.id ?? null;
       identifications = new Map(
         result.identifications.map((identification) => [
           identification.entry_address,
@@ -1493,6 +1588,20 @@ interface ProjectComparison {
       <section class="summary" aria-labelledby="program-overview-title">
         <h2 id="program-overview-title">Overview</h2>
 
+        <div class="report-export-controls">
+          <button type="button" disabled={isExportingPdfReport} onclick={exportPdfReport}>
+            {isExportingPdfReport ? "Exporting report..." : "Export PDF report"}
+          </button>
+          {#if pdfReportResult}
+            <span>
+              Saved {pdfReportResult.page_count} page(s) to {pdfReportResult.path}
+            </span>
+          {/if}
+        </div>
+        {#if pdfReportError}
+          <p class="error" role="alert">{pdfReportError}</p>
+        {/if}
+
         {#if isLoadingProgramOverview}
           <p>Loading overview...</p>
         {:else if programOverviewError}
@@ -1948,6 +2057,32 @@ interface ProjectComparison {
                 </div>
               {/if}
             </dl>
+
+            {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
+              <section class="function-section ghidra-rename-control">
+                <h4>Apply a function name to Ghidra</h4>
+                <p>
+                  This writes a user-confirmed name into the live Ghidra project, then refreshes
+                  the local snapshot. It never applies FunctionID or BSim suggestions automatically.
+                </p>
+                <div>
+                  <input type="text" maxlength="512" bind:value={functionRenameDraft} />
+                  <button
+                    type="button"
+                    disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
+                    onclick={applySelectedFunctionRename}
+                  >
+                    {isApplyingFunctionRename ? "Applying..." : "Apply rename"}
+                  </button>
+                </div>
+                {#if functionRenameError}
+                  <p class="error" role="alert">{functionRenameError}</p>
+                {/if}
+                {#if functionRenameSuccess}
+                  <p class="status">{functionRenameSuccess}</p>
+                {/if}
+              </section>
+            {/if}
 
             {#if selectedIdentificationCandidates.length > 0}
               <section class="function-section">
@@ -2466,6 +2601,20 @@ interface ProjectComparison {
     border-top: 1px solid #374151;
   }
 
+  .report-export-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+
+  .report-export-controls span {
+    color: #94a3b8;
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+  }
+
   .project-comparison h3,
   .project-comparison h4 {
     margin: 0 0 0.5rem;
@@ -2816,6 +2965,21 @@ interface ProjectComparison {
 
   .function-section .bsim-error {
     color: #fca5a5;
+  }
+
+  .ghidra-rename-control > div {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  .ghidra-rename-control input {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid #475569;
+    border-radius: 0.5rem;
+    background-color: #0f172a;
+    color: #f8fafc;
   }
 
   .call-graph-controls {
