@@ -23,6 +23,7 @@ fn builds_the_expected_argument_order_and_values() {
     );
     let binary_path = Path::new("C:/binaries/sample.exe");
     let destination_json = project_dir.join("export.json");
+    let identifications_json = project_dir.join("identifications.json");
 
     let invocation = build_headless_analysis_args(
         &installation,
@@ -30,6 +31,7 @@ fn builds_the_expected_argument_order_and_values() {
         "sample",
         binary_path,
         &destination_json,
+        &identifications_json,
     );
 
     assert_eq!(
@@ -55,6 +57,9 @@ fn builds_the_expected_argument_order_and_values() {
             "-postScript".to_owned(),
             "ExportReverseAssistantJson.java".to_owned(),
             destination_json.to_string_lossy().into_owned(),
+            "-postScript".to_owned(),
+            "IdentifyFunctionsJson.java".to_owned(),
+            identifications_json.to_string_lossy().into_owned(),
         ]
     );
 
@@ -79,6 +84,7 @@ fn handles_paths_containing_spaces_as_separate_arguments() {
     );
     let binary_path = Path::new("C:/My Binaries/sample under test.exe");
     let destination_json = project_dir.join("export.json");
+    let identifications_json = project_dir.join("identifications.json");
 
     let invocation = build_headless_analysis_args(
         &installation,
@@ -86,6 +92,7 @@ fn handles_paths_containing_spaces_as_separate_arguments() {
         "sample-under-test",
         binary_path,
         &destination_json,
+        &identifications_json,
     );
 
     assert_eq!(
@@ -94,5 +101,5 @@ fn handles_paths_containing_spaces_as_separate_arguments() {
         "the binary path must be passed as a single argument, not split on spaces"
     );
 
-    assert_eq!(invocation.args.len(), 11);
+    assert_eq!(invocation.args.len(), 14);
 }

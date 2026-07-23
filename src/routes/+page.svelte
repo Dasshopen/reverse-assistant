@@ -71,6 +71,25 @@ interface DecompiledFunctionDetails {
   calling_convention: string;
 }
 
+interface FidCandidate {
+  name: string;
+  library_family: string;
+  library_version: string;
+  library_variant: string;
+  overall_score: number;
+  match_mode: string;
+}
+
+interface FunctionIdentification {
+  entry_address: string;
+  candidates: FidCandidate[];
+}
+
+interface AutomaticAnalysisResult {
+  imported: ImportedGhidraExport;
+  identifications: FunctionIdentification[];
+}
+
   let backendStatus = $state("");
   let exportPath = $state("");
   let importSummary = $state<GhidraImportSummary | null>(null);
@@ -95,11 +114,24 @@ interface DecompiledFunctionDetails {
   let analysisSource = $state<"none" | "automatic" | "manual">("none");
   let decompileCache = $state(new Map<string, DecompiledFunctionDetails>());
   let pendingDecompiles = $state(new Set<string>());
-  let decompileError = $state("");
+  let decompileErrors = $state(new Map<string, string>());
+  let identifications = $state(new Map<string, FidCandidate[]>());
+
+  let selectedIdentificationCandidates = $derived(
+    selectedFunctionAddress
+      ? (identifications.get(selectedFunctionAddress) ?? [])
+      : [],
+  );
 
   let isDecompilingSelected = $derived(
     selectedFunctionAddress !== null &&
       pendingDecompiles.has(selectedFunctionAddress),
+  );
+
+  let selectedDecompileError = $derived(
+    selectedFunctionAddress === null
+      ? ""
+      : (decompileErrors.get(selectedFunctionAddress) ?? ""),
   );
 
   let selectedDecompiledCode = $derived.by(() => {
@@ -146,8 +178,11 @@ interface DecompiledFunctionDetails {
   });
 
   async function requestDecompiledCode(entryAddress: string) {
-    pendingDecompiles.add(entryAddress);
-    decompileError = "";
+    pendingDecompiles = new Set(pendingDecompiles).add(entryAddress);
+
+    const errorsWithoutCurrentAddress = new Map(decompileErrors);
+    errorsWithoutCurrentAddress.delete(entryAddress);
+    decompileErrors = errorsWithoutCurrentAddress;
 
     try {
       const details = await invoke<DecompiledFunctionDetails>(
@@ -155,11 +190,13 @@ interface DecompiledFunctionDetails {
         { entryAddress },
       );
 
-      decompileCache.set(entryAddress, details);
+      decompileCache = new Map(decompileCache).set(entryAddress, details);
     } catch (error) {
-      decompileError = String(error);
+      decompileErrors = new Map(decompileErrors).set(entryAddress, String(error));
     } finally {
-      pendingDecompiles.delete(entryAddress);
+      const remainingDecompiles = new Set(pendingDecompiles);
+      remainingDecompiles.delete(entryAddress);
+      pendingDecompiles = remainingDecompiles;
     }
   }
 
@@ -239,21 +276,28 @@ interface DecompiledFunctionDetails {
     analysisSource = "none";
     decompileCache = new Map();
     pendingDecompiles = new Set();
-    decompileError = "";
+    decompileErrors = new Map();
+    identifications = new Map();
 
     isAnalyzing = true;
 
     try {
-      const imported = await invoke<ImportedGhidraExport>(
+      const result = await invoke<AutomaticAnalysisResult>(
         "analyze_binary_with_ghidra",
         { binaryPath },
       );
 
-      importedExport = imported.export;
-      importSummary = imported.summary;
+      importedExport = result.imported.export;
+      importSummary = result.imported.summary;
       selectedFunctionAddress =
-        imported.export.functions[0]?.entry_address ?? null;
+        result.imported.export.functions[0]?.entry_address ?? null;
       analysisSource = "automatic";
+      identifications = new Map(
+        result.identifications.map((identification) => [
+          identification.entry_address,
+          identification.candidates,
+        ]),
+      );
     } catch (error) {
       analyzeError = String(error);
     } finally {
@@ -293,7 +337,8 @@ interface DecompiledFunctionDetails {
     analysisSource = "none";
     decompileCache = new Map();
     pendingDecompiles = new Set();
-    decompileError = "";
+    decompileErrors = new Map();
+    identifications = new Map();
 
     const path = exportPath.trim();
 
@@ -532,6 +577,27 @@ interface DecompiledFunctionDetails {
               {/if}
             </dl>
 
+            {#if selectedIdentificationCandidates.length > 0}
+              <section class="function-section">
+                <h4>Possible match (FunctionID)</h4>
+
+                <ul>
+                  {#each selectedIdentificationCandidates as candidate}
+                    <li>
+                      <span>
+                        {candidate.name}
+                        <em>
+                          ({candidate.library_family} {candidate.library_version}
+                          {candidate.library_variant}, {candidate.match_mode})
+                        </em>
+                      </span>
+                      <code>score {candidate.overall_score.toFixed(1)}</code>
+                    </li>
+                  {/each}
+                </ul>
+              </section>
+            {/if}
+
             <section class="function-section">
             <h4>Parameters</h4>
 
@@ -590,8 +656,8 @@ interface DecompiledFunctionDetails {
 
             {#if isDecompilingSelected}
               <p>Decompiling...</p>
-            {:else if decompileError}
-              <p class="error" role="alert">{decompileError}</p>
+            {:else if selectedDecompileError}
+              <p class="error" role="alert">{selectedDecompileError}</p>
             {:else if selectedDecompiledCode}
               <pre><code>{selectedDecompiledCode}</code></pre>
             {:else}

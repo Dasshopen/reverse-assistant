@@ -5,12 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager};
 
+use crate::models::ghidra_identification::{parse_identifications, FunctionIdentification};
 use crate::models::ghidra_installation::GhidraInstallation;
 use crate::models::ghidra_session::AnalysisSession;
 use crate::services::ghidra_import::{import_ghidra_export, ImportedGhidraExport};
 use crate::services::ghidra_installation::{load_persisted_install_dir, validate_installation};
 
 const HEADLESS_SCRIPT_NAME: &str = "ExportReverseAssistantJson.java";
+const IDENTIFY_FUNCTIONS_SCRIPT_NAME: &str = "IdentifyFunctionsJson.java";
 const DISABLE_SLOW_ANALYZERS_SCRIPT_NAME: &str = "DisableSlowAnalyzers.java";
 const STDERR_TAIL_BYTES: usize = 4000;
 
@@ -31,6 +33,7 @@ pub fn build_headless_analysis_args(
     project_name: &str,
     binary_path: &Path,
     destination_json: &Path,
+    identifications_json: &Path,
 ) -> HeadlessAnalysisInvocation {
     let program = installation
         .install_dir
@@ -51,6 +54,9 @@ pub fn build_headless_analysis_args(
         "-postScript".to_owned(),
         HEADLESS_SCRIPT_NAME.to_owned(),
         destination_json.to_string_lossy().into_owned(),
+        "-postScript".to_owned(),
+        IDENTIFY_FUNCTIONS_SCRIPT_NAME.to_owned(),
+        identifications_json.to_string_lossy().into_owned(),
     ];
 
     HeadlessAnalysisInvocation { program, args }
@@ -136,10 +142,11 @@ pub fn run_headless_analysis(
     installation: &GhidraInstallation,
     app: &AppHandle,
     binary_path: &Path,
-) -> Result<(PathBuf, AnalysisSession), String> {
+) -> Result<(PathBuf, PathBuf, AnalysisSession), String> {
     let (run_dir, project_name) = prepare_run_directory(app, binary_path)?;
 
     let destination_json = run_dir.join("export.json");
+    let identifications_json = run_dir.join("identifications.json");
 
     let invocation = build_headless_analysis_args(
         installation,
@@ -147,6 +154,7 @@ pub fn run_headless_analysis(
         &project_name,
         binary_path,
         &destination_json,
+        &identifications_json,
     );
 
     let output = Command::new(&invocation.program)
@@ -175,19 +183,26 @@ pub fn run_headless_analysis(
         ));
     }
 
+    if !identifications_json.is_file() {
+        return Err(format!(
+            "Ghidra headless analysis completed but produced no FunctionID identification file at '{}'",
+            identifications_json.display()
+        ));
+    }
+
     let session = AnalysisSession {
         project_dir: run_dir,
         project_name,
         program_path_in_project: program_path_in_project(binary_path)?,
     };
 
-    Ok((destination_json, session))
+    Ok((destination_json, identifications_json, session))
 }
 
 pub fn analyze_binary(
     app: &AppHandle,
     binary_path: &Path,
-) -> Result<(ImportedGhidraExport, AnalysisSession), String> {
+) -> Result<(ImportedGhidraExport, Vec<FunctionIdentification>, AnalysisSession), String> {
     let install_dir = load_persisted_install_dir(app)?.ok_or_else(|| {
         "No Ghidra installation is configured. Configure one before analyzing a binary.".to_owned()
     })?;
@@ -201,9 +216,19 @@ pub fn analyze_binary(
         ));
     }
 
-    let (json_path, session) = run_headless_analysis(&installation, app, binary_path)?;
+    let (json_path, identifications_json_path, session) =
+        run_headless_analysis(&installation, app, binary_path)?;
 
     let imported = import_ghidra_export(&json_path)?;
 
-    Ok((imported, session))
+    let identifications_json = fs::read_to_string(&identifications_json_path).map_err(|error| {
+        format!(
+            "failed to read FunctionID identification results '{}': {error}",
+            identifications_json_path.display()
+        )
+    })?;
+
+    let identifications = parse_identifications(&identifications_json)?;
+
+    Ok((imported, identifications, session))
 }
