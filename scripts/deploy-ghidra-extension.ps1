@@ -76,6 +76,7 @@ Write-Host "Building Reverse Assistant Exporter..."
 
 & $gradleWrapper `
     -p $extensionProject `
+    "-PGHIDRA_INSTALL_DIR=$resolvedInstallDir" `
     buildExtension
 
 if ($LASTEXITCODE -ne 0) {

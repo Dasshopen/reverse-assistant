@@ -11,6 +11,9 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.pcode.FunctionPrototype;
+import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighSymbol;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
@@ -32,7 +35,11 @@ public final class FunctionDecompiler {
 
         decompiler.setOptions(options);
         decompiler.toggleCCode(true);
-        decompiler.toggleSyntaxTree(false);
+        // Ghidra's native Decompiler window renders the prototype returned by
+        // the decompiler, not only the signature currently stored in the
+        // program database. Keep the syntax tree so getHighFunction() exposes
+        // that same transient prototype for the selected function.
+        decompiler.toggleSyntaxTree(true);
 
         if (!decompiler.openProgram(program)) {
             String message = decompiler.getLastMessage();
@@ -48,13 +55,13 @@ public final class FunctionDecompiler {
         return decompiler;
     }
 
-    public static String decompile(
+    public static DecompiledFunctionDetails decompile(
         Function function,
         DecompInterface decompiler,
         TaskMonitor monitor
     ) throws CancelledException {
         if (function.isExternal()) {
-            return null;
+            return detailsFromStoredSignature(function, null);
         }
 
         DecompileResults results =
@@ -68,23 +75,87 @@ public final class FunctionDecompiler {
         monitor.checkCancelled();
 
         if (results == null || !results.decompileCompleted()) {
-            return null;
+            return detailsFromStoredSignature(function, null);
         }
 
         DecompiledFunction decompiledFunction =
             results.getDecompiledFunction();
 
-        if (decompiledFunction == null) {
-            return null;
+        String code = null;
+
+        if (decompiledFunction != null) {
+            String candidateCode = decompiledFunction.getC();
+
+            if (candidateCode != null && !candidateCode.isBlank()) {
+                code = candidateCode;
+            }
         }
 
-        String code = decompiledFunction.getC();
+        HighFunction highFunction = results.getHighFunction();
 
-        if (code == null || code.isBlank()) {
-            return null;
+        if (highFunction == null) {
+            return detailsFromStoredSignature(function, code);
         }
 
-        return code;
+        FunctionPrototype prototype =
+            highFunction.getFunctionPrototype();
+
+        if (prototype == null) {
+            return detailsFromStoredSignature(function, code);
+        }
+
+        String callingConvention = prototype.getModelName();
+
+        return new DecompiledFunctionDetails(
+            code,
+            formatDataType(prototype.getReturnType()),
+            extractParameters(prototype),
+            callingConvention == null || callingConvention.isBlank()
+                ? "unknown"
+                : callingConvention
+        );
+    }
+
+    private static DecompiledFunctionDetails detailsFromStoredSignature(
+        Function function,
+        String decompiledCode
+    ) {
+        String callingConvention = function.getCallingConventionName();
+
+        return new DecompiledFunctionDetails(
+            decompiledCode,
+            formatDataType(function.getReturnType()),
+            extractParameters(function),
+            callingConvention == null || callingConvention.isBlank()
+                ? "unknown"
+                : callingConvention
+        );
+    }
+
+    private static List<FunctionParameterMetadata> extractParameters(
+        FunctionPrototype prototype
+    ) {
+        List<FunctionParameterMetadata> collectedParameters =
+            new ArrayList<>(prototype.getNumParams());
+
+        for (int index = 0; index < prototype.getNumParams(); index++) {
+            HighSymbol parameter = prototype.getParam(index);
+
+            if (parameter == null) {
+                continue;
+            }
+
+            String parameterName = parameter.getName();
+
+            collectedParameters.add(
+                new FunctionParameterMetadata(
+                    parameterName == null ? "" : parameterName,
+                    formatDataType(parameter.getDataType())
+                )
+            );
+        }
+
+        return List.copyOf(collectedParameters);
     }
 
     public static List<FunctionParameterMetadata> extractParameters(

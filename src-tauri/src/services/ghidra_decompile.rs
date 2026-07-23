@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -14,6 +13,10 @@ use crate::services::ghidra_installation::{load_persisted_install_dir, validate_
 
 const DECOMPILE_SCRIPT_NAME: &str = "DecompileFunctionJson.java";
 const STDERR_TAIL_BYTES: usize = 4000;
+// Bump this value whenever the Java result semantics change. Keeping the
+// version in the file name makes persistent cached results safe across app
+// upgrades without having to delete a user's analyzed Ghidra project.
+const DECOMPILE_CACHE_VERSION: &str = "native-prototype-v1";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecompileFunctionInvocation {
@@ -68,6 +71,30 @@ struct DecompileResultJson {
     calling_convention: String,
 }
 
+impl From<DecompileResultJson> for DecompiledFunctionDetails {
+    fn from(parsed: DecompileResultJson) -> Self {
+        Self {
+            decompiled_code: parsed.decompiled_code,
+            return_type: parsed.return_type,
+            parameters: parsed.parameters,
+            calling_convention: parsed.calling_convention,
+        }
+    }
+}
+
+fn parse_decompile_result(json: &str) -> Result<DecompiledFunctionDetails, String> {
+    serde_json::from_str::<DecompileResultJson>(json)
+        .map(DecompiledFunctionDetails::from)
+        .map_err(|error| format!("invalid decompile result JSON from Ghidra: {error}"))
+}
+
+fn decompile_cache_path(cache_dir: &Path, entry_address: &str) -> PathBuf {
+    cache_dir.join(format!(
+        "{}-{DECOMPILE_CACHE_VERSION}.json",
+        &entry_address[2..]
+    ))
+}
+
 fn validate_entry_address(entry_address: &str) -> Result<(), String> {
     if !is_valid_address(entry_address) {
         return Err(
@@ -94,14 +121,20 @@ pub fn run_decompile_function(
         )
     })?;
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            format!("system clock error while preparing a decompile request: {error}")
-        })?
-        .as_nanos();
+    let destination_json = decompile_cache_path(&cache_dir, entry_address);
 
-    let destination_json = cache_dir.join(format!("{nanos}.json"));
+    // A Ghidra analysis session is immutable during on-demand decompilation
+    // (-readOnly and -noanalysis), so a result for this project/address can be
+    // reused safely. This avoids paying the JVM startup cost again after the
+    // first click or after restarting the Tauri application.
+    if let Ok(json) = fs::read_to_string(&destination_json) {
+        if let Ok(cached) = parse_decompile_result(&json) {
+            return Ok(cached);
+        }
+
+        // Ignore an incomplete/corrupt cache entry and regenerate it below.
+        let _ = fs::remove_file(&destination_json);
+    }
 
     let invocation =
         build_decompile_function_args(installation, session, entry_address, &destination_json);
@@ -139,17 +172,7 @@ pub fn run_decompile_function(
         )
     })?;
 
-    let _ = fs::remove_file(&destination_json);
-
-    let parsed: DecompileResultJson = serde_json::from_str(&json)
-        .map_err(|error| format!("invalid decompile result JSON from Ghidra: {error}"))?;
-
-    Ok(DecompiledFunctionDetails {
-        decompiled_code: parsed.decompiled_code,
-        return_type: parsed.return_type,
-        parameters: parsed.parameters,
-        calling_convention: parsed.calling_convention,
-    })
+    parse_decompile_result(&json)
 }
 
 pub fn decompile_function(
@@ -165,4 +188,80 @@ pub fn decompile_function(
     let installation = validate_installation(app, &install_dir)?;
 
     run_decompile_function(&installation, session, entry_address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_path_is_stable_and_versioned() {
+        assert_eq!(
+            decompile_cache_path(Path::new("cache"), "0x140001170"),
+            PathBuf::from("cache/140001170-native-prototype-v1.json")
+        );
+    }
+
+    #[test]
+    fn parses_native_prototype_details() {
+        let details = parse_decompile_result(
+            r#"{
+                "decompiled_code": "int example(int param_1) { return param_1; }",
+                "return_type": "int",
+                "parameters": [{ "name": "param_1", "data_type": "int" }],
+                "calling_convention": "__cdecl"
+            }"#,
+        )
+        .expect("a valid native prototype result should parse");
+
+        assert_eq!(details.return_type, "int");
+        assert_eq!(details.calling_convention, "__cdecl");
+        assert_eq!(details.parameters.len(), 1);
+        assert_eq!(details.parameters[0].name, "param_1");
+        assert_eq!(details.parameters[0].data_type, "int");
+    }
+
+    #[test]
+    fn cached_result_does_not_launch_ghidra() {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock should be after the Unix epoch")
+            .as_nanos();
+        let project_dir = std::env::temp_dir().join(format!(
+            "reverse-assistant-decompile-cache-test-{unique_suffix}"
+        ));
+        let cache_dir = project_dir.join("decompile-cache");
+        fs::create_dir_all(&cache_dir).expect("the test cache directory should be created");
+
+        let entry_address = "0x140001170";
+        fs::write(
+            decompile_cache_path(&cache_dir, entry_address),
+            r#"{
+                "decompiled_code": "int cached(void) { return 1; }",
+                "return_type": "int",
+                "parameters": [],
+                "calling_convention": "__cdecl"
+            }"#,
+        )
+        .expect("the cached result should be written");
+
+        let installation = GhidraInstallation {
+            install_dir: PathBuf::from("Z:/this-ghidra-installation-does-not-exist"),
+            version_label: "ghidra_12.1.2_PUBLIC".to_owned(),
+            extensions_dir: PathBuf::from("Z:/this-extension-does-not-exist"),
+        };
+        let session = AnalysisSession {
+            project_dir: project_dir.clone(),
+            project_name: "cached-test".to_owned(),
+            program_path_in_project: "cached-test.exe".to_owned(),
+        };
+
+        let result = run_decompile_function(&installation, &session, entry_address)
+            .expect("a valid cached result should bypass the missing Ghidra executable");
+
+        assert_eq!(result.return_type, "int");
+        assert_eq!(result.calling_convention, "__cdecl");
+
+        fs::remove_dir_all(&project_dir).expect("the isolated test directory should be removed");
+    }
 }

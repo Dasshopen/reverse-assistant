@@ -21,14 +21,11 @@ public final class DecompileFunctionService {
         fileWriter = new AtomicUtf8FileWriter();
     }
 
-    // Scoping "Decompiler Parameter ID" to a single function (or even that
-    // function plus its direct callers) was tried and measured: it reports
-    // success but recovers zero parameters, because register-parameter
-    // identification needs whole-program call-site context that a bounded
-    // scope can't provide. Parameters/return type/calling convention below
-    // therefore reflect the function's existing signature as-is; pseudocode
-    // stays available and generally readable, but variables the analyzer
-    // would have bound to parameters may appear as raw registers (e.g. in_RCX).
+    // Match Ghidra's native Decompiler window by returning the transient
+    // prototype produced for this decompilation. This can be richer than the
+    // signature stored in the project and costs only the selected function.
+    // FunctionDecompiler falls back to the stored signature when Ghidra does
+    // not return a high-level prototype.
     public void decompileAndWrite(
         Program program,
         Address entryAddress,
@@ -53,17 +50,8 @@ public final class DecompileFunctionService {
             FunctionDecompiler.createDecompiler(program);
 
         try {
-            String decompiledCode =
+            DecompiledFunctionDetails details =
                 FunctionDecompiler.decompile(function, decompiler, monitor);
-
-            String callingConvention = function.getCallingConventionName();
-
-            DecompiledFunctionDetails details = new DecompiledFunctionDetails(
-                decompiledCode,
-                FunctionDecompiler.formatDataType(function.getReturnType()),
-                FunctionDecompiler.extractParameters(function),
-                callingConvention == null ? "unknown" : callingConvention
-            );
 
             fileWriter.write(destination, jsonWriter.write(details));
         }
