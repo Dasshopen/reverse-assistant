@@ -2607,97 +2607,80 @@ interface ApplyRenamesResult {
 
     {#if importedExport}
       <section
-        class="summary"
+        class="reports-workspace"
         class:view-hidden={activeWorkspaceView !== "reports"}
-        aria-labelledby="program-overview-title"
+        aria-labelledby="reports-workspace-title"
       >
-        <h2 id="program-overview-title">Rapport d’analyse</h2>
+        <header class="reports-workspace-header">
+          <div>
+            <p class="detail-label">Documentation de l’analyse</p>
+            <h2 id="reports-workspace-title">Rapports</h2>
+            <p>Génère un document PDF autonome à partir des données actuellement sauvegardées.</p>
+          </div>
+          <span>Génération 100 % locale</span>
+        </header>
 
-        <div class="report-export-controls">
-          <button type="button" disabled={isExportingPdfReport} onclick={exportPdfReport}>
-            {isExportingPdfReport ? "Exporting report..." : "Export PDF report"}
-          </button>
-          {#if pdfReportResult}
-            <span>
-              Saved {pdfReportResult.page_count} page(s) to {pdfReportResult.path}
-            </span>
-          {/if}
-        </div>
         {#if pdfReportError}
           <p class="error" role="alert">{pdfReportError}</p>
         {/if}
 
         {#if isLoadingProgramOverview}
-          <p>Loading overview...</p>
+          <p>Préparation du contenu du rapport…</p>
         {:else if programOverviewError}
           <p class="error" role="alert">{programOverviewError}</p>
         {:else if programOverview}
-          <dl class="summary-grid">
-            <div>
-              <dt>Functions</dt>
-              <dd>
-                {programOverview.function_count}
-                ({programOverview.internal_function_count} internal, {programOverview.external_function_count}
-                external, {programOverview.thunk_function_count} thunks)
-              </dd>
-            </div>
+          <div class="reports-main-grid">
+            <article class="report-export-card">
+              <div class="report-document-icon" aria-hidden="true"><span>PDF</span></div>
+              <div class="report-export-copy">
+                <p class="detail-label">Rapport d’analyse technique</p>
+                <h3>{importedExport.program.name}</h3>
+                <span>{importedExport.program.format} · {importedExport.program.architecture}</span>
+                <code title={importedExport.program.sha256}>SHA-256 · {importedExport.program.sha256}</code>
+                <p>Document paginé contenant les métadonnées essentielles du programme, ses dépendances et les éléments détectés par Ghidra.</p>
+              </div>
+              <button type="button" disabled={isExportingPdfReport} onclick={exportPdfReport}>
+                {isExportingPdfReport ? "Génération du PDF…" : "Générer le rapport PDF"}
+              </button>
+            </article>
 
-            <div>
-              <dt>Decompiled functions</dt>
-              <dd>{programOverview.decompiled_function_count} (so far this session)</dd>
-            </div>
+            <article class="report-status-card" class:success={pdfReportResult !== null}>
+              {#if pdfReportResult}
+                <div class="report-status-heading"><span>✓</span><div><p>Dernier rapport généré</p><strong>{pdfReportResult.page_count} page{pdfReportResult.page_count > 1 ? "s" : ""}</strong></div></div>
+                <dl>
+                  <div><dt>Fonctions incluses</dt><dd>{pdfReportResult.function_count_included}</dd></div>
+                  <div><dt>Chaînes incluses</dt><dd>{pdfReportResult.string_count_included}</dd></div>
+                  <div><dt>Types inclus</dt><dd>{pdfReportResult.type_count_included}</dd></div>
+                </dl>
+                <div class="report-saved-path"><span>Fichier enregistré</span><code>{pdfReportResult.path}</code></div>
+              {:else}
+                <div class="report-status-placeholder">
+                  <span aria-hidden="true">▤</span>
+                  <strong>Aucun rapport généré pendant cette session</strong>
+                  <p>Choisis l’emplacement du fichier avec le bouton de génération. Le PDF ne sera envoyé vers aucun service externe.</p>
+                </div>
+              {/if}
+            </article>
+          </div>
 
-            <div>
-              <dt>Call sites</dt>
-              <dd>{programOverview.call_site_count}</dd>
+          <section class="report-content-card">
+            <header><div><p class="detail-label">Contenu réel du document</p><h3>Ce qui sera inclus</h3></div><span>Rapport volontairement borné pour rester lisible</span></header>
+            <div class="report-content-grid">
+              <article><span class="report-section-icon">◎</span><div><strong>Vue générale</strong><p>Format, architecture, SHA-256 et statistiques globales.</p></div><b>Complet</b></article>
+              <article><span class="report-section-icon">⇄</span><div><strong>Dépendances et imports</strong><p>{programOverview.required_library_count} bibliothèque{programOverview.required_library_count > 1 ? "s" : ""} requise{programOverview.required_library_count > 1 ? "s" : ""} · {programOverview.external_function_count} imports.</p></div><b>Complet</b></article>
+              <article><span class="report-section-icon">ƒ</span><div><strong>Fonctions et prototypes</strong><p>Adresse, paramètres, retour, appels et statut externe/thunk.</p></div><b>{Math.min(programOverview.function_count, 250)} / {programOverview.function_count}</b></article>
+              <article><span class="report-section-icon">”</span><div><strong>Chaînes de caractères</strong><p>Adresse, valeur et nombre réel de références Ghidra.</p></div><b>{Math.min(programOverview.string_count, 150)} / {programOverview.string_count}</b></article>
+              <article><span class="report-section-icon">◇</span><div><strong>Structures et types</strong><p>Taille, champs, usages et indicateurs opaque/anonyme.</p></div><b>{Math.min(programOverview.detected_type_count, 150)} / {programOverview.detected_type_count}</b></article>
+              <article class="not-included"><span class="report-section-icon">⌁</span><div><strong>Pseudocode complet</strong><p>Le code décompilé reste consultable dans l’application mais n’est pas intégré à ce rapport synthétique.</p></div><b>Non inclus</b></article>
             </div>
+          </section>
 
-            <div>
-              <dt>Most-used function</dt>
-              <dd>
-                {#if programOverview.most_used_function}
-                  <code>{programOverview.most_used_function.name}</code>
-                  — called by {programOverview.most_used_function.used_by_function_count} distinct
-                  functions
-                {:else}
-                  none
-                {/if}
-              </dd>
-            </div>
-
-            <div>
-              <dt>Strings</dt>
-              <dd>
-                {programOverview.string_count} distinct, {programOverview.total_string_reference_count}
-                references
-                {#if programOverview.most_referenced_string}
-                  (most: <code>{programOverview.most_referenced_string.value}</code>
-                  with {programOverview.most_referenced_string.reference_count})
-                {/if}
-              </dd>
-            </div>
-
-            <div>
-              <dt>Imports / exports</dt>
-              <dd>
-                {programOverview.external_function_count} imports,
-                {programOverview.external_entry_point_count} external entry points
-                ({programOverview.external_entry_point_function_count} functions),
-                {programOverview.required_library_count} required libraries
-              </dd>
-            </div>
-
-            <div>
-              <dt>Detected types</dt>
-              <dd>
-                {programOverview.detected_type_count} total —
-                {programOverview.struct_count} structs, {programOverview.union_count} unions,
-                {programOverview.enum_count} enums, {programOverview.typedef_count} typedefs
-                ({programOverview.opaque_type_count} opaque, {programOverview.anonymous_type_count}
-                anonymous)
-              </dd>
-            </div>
-          </dl>
+          <section class="report-highlights">
+            <article><span>Fonctions</span><strong>{programOverview.function_count.toLocaleString()}</strong><small>{programOverview.internal_function_count} internes · {programOverview.external_function_count} externes</small></article>
+            <article><span>Sites d’appel</span><strong>{programOverview.call_site_count.toLocaleString()}</strong><small>{programOverview.most_used_function ? `${programOverview.most_used_function.name} est la plus appelée` : "Aucune fonction dominante"}</small></article>
+            <article><span>Références de chaînes</span><strong>{programOverview.total_string_reference_count.toLocaleString()}</strong><small>{programOverview.string_count} chaînes distinctes</small></article>
+            <article><span>Types détectés</span><strong>{programOverview.detected_type_count.toLocaleString()}</strong><small>{programOverview.struct_count} structures · {programOverview.enum_count} enums</small></article>
+          </section>
         {/if}
       </section>
 
@@ -4069,18 +4052,84 @@ interface ApplyRenamesResult {
     border: 0;
   }
 
-  .report-export-controls {
+  .reports-workspace { min-width: 0; }
+
+  .reports-workspace-header {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 1rem;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.8rem;
   }
 
-  .report-export-controls span {
-    color: #94a3b8;
-    font-size: 0.8rem;
-    overflow-wrap: anywhere;
+  .reports-workspace-header h2 { margin: 0.1rem 0 0.2rem; font-size: 1.18rem; }
+  .reports-workspace-header p:not(.detail-label) { margin: 0; color: #8191aa; font-size: 0.7rem; }
+  .reports-workspace-header > span { padding: 0.32rem 0.55rem; border: 1px solid #245241; border-radius: 999px; background: #0d2a24; color: #6ee7b7; font-size: 0.58rem; white-space: nowrap; }
+
+  .reports-main-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.75fr); gap: 0.65rem; }
+  .report-export-card,
+  .report-status-card,
+  .report-content-card,
+  .report-highlights > article { border: 1px solid #24334b; border-radius: 10px; background: #0c1627; }
+
+  .report-export-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.85rem; min-height: 150px; padding: 0.9rem; }
+  .report-document-icon { display: grid; place-items: center; width: 72px; height: 92px; border: 1px solid #6d28d9; border-radius: 7px; background: linear-gradient(145deg, #33215f, #17162f); box-shadow: 0 12px 30px rgb(0 0 0 / 28%); }
+  .report-document-icon span { color: #ddd6fe; font-size: 0.82rem; font-weight: 900; letter-spacing: 0.08em; }
+  .report-export-copy { display: grid; min-width: 0; gap: 0.22rem; }
+  .report-export-copy h3 { margin: 0; color: #f4f7fb; font-size: 1.02rem; }
+  .report-export-copy > span { color: #82a6cb; font-size: 0.65rem; }
+  .report-export-copy > code { overflow: hidden; color: #687d9b; font-size: 0.53rem; text-overflow: ellipsis; white-space: nowrap; }
+  .report-export-copy > p:not(.detail-label) { max-width: 700px; margin: 0.3rem 0 0; color: #8494ad; font-size: 0.62rem; line-height: 1.45; }
+  .report-export-card > button { padding: 0.62rem 0.85rem; background: #6d28d9; color: #fff; font-size: 0.68rem; white-space: nowrap; }
+
+  .report-status-card { display: grid; align-content: center; min-height: 150px; padding: 0.85rem; }
+  .report-status-card.success { border-color: #235743; background: linear-gradient(145deg, #0c201d, #0c1627); }
+  .report-status-heading { display: flex; align-items: center; gap: 0.55rem; }
+  .report-status-heading > span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: #14532d; color: #86efac; font-weight: 900; }
+  .report-status-heading p { margin: 0; color: #86a494; font-size: 0.57rem; }
+  .report-status-heading strong { color: #ecfdf5; font-size: 0.82rem; }
+  .report-status-card dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.35rem; margin: 0.65rem 0 0; }
+  .report-status-card dl div { padding: 0.4rem; border-radius: 5px; background: rgb(8 18 30 / 60%); }
+  .report-status-card dt { color: #70849e; font-size: 0.5rem; }
+  .report-status-card dd { margin: 0.15rem 0 0; color: #dbeafe; font-size: 0.72rem; font-weight: 700; }
+  .report-saved-path { display: grid; gap: 0.16rem; margin-top: 0.55rem; }
+  .report-saved-path span { color: #6f819a; font-size: 0.5rem; }
+  .report-saved-path code { overflow: hidden; color: #89a7c5; font-size: 0.51rem; text-overflow: ellipsis; white-space: nowrap; }
+  .report-status-placeholder { display: grid; justify-items: center; text-align: center; }
+  .report-status-placeholder > span { color: #8b5cf6; font-size: 1.5rem; }
+  .report-status-placeholder strong { margin-top: 0.3rem; color: #dce5f2; font-size: 0.7rem; }
+  .report-status-placeholder p { max-width: 310px; margin: 0.3rem 0 0; color: #71829d; font-size: 0.57rem; line-height: 1.4; }
+
+  .report-content-card { margin-top: 0.65rem; overflow: hidden; }
+  .report-content-card > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.8rem; border-bottom: 1px solid #223149; }
+  .report-content-card > header h3 { margin: 0.08rem 0 0; font-size: 0.82rem; }
+  .report-content-card > header > span { color: #71829d; font-size: 0.56rem; }
+  .report-content-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .report-content-grid article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.6rem; min-height: 72px; padding: 0.65rem 0.75rem; border-right: 1px solid #1e2d43; border-bottom: 1px solid #1e2d43; }
+  .report-content-grid article:nth-child(3n) { border-right: 0; }
+  .report-content-grid article:nth-last-child(-n + 3) { border-bottom: 0; }
+  .report-section-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; background: #211845; color: #c4b5fd; font-size: 0.72rem; }
+  .report-content-grid article > div { display: grid; min-width: 0; gap: 0.15rem; }
+  .report-content-grid strong { color: #dce6f4; font-size: 0.64rem; }
+  .report-content-grid p { margin: 0; color: #71829c; font-size: 0.54rem; line-height: 1.35; }
+  .report-content-grid b { color: #67e8f9; font-size: 0.57rem; white-space: nowrap; }
+  .report-content-grid .not-included { background: rgb(46 17 28 / 25%); }
+  .report-content-grid .not-included .report-section-icon { background: #351824; color: #fda4af; }
+  .report-content-grid .not-included b { color: #fb7185; }
+
+  .report-highlights { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.55rem; margin-top: 0.65rem; }
+  .report-highlights > article { display: grid; gap: 0.12rem; padding: 0.65rem 0.75rem; }
+  .report-highlights span { color: #8293ad; font-size: 0.56rem; }
+  .report-highlights strong { color: #67e8f9; font-size: 1rem; }
+  .report-highlights small { overflow: hidden; color: #657894; font-size: 0.53rem; text-overflow: ellipsis; white-space: nowrap; }
+
+  @media (max-width: 1050px) {
+    .reports-main-grid { grid-template-columns: 1fr; }
+    .report-content-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .report-content-grid article:nth-child(3n) { border-right: 1px solid #1e2d43; }
+    .report-content-grid article:nth-child(2n) { border-right: 0; }
+    .report-content-grid article:nth-last-child(-n + 3) { border-bottom: 1px solid #1e2d43; }
+    .report-content-grid article:nth-last-child(-n + 2) { border-bottom: 0; }
   }
 
   .comparison-workspace-header {
