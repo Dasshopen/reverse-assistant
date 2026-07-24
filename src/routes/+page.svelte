@@ -414,6 +414,9 @@ interface ApplyRenamesResult {
   let backgroundBsimResults = $state(new Map<string, BsimQueryResult>());
   let identificationPage = $state(1);
   const identificationPageSize = 10;
+  type IdentificationQueueFilter = "matched" | "unmatched" | "all";
+  let identificationQueueFilter = $state<IdentificationQueueFilter>("matched");
+  let identificationQueueSearch = $state("");
   let automaticIdentificationMode = $state(false);
   let automaticIdentificationPage = $state(1);
   const automaticIdentificationPageSize = 12;
@@ -458,17 +461,31 @@ interface ApplyRenamesResult {
       (func) => !func.is_external && isGeneratedFunctionName(func.name),
     ) ?? [],
   );
-  let identificationQueue = $derived(
+  let remainingIdentificationFunctions = $derived(
     unidentifiedFunctions.filter(
       (func) => !ignoredIdentificationAddresses.has(func.entry_address),
-    ).sort((a, b) => {
-      const aHasEvidence = (identifications.get(a.entry_address)?.length ?? 0) > 0 ||
-        bsimResultForAddress(a.entry_address)?.status === "available";
-      const bHasEvidence = (identifications.get(b.entry_address)?.length ?? 0) > 0 ||
-        bsimResultForAddress(b.entry_address)?.status === "available";
-      return Number(bHasEvidence) - Number(aHasEvidence);
-    }),
+    ),
   );
+  let matchedIdentificationCount = $derived(
+    remainingIdentificationFunctions.filter((func) => hasIdentificationEvidence(func.entry_address)).length,
+  );
+  let unmatchedIdentificationCount = $derived(
+    Math.max(0, remainingIdentificationFunctions.length - matchedIdentificationCount),
+  );
+  let identificationQueue = $derived.by(() => {
+    const query = identificationQueueSearch.trim().toLowerCase();
+    const filtered = remainingIdentificationFunctions.filter((func) => {
+      const hasEvidence = hasIdentificationEvidence(func.entry_address);
+      if (identificationQueueFilter === "matched" && !hasEvidence) return false;
+      if (identificationQueueFilter === "unmatched" && hasEvidence) return false;
+      if (!query) return true;
+      const fidNames = identifications.get(func.entry_address)?.map((candidate) => candidate.name) ?? [];
+      const bsimNames = bsimMatchesForAddress(func.entry_address).map((candidate) => candidate.name);
+      return [func.name, func.entry_address, ...fidNames, ...bsimNames]
+        .some((value) => value.toLowerCase().includes(query));
+    });
+    return sortIdentificationFunctions(filtered);
+  });
   let identificationPageCount = $derived(
     Math.max(1, Math.ceil(identificationQueue.length / identificationPageSize)),
   );
@@ -660,7 +677,20 @@ interface ApplyRenamesResult {
     if (/^\?\?3@/.test(name)) return "operator_delete";
 
     const globalFunction = name.match(/^\?([A-Za-z_][A-Za-z0-9_]*)@@/);
-    return globalFunction?.[1] ?? null;
+    if (globalFunction) return globalFunction[1];
+
+    // BSim commonly returns already-demangled C++ names. Ghidra's flat rename
+    // command cannot create namespaces here, so preserve every readable scope
+    // component while converting separators and compiler markers to `_`.
+    const flattened = name
+      .replace(/::/g, "_")
+      .replace(/\$/g, "_")
+      .replace(/[^A-Za-z0-9_]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (!flattened) return null;
+    const safe = /^[0-9]/.test(flattened) ? `function_${flattened}` : flattened;
+    return isSafeAutomaticSymbolName(safe) ? safe : null;
   }
 
   function reserveUniqueAutomaticName(
@@ -739,6 +769,34 @@ interface ApplyRenamesResult {
     return [...bestByName.values()].sort(
       (a, b) => b.similarity - a.similarity || b.significance - a.significance,
     );
+  }
+
+  function bsimMatchesForAddress(entryAddress: string): BsimCandidate[] {
+    const result = bsimResultForAddress(entryAddress);
+    return result?.status === "available" ? uniqueBsimCandidates(result.matches) : [];
+  }
+
+  function hasIdentificationEvidence(entryAddress: string): boolean {
+    return (identifications.get(entryAddress)?.length ?? 0) > 0 ||
+      bsimMatchesForAddress(entryAddress).length > 0;
+  }
+
+  function identificationEvidenceScore(func: GhidraFunction): number {
+    const fidScore = uniqueFidCandidates(identifications.get(func.entry_address) ?? [])[0]?.overall_score ?? 0;
+    const bsim = bsimMatchesForAddress(func.entry_address)[0];
+    const bsimScore = bsim ? bsim.similarity * 100 + bsim.significance : 0;
+    return Math.max(fidScore, bsimScore);
+  }
+
+  function sortIdentificationFunctions(functions: GhidraFunction[]): GhidraFunction[] {
+    return [...functions].sort((a, b) => {
+      const evidenceDifference = Number(hasIdentificationEvidence(b.entry_address)) -
+        Number(hasIdentificationEvidence(a.entry_address));
+      if (evidenceDifference !== 0) return evidenceDifference;
+      const scoreDifference = identificationEvidenceScore(b) - identificationEvidenceScore(a);
+      if (Math.abs(scoreDifference) > 0.0001) return scoreDifference;
+      return a.entry_address.localeCompare(b.entry_address);
+    });
   }
 
   let automaticRenameEvaluation = $derived.by<AutomaticRenameEvaluation>(() => {
@@ -825,17 +883,21 @@ interface ApplyRenamesResult {
       if (bestBsim) {
         const runnerUp = bsimCandidates[1];
         const margin = runnerUp ? bestBsim.similarity - runnerUp.similarity : null;
-        const isAmbiguous = bestBsim.similarity < automaticBsimMinimumSimilarity ||
-          bestBsim.significance < automaticBsimMinimumSignificance ||
-          (margin !== null && margin < automaticBsimMinimumMargin);
+        const normalizedBsimName = normalizedAutomaticSymbolName(bestBsim.name);
         let reason = "";
-        if (!isSafeAutomaticSymbolName(bestBsim.name)) {
-          reason = "Nom non compatible avec le renommage automatique.";
+        if (!normalizedBsimName) {
+          reason = "Nom C++ impossible à nettoyer sans perdre son sens.";
+        } else if (bestBsim.similarity < automaticBsimMinimumSimilarity) {
+          reason = `Similarité ${bestBsim.similarity.toFixed(3)} trop faible (minimum : ${automaticBsimMinimumSimilarity.toFixed(2)}).`;
+        } else if (bestBsim.significance < automaticBsimMinimumSignificance) {
+          reason = `Significativité ${bestBsim.significance.toFixed(1)} trop faible (minimum : ${automaticBsimMinimumSignificance.toFixed(1)}).`;
+        } else if (margin !== null && margin < automaticBsimMinimumMargin) {
+          reason = `Plusieurs noms BSim sont trop proches (marge ${margin.toFixed(3)}).`;
         }
 
         if (!reason) {
           const safeName = reserveUniqueAutomaticName(
-            bestBsim.name,
+            normalizedBsimName as string,
             func.entry_address,
             reservedNames,
           );
@@ -846,12 +908,10 @@ interface ApplyRenamesResult {
             scoreLabel: `similarité ${bestBsim.similarity.toFixed(3)}`,
             evidenceLabel: `${bestBsim.corpus} · ${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
             alternativeCount: Math.max(0, bsimCandidates.length - 1),
-            decisionLabel: isAmbiguous
-              ? "Meilleure proposition BSim nettoyée, confiance limitée clairement signalée"
-              : margin === null
+            decisionLabel: margin === null
               ? "Candidat unique au-dessus des seuils de sécurité"
               : `Marge de ${margin.toFixed(3)} sur le deuxième candidat`,
-            ambiguous: isAmbiguous,
+            ambiguous: false,
           });
           continue;
         }
@@ -1475,6 +1535,8 @@ interface ApplyRenamesResult {
       identificationProgramSha = currentProgramSha;
       ignoredIdentificationAddresses = new Set();
       identificationPage = 1;
+      identificationQueueFilter = "matched";
+      identificationQueueSearch = "";
       automaticIdentificationMode = false;
       automaticIdentificationPage = 1;
       automaticRenameError = "";
@@ -2117,15 +2179,25 @@ interface ApplyRenamesResult {
 
   function selectIdentificationEvidenceFirst() {
     const selectedHasEvidence = selectedFunctionAddress !== null &&
-      ((identifications.get(selectedFunctionAddress)?.length ?? 0) > 0 ||
-        bsimResultForAddress(selectedFunctionAddress)?.status === "available");
+      hasIdentificationEvidence(selectedFunctionAddress);
     if (selectedHasEvidence) return;
 
-    const firstWithEvidence = identificationQueue.find(
-      (func) => (identifications.get(func.entry_address)?.length ?? 0) > 0 ||
-        bsimResultForAddress(func.entry_address)?.status === "available",
+    const firstWithEvidence = identificationQueue.find((func) =>
+      hasIdentificationEvidence(func.entry_address)
     );
     if (firstWithEvidence) selectedFunctionAddress = firstWithEvidence.entry_address;
+  }
+
+  function reviewIdentificationFunction(entryAddress: string) {
+    automaticIdentificationMode = false;
+    identificationQueueFilter = "matched";
+    identificationQueueSearch = "";
+    const matched = sortIdentificationFunctions(
+      remainingIdentificationFunctions.filter((func) => hasIdentificationEvidence(func.entry_address)),
+    );
+    const index = matched.findIndex((func) => func.entry_address === entryAddress);
+    identificationPage = index < 0 ? 1 : Math.floor(index / identificationPageSize) + 1;
+    openFunction(entryAddress, false);
   }
 
   function selectWorkspaceView(view: WorkspaceView) {
@@ -3793,7 +3865,7 @@ interface ApplyRenamesResult {
           {#if automaticRenameRejections.length > 0}
             <details class="automatic-rejections" open>
               <summary>
-                <span><strong>{automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Nom impossible à nettoyer sans perdre son sens</small></span>
+                <span><strong>{automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Score insuffisant, ambiguïté ou nom nécessitant une validation</small></span>
                 <b>Voir les raisons</b>
               </summary>
               <div class="automatic-rejection-list">
@@ -3802,13 +3874,13 @@ interface ApplyRenamesResult {
                     <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
                     <div><span>{item.candidateDisplayName}</span>{#if item.candidateName && item.candidateDisplayName !== item.candidateName}<code title="Nom brut FunctionID">{item.candidateName}</code>{/if}</div>
                     <div><small>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.evidenceLabel}</small><b>{item.reason}</b></div>
-                    <button type="button" onclick={() => { automaticIdentificationMode = false; openFunction(item.func.entry_address, false); }}>Vérifier manuellement</button>
+                    <button type="button" onclick={() => reviewIdentificationFunction(item.func.entry_address)}>Vérifier manuellement</button>
                   </article>
                 {/each}
               </div>
             </details>
           {/if}
-        {:else if identificationQueue.length === 0}
+        {:else if remainingIdentificationFunctions.length === 0}
           <div class="identification-complete">
             <span aria-hidden="true">✓</span>
             <h3>La file est terminée</h3>
@@ -3818,12 +3890,21 @@ interface ApplyRenamesResult {
           <div class="identification-layout">
             <aside class="identification-queue">
               <header>
-                <div><strong>File de renommage</strong><span>{identificationQueue.length} restante(s)</span></div>
+                <div><strong>File de renommage</strong><span>{remainingIdentificationFunctions.length} restante(s) · {identificationQueue.length} affichée(s)</span></div>
                 <small>Page {currentIdentificationPage} sur {identificationPageCount}</small>
               </header>
+              <div class="identification-queue-tools">
+                <div role="group" aria-label="Filtrer la file de renommage">
+                  <button type="button" class:active={identificationQueueFilter === "matched"} onclick={() => { identificationQueueFilter = "matched"; identificationPage = 1; }}>Avec proposition <b>{matchedIdentificationCount}</b></button>
+                  <button type="button" class:active={identificationQueueFilter === "unmatched"} onclick={() => { identificationQueueFilter = "unmatched"; identificationPage = 1; }}>Sans correspondance <b>{unmatchedIdentificationCount}</b></button>
+                  <button type="button" class:active={identificationQueueFilter === "all"} onclick={() => { identificationQueueFilter = "all"; identificationPage = 1; }}>Toutes <b>{remainingIdentificationFunctions.length}</b></button>
+                </div>
+                <input type="search" placeholder="Nom, adresse ou proposition…" bind:value={identificationQueueSearch} oninput={() => (identificationPage = 1)} />
+              </div>
               <ol>
                 {#each paginatedIdentificationQueue as func (func.entry_address)}
                   {@const candidate = topIdentificationFor(func.entry_address)}
+                  {@const topBsimCandidate = bsimMatchesForAddress(func.entry_address)[0]}
                   {@const evidenceCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? [])}
                   {@const topEvidenceScore = evidenceCandidates[0]?.overall_score}
                   {@const tiedEvidenceCount = topEvidenceScore === undefined ? 0 : evidenceCandidates.filter((item) => Math.abs(item.overall_score - topEvidenceScore) < 0.0001).length}
@@ -3839,6 +3920,8 @@ interface ApplyRenamesResult {
                         <span class="queue-candidate ambiguous"><small>{tiedEvidenceCount} noms ex æquo</small><b>{automaticChoice?.name ?? "Choix manuel requis"}</b></span>
                       {:else if candidate}
                         <span class="queue-candidate"><small>Proposition nettoyée</small><b>{automaticChoice?.name ?? normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}</b></span>
+                      {:else if topBsimCandidate}
+                        <span class="queue-candidate"><small>BSim · {topBsimCandidate.similarity.toFixed(3)}</small><b>{automaticChoice?.name ?? normalizedAutomaticSymbolName(topBsimCandidate.name) ?? topBsimCandidate.name}</b></span>
                       {:else}
                         <span class="queue-no-evidence">Sans correspondance</span>
                       {/if}
@@ -3846,6 +3929,9 @@ interface ApplyRenamesResult {
                   </li>
                 {/each}
               </ol>
+              {#if identificationQueue.length === 0}
+                <p class="identification-queue-empty">Aucune fonction ne correspond à ce filtre.</p>
+              {/if}
               <nav class="identification-pagination" aria-label="Pages de la file de renommage">
                 <button type="button" disabled={currentIdentificationPage === 1} onclick={() => (identificationPage = Math.max(1, currentIdentificationPage - 1))}>←</button>
                 <span>{currentIdentificationPage} / {identificationPageCount}</span>
@@ -3888,7 +3974,7 @@ interface ApplyRenamesResult {
                         <h5>BSim</h5>
                         {#each selectedBsimResult.matches as candidate}
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "bsim")}
-                          {@const proposedName = automaticChoice && candidate.name === selectedBsimResult.matches[0]?.name ? automaticChoice.name : candidate.name}
+                          {@const proposedName = automaticChoice && candidate.name === selectedBsimResult.matches[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
                           <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
                             <span><strong>{candidate.name}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.corpus} · {candidate.executable}</small></span>
                             <span><code>{candidate.similarity.toFixed(3)}</code><small>significativité {candidate.significance.toFixed(1)}</small></span>
@@ -7293,6 +7379,12 @@ interface ApplyRenamesResult {
   .identification-queue > header strong { font-size: 0.75rem; }
   .identification-queue > header span,
   .identification-queue > header small { color: #8292ad; font-size: 0.58rem; }
+  .identification-queue-tools { display: grid; gap: 0.45rem; padding: 0.55rem 0.6rem; border-bottom: 1px solid #22324a; }
+  .identification-queue-tools > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.3rem; }
+  .identification-queue-tools button { min-width: 0; padding: 0.35rem 0.3rem; border: 1px solid #30425e; background: #101d30; color: #9fb0c8; font-size: 0.52rem; white-space: nowrap; }
+  .identification-queue-tools button b { color: #67e8f9; }
+  .identification-queue-tools button.active { border-color: #8b5cf6; background: #241b48; color: #f5f3ff; }
+  .identification-queue-tools input { min-width: 0; padding: 0.42rem 0.5rem; font-size: 0.58rem; }
   .identification-queue ol { display: grid; margin: 0; padding: 0; list-style: none; }
   .identification-queue li { border-bottom: 1px solid #1d2a40; }
 
@@ -7332,6 +7424,7 @@ interface ApplyRenamesResult {
   .identification-pagination button { padding: 0.25rem 0.55rem; border: 1px solid #354765; background: #111e31; color: #d6e0ee; }
   .identification-pagination button:disabled { cursor: default; opacity: 0.3; }
   .identification-pagination span { color: #8292ad; font-size: 0.62rem; }
+  .identification-queue-empty { margin: 0; padding: 1.5rem 0.75rem; color: #8292ad; font-size: 0.65rem; text-align: center; }
 
   .identification-review { min-width: 0; }
   .identification-review > header { display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 0.8rem; border-bottom: 1px solid #22324a; }
