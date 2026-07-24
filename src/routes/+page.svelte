@@ -459,13 +459,63 @@ interface ApplyRenamesResult {
   let projectComparison = $state<ProjectComparison | null>(null);
   let projectComparisonError = $state("");
   let isComparingProjects = $state(false);
-  let comparisonMatchesFilter = $state<"changed" | "all">("changed");
+  type ComparisonView = "changed" | "matched" | "added" | "removed";
+  let comparisonView = $state<ComparisonView>("changed");
+  let comparisonSearch = $state("");
+  let comparisonPage = $state(1);
+  const comparisonPageSize = 12;
 
   let filteredComparisonMatches = $derived.by(() => {
     if (!projectComparison) return [];
-    if (comparisonMatchesFilter === "all") return projectComparison.matches;
-    return projectComparison.matches.filter((match) => match.changes.length > 0);
+    const query = comparisonSearch.trim().toLowerCase();
+    return projectComparison.matches.filter((match) => {
+      if (comparisonView === "changed" && match.changes.length === 0) return false;
+      if (comparisonView !== "changed" && comparisonView !== "matched") return false;
+      return (
+        !query ||
+        qualifiedFunctionName(match.function_a).toLowerCase().includes(query) ||
+        qualifiedFunctionName(match.function_b).toLowerCase().includes(query) ||
+        match.function_a.entry_address.toLowerCase().includes(query) ||
+        match.function_b.entry_address.toLowerCase().includes(query)
+      );
+    });
   });
+
+  let filteredComparisonAdded = $derived.by(() => {
+    if (!projectComparison || comparisonView !== "added") return [];
+    const query = comparisonSearch.trim().toLowerCase();
+    return projectComparison.unmatched_b.filter(
+      (func) =>
+        !query ||
+        qualifiedFunctionName(func).toLowerCase().includes(query) ||
+        func.entry_address.toLowerCase().includes(query),
+    );
+  });
+
+  let filteredComparisonRemoved = $derived.by(() => {
+    if (!projectComparison || comparisonView !== "removed") return [];
+    const query = comparisonSearch.trim().toLowerCase();
+    return projectComparison.unmatched_a.filter(
+      (func) =>
+        !query ||
+        qualifiedFunctionName(func).toLowerCase().includes(query) ||
+        func.entry_address.toLowerCase().includes(query),
+    );
+  });
+
+  let comparisonVisibleCount = $derived(
+    comparisonView === "added"
+      ? filteredComparisonAdded.length
+      : comparisonView === "removed"
+        ? filteredComparisonRemoved.length
+        : filteredComparisonMatches.length,
+  );
+  let comparisonPageCount = $derived(
+    Math.max(1, Math.ceil(comparisonVisibleCount / comparisonPageSize)),
+  );
+  let currentComparisonPage = $derived(
+    Math.min(comparisonPage, comparisonPageCount),
+  );
 
   let changedComparisonCount = $derived(
     projectComparison?.matches.filter((match) => match.changes.length > 0).length ?? 0,
@@ -1234,11 +1284,33 @@ interface ApplyRenamesResult {
         projectAId: comparisonProjectAId,
         projectBId: comparisonProjectBId,
       });
+      comparisonView = "changed";
+      comparisonSearch = "";
+      comparisonPage = 1;
     } catch (error) {
       projectComparisonError = String(error);
     } finally {
       isComparingProjects = false;
     }
+  }
+
+  function clearProjectComparison() {
+    projectComparison = null;
+    projectComparisonError = "";
+    comparisonSearch = "";
+    comparisonPage = 1;
+  }
+
+  function swapComparisonProjects() {
+    const previousA = comparisonProjectAId;
+    comparisonProjectAId = comparisonProjectBId;
+    comparisonProjectBId = previousA;
+    clearProjectComparison();
+  }
+
+  function selectComparisonView(view: ComparisonView) {
+    comparisonView = view;
+    comparisonPage = 1;
   }
 
   function comparisonProjectName(id: string): string {
@@ -1252,17 +1324,28 @@ interface ApplyRenamesResult {
   }
 
   function formatChangeKind(kind: FunctionChangeKind): string {
-    return kind.replaceAll("_", " ");
+    switch (kind) {
+      case "return_type":
+        return "Type de retour";
+      case "parameters":
+        return "Paramètres";
+      case "thunk_status":
+        return "Statut thunk";
+      case "external_status":
+        return "Statut externe";
+      case "outgoing_call_count":
+        return "Appels sortants";
+    }
   }
 
   function formatUnmatchedReason(reason: UnmatchedReason): string {
     switch (reason) {
       case "auto_generated_name":
-        return "automatic Ghidra name";
+        return "Nom automatique Ghidra : pas d'appariement fiable";
       case "ambiguous_name":
-        return "ambiguous name";
+        return "Nom ambigu présent plusieurs fois";
       case "no_candidate":
-        return "no unique symbol-name candidate";
+        return "Aucun symbole unique correspondant";
     }
   }
 
@@ -2222,55 +2305,44 @@ interface ApplyRenamesResult {
           class:view-hidden={activeWorkspaceView !== "comparison"}
           aria-labelledby="project-comparison-title"
         >
-          <h3 id="project-comparison-title">Compare two saved projects</h3>
-          <p class="saved-projects-note">
-            This first comparison matches unique, meaningful symbols. Automatic Ghidra names
-            remain explicitly unmatched unless both projects are analyses of the exact same binary.
-          </p>
+          <header class="comparison-workspace-header">
+            <div>
+              <p class="detail-label">Analyse différentielle locale</p>
+              <h2 id="project-comparison-title">Comparer deux analyses</h2>
+              <p>Repère les fonctions modifiées, ajoutées ou supprimées entre deux projets sauvegardés.</p>
+            </div>
+            <span>Aucune donnée ne quitte cette machine</span>
+          </header>
 
-          <div class="project-comparison-controls">
+          <div class="comparison-project-picker">
             <label>
-              Project A
-              <select
-                bind:value={comparisonProjectAId}
-                onchange={() => {
-                  projectComparison = null;
-                  projectComparisonError = "";
-                }}
-              >
-                <option value="">Select a project...</option>
+              <span>VERSION A · RÉFÉRENCE</span>
+              <select bind:value={comparisonProjectAId} onchange={clearProjectComparison}>
+                <option value="">Choisir un projet…</option>
                 {#each savedProjects as project (project.id)}
                   <option value={project.id} disabled={project.id === comparisonProjectBId}>
-                    {project.name} — {project.program_name}
+                    {project.name} — {project.program_name} ({project.function_count} fonctions)
                   </option>
                 {/each}
               </select>
             </label>
+
+            <button type="button" class="comparison-swap" onclick={swapComparisonProjects} title="Inverser les versions">⇄</button>
 
             <label>
-              Project B
-              <select
-                bind:value={comparisonProjectBId}
-                onchange={() => {
-                  projectComparison = null;
-                  projectComparisonError = "";
-                }}
-              >
-                <option value="">Select a project...</option>
+              <span>VERSION B · CIBLE</span>
+              <select bind:value={comparisonProjectBId} onchange={clearProjectComparison}>
+                <option value="">Choisir un projet…</option>
                 {#each savedProjects as project (project.id)}
                   <option value={project.id} disabled={project.id === comparisonProjectAId}>
-                    {project.name} — {project.program_name}
+                    {project.name} — {project.program_name} ({project.function_count} fonctions)
                   </option>
                 {/each}
               </select>
             </label>
 
-            <button
-              type="button"
-              disabled={isComparingProjects}
-              onclick={compareSavedProjects}
-            >
-              {isComparingProjects ? "Comparing..." : "Compare"}
+            <button type="button" class="comparison-run" disabled={isComparingProjects || !comparisonProjectAId || !comparisonProjectBId} onclick={compareSavedProjects}>
+              {isComparingProjects ? "Comparaison…" : "Comparer"}
             </button>
           </div>
 
@@ -2280,125 +2352,73 @@ interface ApplyRenamesResult {
 
           {#if projectComparison}
             <div class="project-comparison-result">
-              <p class="project-comparison-context">
-                <strong>{comparisonProjectName(comparisonProjectAId)}</strong>
-                versus
-                <strong>{comparisonProjectName(comparisonProjectBId)}</strong>
-                — {projectComparison.same_binary
-                  ? "exact same binary (address matching allowed)"
-                  : "different binaries (no address fallback)"}
-              </p>
-
-              <dl class="summary-grid">
-                <div>
-                  <dt>Matched functions</dt>
-                  <dd>{projectComparison.matches.length}</dd>
-                </div>
-                <div>
-                  <dt>Changed matches</dt>
-                  <dd>{changedComparisonCount}</dd>
-                </div>
-                <div>
-                  <dt>Unmatched in A</dt>
-                  <dd>{projectComparison.unmatched_a.length}</dd>
-                </div>
-                <div>
-                  <dt>Unmatched in B</dt>
-                  <dd>{projectComparison.unmatched_b.length}</dd>
-                </div>
-              </dl>
-
-              <div class="comparison-filter">
-                <label>
-                  Matched functions
-                  <select bind:value={comparisonMatchesFilter}>
-                    <option value="changed">Changed only</option>
-                    <option value="all">All matches</option>
-                  </select>
-                </label>
-                <span>{filteredComparisonMatches.length} results</span>
+              <div class="comparison-result-context">
+                <span><strong>{comparisonProjectName(comparisonProjectAId)}</strong> → <strong>{comparisonProjectName(comparisonProjectBId)}</strong></span>
+                <small>{projectComparison.same_binary ? "Même binaire : appariement par adresse autorisé" : "Binaires différents : appariement par symbole unique uniquement"}</small>
               </div>
 
-              {#if filteredComparisonMatches.length === 0}
-                <p>No matched function satisfies this filter.</p>
-              {:else}
-                <ul class="comparison-list">
-                  {#each filteredComparisonMatches.slice(0, 200) as match (`${match.function_a.entry_address}-${match.function_b.entry_address}`)}
-                    <li>
-                      <div class="comparison-function-heading">
-                        <strong>{qualifiedFunctionName(match.function_a)}</strong>
-                        <span>
-                          {match.function_a.entry_address} → {match.function_b.entry_address}
-                        </span>
-                      </div>
-                      <p class="comparison-match-method">
-                        Matched by {match.method === "symbol_name" ? "unique symbol name" : "same address"}
-                        {match.same_address ? " · same address" : ""}
-                      </p>
-                      {#if match.changes.length === 0}
-                        <p class="comparison-unchanged">No detected metadata change.</p>
-                      {:else}
-                        <ul class="comparison-changes">
-                          {#each match.changes as change}
-                            <li>
-                              <strong>{formatChangeKind(change.kind)}:</strong>
-                              <code>{change.before || "(empty)"}</code>
-                              →
-                              <code>{change.after || "(empty)"}</code>
-                            </li>
-                          {/each}
-                        </ul>
-                      {/if}
-                    </li>
-                  {/each}
-                </ul>
-                {#if filteredComparisonMatches.length > 200}
-                  <p class="saved-projects-note">
-                    Showing the first 200 results to keep this provisional view responsive.
-                  </p>
+              <dl class="comparison-kpis">
+                <div class="matched"><dt>Fonctions communes</dt><dd>{projectComparison.matches.length}</dd><span>appariées avec une preuve</span></div>
+                <div class="changed"><dt>Modifiées</dt><dd>{changedComparisonCount}</dd><span>métadonnées différentes</span></div>
+                <div class="added"><dt>Ajoutées dans B</dt><dd>+{projectComparison.unmatched_b.length}</dd><span>absentes de la référence</span></div>
+                <div class="removed"><dt>Supprimées de A</dt><dd>−{projectComparison.unmatched_a.length}</dd><span>absentes de la cible</span></div>
+              </dl>
+
+              <div class="comparison-browser">
+                <nav class="comparison-tabs" aria-label="Catégorie de différences">
+                  <button type="button" class:active={comparisonView === "changed"} onclick={() => selectComparisonView("changed")}>Modifiées <span>{changedComparisonCount}</span></button>
+                  <button type="button" class:active={comparisonView === "added"} onclick={() => selectComparisonView("added")}>Ajoutées <span>{projectComparison.unmatched_b.length}</span></button>
+                  <button type="button" class:active={comparisonView === "removed"} onclick={() => selectComparisonView("removed")}>Supprimées <span>{projectComparison.unmatched_a.length}</span></button>
+                  <button type="button" class:active={comparisonView === "matched"} onclick={() => selectComparisonView("matched")}>Communes <span>{projectComparison.matches.length}</span></button>
+                </nav>
+
+                <div class="comparison-search-row">
+                  <input type="search" placeholder="Rechercher une fonction ou une adresse…" bind:value={comparisonSearch} oninput={() => (comparisonPage = 1)} />
+                  <span>{comparisonVisibleCount} résultat{comparisonVisibleCount > 1 ? "s" : ""}</span>
+                </div>
+
+                <div class="comparison-table-header">
+                  <span>Fonction</span><span>Version A</span><span>Version B</span><span>Preuve / différences</span>
+                </div>
+
+                {#if comparisonVisibleCount === 0}
+                  <div class="comparison-no-result"><strong>Aucun résultat dans cette catégorie</strong><span>Modifie la recherche ou choisis un autre type de différence.</span></div>
+                {:else if comparisonView === "changed" || comparisonView === "matched"}
+                  <ul class="comparison-rows">
+                    {#each filteredComparisonMatches.slice((currentComparisonPage - 1) * comparisonPageSize, currentComparisonPage * comparisonPageSize) as match (`${match.function_a.entry_address}-${match.function_b.entry_address}`)}
+                      <li class:changed={match.changes.length > 0}>
+                        <div><strong>{qualifiedFunctionName(match.function_b)}</strong><small>{match.changes.length > 0 ? `${match.changes.length} modification(s)` : "Inchangée"}</small></div>
+                        <code>{match.function_a.entry_address}</code>
+                        <code>{match.function_b.entry_address}</code>
+                        <div class="comparison-evidence">
+                          <small>{match.method === "symbol_name" ? "Symbole unique" : "Même adresse"}{match.same_address ? " · adresse stable" : ""}</small>
+                          {#if match.changes.length > 0}
+                            {#each match.changes as change}
+                              <span><strong>{formatChangeKind(change.kind)}</strong><code>{change.before || "∅"}</code><b>→</b><code>{change.after || "∅"}</code></span>
+                            {/each}
+                          {/if}
+                        </div>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <ul class="comparison-rows comparison-single-side">
+                    {#each (comparisonView === "added" ? filteredComparisonAdded : filteredComparisonRemoved).slice((currentComparisonPage - 1) * comparisonPageSize, currentComparisonPage * comparisonPageSize) as functionRef (functionRef.entry_address)}
+                      <li class:added={comparisonView === "added"} class:removed={comparisonView === "removed"}>
+                        <div><strong>{qualifiedFunctionName(functionRef)}</strong><small>{comparisonView === "added" ? "Ajoutée dans la version B" : "Supprimée de la version A"}</small></div>
+                        <code>{comparisonView === "removed" ? functionRef.entry_address : "—"}</code>
+                        <code>{comparisonView === "added" ? functionRef.entry_address : "—"}</code>
+                        <div class="comparison-evidence"><small>{formatUnmatchedReason(functionRef.reason)}</small></div>
+                      </li>
+                    {/each}
+                  </ul>
                 {/if}
-              {/if}
 
-              <div class="comparison-unmatched-grid">
-                <section>
-                  <h4>Unmatched in {comparisonProjectName(comparisonProjectAId)}</h4>
-                  {#if projectComparison.unmatched_a.length === 0}
-                    <p>None.</p>
-                  {:else}
-                    <ul class="comparison-unmatched-list">
-                      {#each projectComparison.unmatched_a.slice(0, 200) as functionRef (functionRef.entry_address)}
-                        <li>
-                          <code>{functionRef.entry_address}</code>
-                          <strong>{qualifiedFunctionName(functionRef)}</strong>
-                          <span>{formatUnmatchedReason(functionRef.reason)}</span>
-                        </li>
-                      {/each}
-                    </ul>
-                    {#if projectComparison.unmatched_a.length > 200}
-                      <p class="saved-projects-note">Showing the first 200 unmatched functions.</p>
-                    {/if}
-                  {/if}
-                </section>
-
-                <section>
-                  <h4>Unmatched in {comparisonProjectName(comparisonProjectBId)}</h4>
-                  {#if projectComparison.unmatched_b.length === 0}
-                    <p>None.</p>
-                  {:else}
-                    <ul class="comparison-unmatched-list">
-                      {#each projectComparison.unmatched_b.slice(0, 200) as functionRef (functionRef.entry_address)}
-                        <li>
-                          <code>{functionRef.entry_address}</code>
-                          <strong>{qualifiedFunctionName(functionRef)}</strong>
-                          <span>{formatUnmatchedReason(functionRef.reason)}</span>
-                        </li>
-                      {/each}
-                    </ul>
-                    {#if projectComparison.unmatched_b.length > 200}
-                      <p class="saved-projects-note">Showing the first 200 unmatched functions.</p>
-                    {/if}
-                  {/if}
-                </section>
+                <nav class="comparison-pagination" aria-label="Pagination des différences">
+                  <button type="button" disabled={currentComparisonPage === 1} onclick={() => (comparisonPage = Math.max(1, currentComparisonPage - 1))}>← Précédente</button>
+                  <span>Page {currentComparisonPage} sur {comparisonPageCount}</span>
+                  <button type="button" disabled={currentComparisonPage === comparisonPageCount} onclick={() => (comparisonPage = Math.min(comparisonPageCount, currentComparisonPage + 1))}>Suivante →</button>
+                </nav>
               </div>
             </div>
           {/if}
@@ -4044,9 +4064,9 @@ interface ApplyRenamesResult {
   }
 
   .project-comparison {
-    margin-top: 1.25rem;
-    padding-top: 1.25rem;
-    border-top: 1px solid #374151;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
 
   .report-export-controls {
@@ -4063,132 +4083,102 @@ interface ApplyRenamesResult {
     overflow-wrap: anywhere;
   }
 
-  .project-comparison h3,
-  .project-comparison h4 {
-    margin: 0 0 0.5rem;
-  }
-
-  .project-comparison-controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: end;
-    gap: 0.75rem;
-  }
-
-  .project-comparison-controls label,
-  .comparison-filter label {
-    display: grid;
-    flex: 1 1 260px;
-    gap: 0.35rem;
-    color: #94a3b8;
-    font-size: 0.85rem;
-  }
-
-  .project-comparison-controls select,
-  .comparison-filter select {
-    min-width: 0;
-    padding: 0.55rem 0.7rem;
-    border: 1px solid #475569;
-    border-radius: 0.5rem;
-    background-color: #0f172a;
-    color: #f8fafc;
-  }
-
-  .project-comparison-result {
-    margin-top: 1rem;
-  }
-
-  .project-comparison-context {
-    color: #cbd5e1;
-  }
-
-  .comparison-filter {
+  .comparison-workspace-header {
     display: flex;
     align-items: end;
-    gap: 1rem;
-    margin: 1rem 0 0.75rem;
-  }
-
-  .comparison-filter span,
-  .comparison-match-method,
-  .comparison-unchanged {
-    color: #94a3b8;
-    font-size: 0.8rem;
-  }
-
-  .comparison-list,
-  .comparison-unmatched-list {
-    display: grid;
-    max-height: 520px;
-    margin: 0;
-    padding: 0;
-    gap: 0.5rem;
-    overflow-y: auto;
-    list-style: none;
-  }
-
-  .comparison-list > li,
-  .comparison-unmatched-list li {
-    padding: 0.65rem;
-    border: 1px solid #374151;
-    border-radius: 0.5rem;
-    background-color: #111827;
-  }
-
-  .comparison-function-heading {
-    display: flex;
-    flex-wrap: wrap;
     justify-content: space-between;
-    gap: 0.5rem;
-  }
-
-  .comparison-function-heading span {
-    color: #93c5fd;
-    font-family: monospace;
-    font-size: 0.8rem;
-  }
-
-  .comparison-match-method,
-  .comparison-unchanged {
-    margin: 0.35rem 0 0;
-  }
-
-  .comparison-changes {
-    display: grid;
-    margin: 0.6rem 0 0;
-    padding-left: 1.2rem;
-    gap: 0.35rem;
-  }
-
-  .comparison-changes code {
-    overflow-wrap: anywhere;
-  }
-
-  .comparison-unmatched-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 1rem;
-    margin-top: 1.25rem;
+    margin-bottom: 0.8rem;
   }
 
-  .comparison-unmatched-list li {
+  .comparison-workspace-header h2 { margin: 0.1rem 0 0.2rem; font-size: 1.18rem; }
+  .comparison-workspace-header p:not(.detail-label) { margin: 0; color: #8191aa; font-size: 0.7rem; }
+  .comparison-workspace-header > span { padding: 0.32rem 0.55rem; border: 1px solid #245241; border-radius: 999px; background: #0d2a24; color: #6ee7b7; font-size: 0.58rem; white-space: nowrap; }
+
+  .comparison-project-picker {
     display: grid;
-    gap: 0.2rem;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 0.65rem;
+    padding: 0.75rem;
+    border: 1px solid #24334b;
+    border-radius: 10px;
+    background: #0c1627;
   }
 
-  .comparison-unmatched-list code {
-    color: #93c5fd;
+  .comparison-project-picker label { display: grid; min-width: 0; gap: 0.35rem; }
+  .comparison-project-picker label > span { color: #7e90ac; font-size: 0.57rem; font-weight: 700; letter-spacing: 0.08em; }
+  .comparison-project-picker select { width: 100%; min-width: 0; padding: 0.58rem 0.65rem; border: 1px solid #32435f; border-radius: 7px; background: #0a1322; color: #e5edf8; font-size: 0.68rem; }
+  .comparison-project-picker button { min-height: 35px; }
+  .comparison-swap { width: 38px; padding: 0; border: 1px solid #4c3a83; background: #211845; color: #c4b5fd; font-size: 1rem; }
+  .comparison-run { padding: 0.5rem 1rem; background: #6d28d9; color: #fff; font-size: 0.68rem; }
+
+  .project-comparison-result { margin-top: 0.75rem; }
+  .comparison-result-context { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.65rem; padding: 0 0.15rem; }
+  .comparison-result-context span { color: #dce6f5; font-size: 0.72rem; }
+  .comparison-result-context small { color: #7e90aa; font-size: 0.58rem; }
+
+  .comparison-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.55rem; margin: 0; }
+  .comparison-kpis > div { display: grid; gap: 0.1rem; min-height: 82px; padding: 0.65rem 0.75rem; border: 1px solid #24334b; border-radius: 8px; background: #0f1b2e; }
+  .comparison-kpis dt { color: #8fa0bb; font-size: 0.62rem; }
+  .comparison-kpis dd { margin: 0; color: #dbeafe; font-size: 1.35rem; font-weight: 800; }
+  .comparison-kpis span { color: #667894; font-size: 0.56rem; }
+  .comparison-kpis .changed dd { color: #fbbf24; }
+  .comparison-kpis .added dd { color: #4ade80; }
+  .comparison-kpis .removed dd { color: #fb7185; }
+
+  .comparison-browser { margin-top: 0.65rem; border: 1px solid #24334b; border-radius: 10px; background: #0a1424; overflow: hidden; }
+  .comparison-tabs { display: flex; gap: 0.2rem; padding: 0.35rem 0.5rem 0; border-bottom: 1px solid #223149; }
+  .comparison-tabs button { padding: 0.5rem 0.65rem; border-radius: 6px 6px 0 0; background: transparent; color: #8495b0; font-size: 0.65rem; }
+  .comparison-tabs button.active { box-shadow: inset 0 -2px #8b5cf6; background: #171b38; color: #f3f0ff; }
+  .comparison-tabs button span { margin-left: 0.25rem; padding: 0.08rem 0.3rem; border-radius: 999px; background: #202d43; font-size: 0.52rem; }
+
+  .comparison-search-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.55rem; }
+  .comparison-search-row input { flex: 1; min-width: 0; padding: 0.5rem 0.62rem; border: 1px solid #2b3b56; border-radius: 6px; background: #091221; color: #e2e8f0; font-size: 0.66rem; }
+  .comparison-search-row span { color: #71819a; font-size: 0.58rem; white-space: nowrap; }
+
+  .comparison-table-header,
+  .comparison-rows > li {
+    display: grid;
+    grid-template-columns: minmax(150px, 1.05fr) 0.55fr 0.55fr minmax(220px, 1.5fr);
+    gap: 0.65rem;
+    align-items: start;
   }
 
-  .comparison-unmatched-list span {
-    color: #94a3b8;
-    font-size: 0.8rem;
-  }
+  .comparison-table-header { padding: 0.42rem 0.7rem; border-block: 1px solid #223149; background: #0d1829; color: #6f819e; font-size: 0.55rem; font-weight: 700; text-transform: uppercase; }
+  .comparison-rows { display: grid; margin: 0; padding: 0; list-style: none; }
+  .comparison-rows > li { min-height: 54px; padding: 0.58rem 0.7rem; border-bottom: 1px solid #1d2a3f; }
+  .comparison-rows > li:hover { background: #101e32; }
+  .comparison-rows > li.changed { box-shadow: inset 3px 0 #f59e0b; }
+  .comparison-rows > li.added { box-shadow: inset 3px 0 #22c55e; }
+  .comparison-rows > li.removed { box-shadow: inset 3px 0 #f43f5e; }
+  .comparison-rows > li > div:first-child { display: grid; min-width: 0; gap: 0.15rem; }
+  .comparison-rows strong { overflow: hidden; color: #e6edf7; font-size: 0.67rem; text-overflow: ellipsis; white-space: nowrap; }
+  .comparison-rows small { color: #71829d; font-size: 0.55rem; }
+  .comparison-rows > li > code { color: #86b8e8; font-size: 0.6rem; }
 
-  @media (max-width: 760px) {
-    .comparison-unmatched-grid {
-      grid-template-columns: 1fr;
-    }
+  .comparison-evidence { display: grid; min-width: 0; gap: 0.25rem; }
+  .comparison-evidence > small { color: #a78bfa; }
+  .comparison-evidence > span { display: grid; grid-template-columns: 90px minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 0.3rem; }
+  .comparison-evidence > span strong { color: #8ea0ba; font-size: 0.54rem; font-weight: 600; }
+  .comparison-evidence > span code { overflow: hidden; padding: 0.12rem 0.25rem; border-radius: 3px; background: #121f32; color: #b9c8dc; font-size: 0.52rem; text-overflow: ellipsis; white-space: nowrap; }
+  .comparison-evidence b { color: #667894; font-size: 0.55rem; }
+
+  .comparison-no-result { display: grid; place-content: center; min-height: 220px; text-align: center; }
+  .comparison-no-result strong { color: #dce5f3; font-size: 0.75rem; }
+  .comparison-no-result span { margin-top: 0.3rem; color: #71829d; font-size: 0.62rem; }
+  .comparison-pagination { display: flex; align-items: center; justify-content: center; gap: 0.75rem; padding: 0.5rem; border-top: 1px solid #223149; }
+  .comparison-pagination button { padding: 0.32rem 0.55rem; border: 1px solid #354765; background: #111e31; color: #d6e0ee; font-size: 0.58rem; }
+  .comparison-pagination button:disabled { opacity: 0.3; }
+  .comparison-pagination span { color: #71819a; font-size: 0.57rem; }
+
+  @media (max-width: 980px) {
+    .comparison-project-picker { grid-template-columns: 1fr auto 1fr; }
+    .comparison-run { grid-column: 1 / -1; }
+    .comparison-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .comparison-table-header { display: none; }
+    .comparison-rows > li { grid-template-columns: 1fr 1fr; }
+    .comparison-evidence { grid-column: 1 / -1; }
   }
 
   .backend-check {
