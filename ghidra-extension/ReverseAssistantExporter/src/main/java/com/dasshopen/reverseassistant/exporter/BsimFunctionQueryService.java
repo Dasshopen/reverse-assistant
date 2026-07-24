@@ -2,7 +2,10 @@ package com.dasshopen.reverseassistant.exporter;
 
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import ghidra.features.bsim.query.BSimClientFactory;
@@ -38,6 +41,36 @@ public final class BsimFunctionQueryService {
         Objects.requireNonNull(databaseUrl, "databaseUrl must not be null");
         Objects.requireNonNull(monitor, "monitor must not be null");
 
+        Map<Long, List<BsimCandidate>> matches = queryBatch(
+            program,
+            List.of(function),
+            corpus,
+            databaseUrl,
+            monitor
+        );
+        return BsimQueryResult.available(
+            matches.getOrDefault(function.getEntryPoint().getOffset(), List.of())
+        );
+    }
+
+    public Map<Long, List<BsimCandidate>> queryBatch(
+        Program program,
+        Collection<Function> functions,
+        String corpus,
+        String databaseUrl,
+        TaskMonitor monitor
+    ) throws Exception {
+        Objects.requireNonNull(program, "program must not be null");
+        Objects.requireNonNull(functions, "functions must not be null");
+        Objects.requireNonNull(corpus, "corpus must not be null");
+        Objects.requireNonNull(databaseUrl, "databaseUrl must not be null");
+        Objects.requireNonNull(monitor, "monitor must not be null");
+
+        Map<Long, List<BsimCandidate>> candidatesByAddress = new LinkedHashMap<>();
+        for (Function function : functions) {
+            candidatesByAddress.put(function.getEntryPoint().getOffset(), new ArrayList<>());
+        }
+
         URL url = BSimClientFactory.deriveBSimURL(databaseUrl);
 
         try (FunctionDatabase database = BSimClientFactory.buildClient(url, false)) {
@@ -50,7 +83,10 @@ public final class BsimFunctionQueryService {
             try {
                 signatures.setVectorFactory(database.getLSHVectorFactory());
                 signatures.openProgram(program, null, null, null, null, null);
-                signatures.scanFunction(function);
+                for (Function function : functions) {
+                    signatures.scanFunction(function);
+                    monitor.checkCancelled();
+                }
                 monitor.checkCancelled();
 
                 DescriptionManager manager = signatures.getDescriptionManager();
@@ -66,9 +102,11 @@ public final class BsimFunctionQueryService {
                     throw new IllegalStateException(database.getLastError().message);
                 }
 
-                List<BsimCandidate> candidates = new ArrayList<>();
-
                 for (SimilarityResult similarityResult : response.result) {
+                    List<BsimCandidate> candidates = candidatesByAddress.computeIfAbsent(
+                        similarityResult.getBase().getAddress(),
+                        ignored -> new ArrayList<>()
+                    );
                     for (SimilarityNote note : similarityResult) {
                         FunctionDescription match = note.getFunctionDescription();
 
@@ -82,7 +120,7 @@ public final class BsimFunctionQueryService {
                     }
                 }
 
-                return BsimQueryResult.available(candidates);
+                return candidatesByAddress;
             }
             catch (CancelledException exception) {
                 throw exception;

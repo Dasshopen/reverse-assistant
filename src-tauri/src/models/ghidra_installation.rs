@@ -12,6 +12,7 @@ const DECOMPILE_SCRIPT_NAME: &str = "DecompileFunctionJson.java";
 const APPLY_RENAMES_SCRIPT_NAME: &str = "ApplyFunctionRenamesJson.java";
 const DISABLE_SLOW_ANALYZERS_SCRIPT_NAME: &str = "DisableSlowAnalyzers.java";
 const IDENTIFY_FUNCTIONS_SCRIPT_NAME: &str = "IdentifyFunctionsJson.java";
+const QUERY_BSIM_FUNCTIONS_SCRIPT_NAME: &str = "QueryBsimFunctionsJson.java";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GhidraInstallation {
@@ -142,6 +143,17 @@ pub fn validate_ghidra_installation(
             "the Reverse Assistant FunctionID identification script is missing (expected {}); run scripts/deploy-ghidra-extension.ps1 -GhidraInstallDir '{}'",
             identify_functions_script.display(),
             install_dir.display()
+        ));
+    }
+
+    let query_bsim_functions_script = extensions_dir
+        .join("ghidra_scripts")
+        .join(QUERY_BSIM_FUNCTIONS_SCRIPT_NAME);
+
+    if !query_bsim_functions_script.is_file() {
+        return Err(format!(
+            "Reverse Assistant BSim scan script is missing at {}; redeploy the extension",
+            query_bsim_functions_script.display(),
         ));
     }
 

@@ -87,6 +87,11 @@ fn install_extension(setup: &FakeGhidraSetup, version_label: &str) {
         &extensions_dir.join("ghidra_scripts/IdentifyFunctionsJson.java"),
         "// fake script\n",
     );
+
+    write_file(
+        &extensions_dir.join("ghidra_scripts/QueryBsimFunctionsJson.java"),
+        "// fake script\n",
+    );
 }
 
 #[test]

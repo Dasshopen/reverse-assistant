@@ -13,6 +13,7 @@ use models::project::ProjectMetadata;
 use services::bsim_corpus::{self, BsimCorpusSummary};
 use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
 use services::comparison::{self, ProjectComparison};
+use services::ghidra_bsim_scan;
 use services::ghidra_decompile::{self, DecompiledFunctionDetails};
 use services::ghidra_edits::{self, ApplyRenamesResult, FunctionRename};
 use services::ghidra_headless;
@@ -240,6 +241,46 @@ fn analyze_binary_with_ghidra(
         identifications,
         saved_project,
     })
+}
+
+#[tauri::command(async)]
+fn scan_project_with_bsim(
+    app: AppHandle,
+    coordinator: tauri::State<'_, DecompileCoordinator>,
+    project_id: String,
+) -> Result<Vec<FunctionIdentification>, String> {
+    let (_, existing, project) =
+        project_storage::load_project_with_identifications(&app, &project_id)?;
+    let session = project
+        .metadata
+        .session
+        .as_ref()
+        .ok_or_else(|| "BSim background scanning requires a live Ghidra project".to_owned())?;
+    if !project.session_available {
+        return Err("the saved Ghidra project is currently unavailable".to_owned());
+    }
+    project_storage::require_managed_session(&app, session)?;
+    let install_dir = ghidra_installation::load_persisted_install_dir(&app)?
+        .ok_or_else(|| "No Ghidra installation is configured.".to_owned())?;
+    let installation = ghidra_installation::validate_installation(&app, &install_dir)?;
+
+    ghidra_headless::emit_analysis_progress(
+        &app,
+        "bsim",
+        "BSim compare les fonctions non nommées aux corpus actifs en arrière-plan…",
+        None,
+    );
+    let scanned = coordinator
+        .run_exclusive(|| ghidra_bsim_scan::scan_unnamed_functions(&app, &installation, session))?;
+    let merged = ghidra_bsim_scan::merge_results(existing.unwrap_or_default(), scanned);
+    project_storage::replace_project_identifications(&app, &project_id, &merged)?;
+    ghidra_headless::emit_analysis_progress(
+        &app,
+        "bsim_complete",
+        "Balayage BSim terminé. Les preuves ont été enregistrées dans le projet.",
+        Some(100),
+    );
+    Ok(merged)
 }
 
 #[tauri::command]
@@ -532,6 +573,7 @@ pub fn run() {
             install_managed_setup,
             adopt_existing_ghidra,
             analyze_binary_with_ghidra,
+            scan_project_with_bsim,
             decompile_function,
             get_call_graph,
             get_global_strings,

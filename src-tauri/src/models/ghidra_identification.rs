@@ -4,6 +4,21 @@ use serde::{Deserialize, Serialize};
 pub struct FunctionIdentification {
     pub entry_address: String,
     pub candidates: Vec<FidCandidate>,
+    #[serde(default)]
+    pub bsim_candidates: Vec<BsimIdentificationCandidate>,
+    #[serde(default)]
+    pub bsim_scanned: bool,
+    #[serde(default)]
+    pub bsim_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BsimIdentificationCandidate {
+    pub name: String,
+    pub executable: String,
+    pub corpus: String,
+    pub similarity: f64,
+    pub significance: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

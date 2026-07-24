@@ -126,6 +126,23 @@ pub fn replace_project_export(
     replace_project_export_at(&real_projects_root_dir(app)?, id, export)
 }
 
+pub fn replace_project_identifications(
+    app: &AppHandle,
+    id: &str,
+    identifications: &[FunctionIdentification],
+) -> Result<(), String> {
+    require_safe_project_id(id)?;
+    let dir = project_dir_at(&real_projects_root_dir(app)?, id);
+    if !dir.is_dir() {
+        return Err(format!("no saved project exists with id '{id}'"));
+    }
+    let (export_json, _) = read_project_payload(&dir)?;
+    let export: GhidraExport = serde_json::from_str(&export_json)
+        .map_err(|error| format!("invalid saved project export: {error}"))?;
+    export.validate()?;
+    write_project_archive(&dir, &export, Some(identifications))
+}
+
 fn replace_project_export_at(root: &Path, id: &str, export: &GhidraExport) -> Result<(), String> {
     require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
@@ -719,6 +736,9 @@ mod tests {
                 overall_score: 42.5,
                 match_mode: "FULL".to_owned(),
             }],
+            bsim_candidates: Vec::new(),
+            bsim_scanned: false,
+            bsim_message: None,
         }];
 
         let saved = save_project_at_with_identifications(

@@ -189,6 +189,9 @@ interface FidCandidate {
 interface FunctionIdentification {
   entry_address: string;
   candidates: FidCandidate[];
+  bsim_candidates: BsimCandidate[];
+  bsim_scanned: boolean;
+  bsim_message: string | null;
 }
 
 interface AutomaticRenameChoice {
@@ -408,6 +411,7 @@ interface ApplyRenamesResult {
   let pendingDecompiles = $state(new Set<string>());
   let decompileErrors = $state(new Map<string, string>());
   let identifications = $state(new Map<string, FidCandidate[]>());
+  let backgroundBsimResults = $state(new Map<string, BsimQueryResult>());
   let identificationPage = $state(1);
   const identificationPageSize = 10;
   let automaticIdentificationMode = $state(false);
@@ -459,9 +463,9 @@ interface ApplyRenamesResult {
       (func) => !ignoredIdentificationAddresses.has(func.entry_address),
     ).sort((a, b) => {
       const aHasEvidence = (identifications.get(a.entry_address)?.length ?? 0) > 0 ||
-        decompileCache.get(a.entry_address)?.bsim.status === "available";
+        bsimResultForAddress(a.entry_address)?.status === "available";
       const bHasEvidence = (identifications.get(b.entry_address)?.length ?? 0) > 0 ||
-        decompileCache.get(b.entry_address)?.bsim.status === "available";
+        bsimResultForAddress(b.entry_address)?.status === "available";
       return Number(bHasEvidence) - Number(aHasEvidence);
     }),
   );
@@ -749,18 +753,34 @@ interface ApplyRenamesResult {
     for (const func of unidentifiedFunctions) {
       const fidCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? []);
       const bestFid = fidCandidates[0];
+      const bsim = bsimResultForAddress(func.entry_address);
+      const bsimCandidates = bsim?.status === "available"
+        ? uniqueBsimCandidates(bsim.matches)
+        : [];
+      const bestBsim = bsimCandidates[0];
+      const bsimIsStrong = bestBsim !== undefined &&
+        bestBsim.similarity >= automaticBsimMinimumSimilarity &&
+        bestBsim.significance >= automaticBsimMinimumSignificance;
+      const corroboratedFid = bsimIsStrong
+        ? fidCandidates.find((candidate) => {
+            const fidName = normalizedAutomaticSymbolName(candidate.name);
+            const bsimName = normalizedAutomaticSymbolName(bestBsim.name) ?? bestBsim.name;
+            return fidName !== null && fidName.toLowerCase() === bsimName.toLowerCase();
+          })
+        : undefined;
+      const selectedFid = corroboratedFid ?? bestFid;
       let fidRejection: AutomaticRenameRejection | null = null;
 
-      if (bestFid) {
-        const runnerUp = fidCandidates[1];
-        const margin = runnerUp ? bestFid.overall_score - runnerUp.overall_score : null;
-        const isAmbiguous = margin !== null && margin < automaticFidMinimumMargin;
-        const normalizedName = normalizedAutomaticSymbolName(bestFid.name);
+      if (selectedFid) {
+        const runnerUp = fidCandidates.find((candidate) => candidate.name !== selectedFid.name);
+        const margin = runnerUp ? selectedFid.overall_score - runnerUp.overall_score : null;
+        const isAmbiguous = corroboratedFid === undefined && margin !== null && margin < automaticFidMinimumMargin;
+        const normalizedName = normalizedAutomaticSymbolName(selectedFid.name);
         let reason = "";
         if (!normalizedName) {
           reason = "Nom C++ impossible à convertir sans perdre son sens.";
-        } else if (bestFid.overall_score < automaticFidMinimumScore) {
-          reason = `Score ${bestFid.overall_score.toFixed(1)} trop faible (minimum automatique : ${automaticFidMinimumScore.toFixed(1)}).`;
+        } else if (selectedFid.overall_score < automaticFidMinimumScore) {
+          reason = `Score ${selectedFid.overall_score.toFixed(1)} trop faible (minimum automatique : ${automaticFidMinimumScore.toFixed(1)}).`;
         }
 
         if (!reason) {
@@ -773,10 +793,14 @@ interface ApplyRenamesResult {
             func,
             name: safeName,
             source: "function_id",
-            scoreLabel: `score ${bestFid.overall_score.toFixed(1)}`,
-            evidenceLabel: `${bestFid.library_family} ${bestFid.library_version} · ${bestFid.match_mode}`,
+            scoreLabel: `score ${selectedFid.overall_score.toFixed(1)}`,
+            evidenceLabel: corroboratedFid && bestBsim
+              ? `${selectedFid.library_family} ${selectedFid.library_version} · confirmé par ${bestBsim.corpus} (BSim ${bestBsim.similarity.toFixed(3)})`
+              : `${selectedFid.library_family} ${selectedFid.library_version} · ${selectedFid.match_mode}`,
             alternativeCount: Math.max(0, fidCandidates.length - 1),
-            decisionLabel: isAmbiguous
+            decisionLabel: corroboratedFid
+              ? "FunctionID et BSim proposent le même nom"
+              : isAmbiguous
               ? `${fidCandidates.length} noms ex æquo : premier choix FunctionID nettoyé, ambiguïté conservée`
               : margin === null
               ? "Candidat unique au-dessus du seuil de sécurité"
@@ -788,22 +812,16 @@ interface ApplyRenamesResult {
 
         fidRejection = {
           func,
-          candidateName: bestFid.name,
-          candidateDisplayName: displayCandidateName(bestFid.name),
+          candidateName: selectedFid.name,
+          candidateDisplayName: displayCandidateName(selectedFid.name),
           source: "function_id",
-          evidenceLabel: `score ${bestFid.overall_score.toFixed(1)} · ${bestFid.library_family} ${bestFid.library_version}`,
+          evidenceLabel: `score ${selectedFid.overall_score.toFixed(1)} · ${selectedFid.library_family} ${selectedFid.library_version}`,
           reason,
         };
       }
 
       // A rejected FunctionID result does not hide an independently strong
       // BSim result. BSim can rescue it, under its own strict rules.
-      const bsim = decompileCache.get(func.entry_address)?.bsim;
-      const bsimCandidates = bsim?.status === "available"
-        ? uniqueBsimCandidates(bsim.matches)
-        : [];
-      const bestBsim = bsimCandidates[0];
-
       if (bestBsim) {
         const runnerUp = bsimCandidates[1];
         const margin = runnerUp ? bestBsim.similarity - runnerUp.similarity : null;
@@ -1422,7 +1440,11 @@ interface ApplyRenamesResult {
       .join(", ");
     return `${displayedReturnType || "undefined"} ${selectedFunction.name}(${parameters})`;
   });
-  let selectedBsimResult = $derived(enrichedDetails?.bsim ?? null);
+  let selectedBsimResult = $derived(
+    enrichedDetails?.bsim ??
+      (selectedFunctionAddress ? backgroundBsimResults.get(selectedFunctionAddress) : null) ??
+      null,
+  );
 
   $effect(() => {
     const address = selectedFunctionAddress;
@@ -1491,6 +1513,49 @@ interface ApplyRenamesResult {
     }
   }
 
+  function installIdentificationEvidence(items: FunctionIdentification[]) {
+    identifications = new Map(
+      items.map((identification) => [identification.entry_address, identification.candidates]),
+    );
+    backgroundBsimResults = new Map(
+      items
+        .filter((identification) => identification.bsim_scanned)
+        .map((identification) => [
+          identification.entry_address,
+          {
+            status: "available" as const,
+            matches: identification.bsim_candidates,
+            message: identification.bsim_message,
+          },
+        ]),
+    );
+  }
+
+  function bsimResultForAddress(entryAddress: string): BsimQueryResult | undefined {
+    return decompileCache.get(entryAddress)?.bsim ?? backgroundBsimResults.get(entryAddress);
+  }
+
+  async function runBackgroundBsimScan(projectId: string): Promise<boolean> {
+    try {
+      const evidence = await invoke<FunctionIdentification[]>("scan_project_with_bsim", {
+        projectId,
+      });
+      installIdentificationEvidence(evidence);
+      return true;
+    } catch (error) {
+      console.error("Background BSim scan failed", error);
+      analyzeError = `Le balayage BSim en arrière-plan a échoué : ${String(error)}`;
+      analysisProgress = {
+        stage: "error",
+        message: "Le balayage BSim n’a pas pu se terminer.",
+        completed_percent: null,
+      };
+      analysisProgressMinimized = false;
+      analysisProgressVisible = true;
+      return false;
+    }
+  }
+
   async function openProject(id: string) {
     projectActionError = "";
     importError = "";
@@ -1504,6 +1569,7 @@ interface ApplyRenamesResult {
     pendingDecompiles = new Set();
     decompileErrors = new Map();
     identifications = new Map();
+    backgroundBsimResults = new Map();
     functionIdAnalysisAvailable = false;
 
     try {
@@ -1511,12 +1577,7 @@ interface ApplyRenamesResult {
 
       importedExport = loaded.export;
       selectedFunctionAddress = initialFunctionAddress(loaded.export);
-      identifications = new Map(
-        (loaded.identifications ?? []).map((identification) => [
-          identification.entry_address,
-          identification.candidates,
-        ]),
-      );
+      installIdentificationEvidence(loaded.identifications ?? []);
       functionIdAnalysisAvailable = loaded.identifications !== null;
       // A currently-available session (Ghidra project files genuinely
       // present right now, just re-verified by the backend) keeps
@@ -1526,6 +1587,26 @@ interface ApplyRenamesResult {
       analysisSource = loaded.project.session_available ? "automatic" : "manual";
       activeProjectId = loaded.project.id;
       activeWorkspaceView = "overview";
+      const scannedAddresses = new Set(
+        (loaded.identifications ?? [])
+          .filter((identification) => identification.bsim_scanned)
+          .map((identification) => identification.entry_address),
+      );
+      const needsBsimScan = loaded.project.session_available && loaded.export.functions.some(
+        (func) => !func.is_external && isGeneratedFunctionName(func.name) && !scannedAddresses.has(func.entry_address),
+      );
+      if (needsBsimScan) {
+        analysisTargetName = loaded.export.program.name;
+        analysisProgressMinimized = true;
+        analysisProgressVisible = true;
+        void runBackgroundBsimScan(loaded.project.id).then((completed) => {
+          if (completed) {
+            setTimeout(() => {
+              analysisProgressVisible = false;
+            }, 1200);
+          }
+        });
+      }
     } catch (error) {
       projectActionError = String(error);
     }
@@ -2037,12 +2118,12 @@ interface ApplyRenamesResult {
   function selectIdentificationEvidenceFirst() {
     const selectedHasEvidence = selectedFunctionAddress !== null &&
       ((identifications.get(selectedFunctionAddress)?.length ?? 0) > 0 ||
-        decompileCache.get(selectedFunctionAddress)?.bsim.status === "available");
+        bsimResultForAddress(selectedFunctionAddress)?.status === "available");
     if (selectedHasEvidence) return;
 
     const firstWithEvidence = identificationQueue.find(
       (func) => (identifications.get(func.entry_address)?.length ?? 0) > 0 ||
-        decompileCache.get(func.entry_address)?.bsim.status === "available",
+        bsimResultForAddress(func.entry_address)?.status === "available",
     );
     if (firstWithEvidence) selectedFunctionAddress = firstWithEvidence.entry_address;
   }
@@ -2435,12 +2516,7 @@ interface ApplyRenamesResult {
       analysisSource = "automatic";
       activeProjectId = result.saved_project?.id ?? null;
       activeWorkspaceView = "overview";
-      identifications = new Map(
-        result.identifications.map((identification) => [
-          identification.entry_address,
-          identification.candidates,
-        ]),
-      );
+      installIdentificationEvidence(result.identifications);
       functionIdAnalysisAvailable = true;
       // The backend auto-saves every completed analysis as a local
       // project -- refresh the list so it shows up right away.
@@ -2452,6 +2528,17 @@ interface ApplyRenamesResult {
       };
       await new Promise((resolve) => setTimeout(resolve, 850));
       analysisProgressVisible = false;
+      if (result.saved_project?.id) {
+        analysisProgressMinimized = true;
+        analysisProgressVisible = true;
+        void runBackgroundBsimScan(result.saved_project.id).then((completed) => {
+          if (completed) {
+            setTimeout(() => {
+              analysisProgressVisible = false;
+            }, 1200);
+          }
+        });
+      }
     } catch (error) {
       analyzeError = String(error);
       analysisProgress = {
@@ -3631,6 +3718,7 @@ interface ApplyRenamesResult {
           <dl>
             <div><dt>Non nommées</dt><dd>{unidentifiedFunctions.length}</dd></div>
             <div><dt>Avec FunctionID</dt><dd>{unidentifiedFunctions.filter((func) => (identifications.get(func.entry_address)?.length ?? 0) > 0).length}</dd></div>
+            <div><dt>Avec BSim</dt><dd>{unidentifiedFunctions.filter((func) => (backgroundBsimResults.get(func.entry_address)?.matches.length ?? 0) > 0).length}</dd></div>
             <div><dt>Ignorées</dt><dd>{ignoredIdentificationAddresses.size}</dd></div>
           </dl>
         </header>
