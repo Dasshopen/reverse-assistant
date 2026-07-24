@@ -837,6 +837,24 @@ interface ApplyRenamesResult {
   let graph3dYaw = $state(-0.35);
   let graph3dPitch = $state(0.28);
   let graph3dZoom = $state(1);
+  let graphInspectedFunctionAddress = $state<string | null>(null);
+  let graphNodeOffsets = $state(new Map<string, { x: number; y: number }>());
+  let graphNodeDrag = $state<{
+    address: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    offsetX: number;
+    offsetY: number;
+    moved: boolean;
+  } | null>(null);
+  let graphPanDrag = $state<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
   let graph3dDrag = $state<{
     pointerId: number;
     startX: number;
@@ -878,6 +896,11 @@ interface ApplyRenamesResult {
       currentGraphFunctionPage * graphFunctionPageSize,
     ),
   );
+  let graphInspectedFunction = $derived(
+    importedExport?.functions.find(
+      (func) => func.entry_address === graphInspectedFunctionAddress,
+    ) ?? selectedFunction,
+  );
 
   let callGraphLayout = $derived.by(() => {
     if (!callGraphResult) return { nodes: [], height: 360 };
@@ -892,8 +915,15 @@ interface ApplyRenamesResult {
     const nodes = [...depthGroups.entries()].flatMap(([depth, group]) =>
       group.map((node, index) => ({
         ...node,
-        x: Math.round(((index + 1) * graphCanvasWidth) / (group.length + 1) - graphNodeWidth / 2),
-        y: 38 + depth * 142,
+        x:
+          Math.round(
+            ((index + 1) * graphCanvasWidth) / (group.length + 1) -
+              graphNodeWidth / 2,
+          ) + (graphNodeOffsets.get(node.entry_address)?.x ?? 0),
+        y:
+          38 +
+          depth * 142 +
+          (graphNodeOffsets.get(node.entry_address)?.y ?? 0),
       })),
     );
 
@@ -936,8 +966,14 @@ interface ApplyRenamesResult {
         const perspective = 900 / Math.max(420, 900 + rotatedZ);
         return {
           ...node,
-          x: graphCanvasWidth / 2 + rotatedX * perspective * graph3dZoom,
-          y: graph3dHeight / 2 + rotatedY * perspective * graph3dZoom,
+          x:
+            graphCanvasWidth / 2 +
+            rotatedX * perspective * graph3dZoom +
+            (graphNodeOffsets.get(node.entry_address)?.x ?? 0),
+          y:
+            graph3dHeight / 2 +
+            rotatedY * perspective * graph3dZoom +
+            (graphNodeOffsets.get(node.entry_address)?.y ?? 0),
           z: rotatedZ,
           scale: perspective * graph3dZoom,
         };
@@ -1047,6 +1083,8 @@ interface ApplyRenamesResult {
     if (currentProgramSha !== graphHistoryProgramSha) {
       graphHistoryProgramSha = currentProgramSha;
       graphNavigationHistory = [];
+      graphInspectedFunctionAddress = null;
+      graphNodeOffsets = new Map();
     }
   });
 
@@ -1610,6 +1648,8 @@ interface ApplyRenamesResult {
     if (selectedFunctionAddress && selectedFunctionAddress !== entryAddress) {
       graphNavigationHistory = [...graphNavigationHistory, selectedFunctionAddress];
     }
+    graphInspectedFunctionAddress = entryAddress;
+    graphNodeOffsets = new Map();
     openFunction(entryAddress, false);
   }
 
@@ -1617,7 +1657,81 @@ interface ApplyRenamesResult {
     const previousAddress = graphNavigationHistory.at(-1);
     if (!previousAddress) return;
     graphNavigationHistory = graphNavigationHistory.slice(0, -1);
+    graphInspectedFunctionAddress = previousAddress;
+    graphNodeOffsets = new Map();
     openFunction(previousAddress, false);
+  }
+
+  function inspectGraphFunction(entryAddress: string) {
+    graphInspectedFunctionAddress = entryAddress;
+  }
+
+  function resetGraphNodePositions() {
+    graphNodeOffsets = new Map();
+  }
+
+  function handleGraphNodePointerDown(event: PointerEvent, entryAddress: string) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const offset = graphNodeOffsets.get(entryAddress) ?? { x: 0, y: 0 };
+    graphNodeDrag = {
+      address: entryAddress,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: offset.x,
+      offsetY: offset.y,
+      moved: false,
+    };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  }
+
+  function handleGraphNodePointerMove(event: PointerEvent) {
+    if (!graphNodeDrag || graphNodeDrag.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    const deltaX = event.clientX - graphNodeDrag.startX;
+    const deltaY = event.clientY - graphNodeDrag.startY;
+    const moved = graphNodeDrag.moved || Math.hypot(deltaX, deltaY) > 4;
+    graphNodeOffsets = new Map(graphNodeOffsets).set(graphNodeDrag.address, {
+      x: graphNodeDrag.offsetX + deltaX,
+      y: graphNodeDrag.offsetY + deltaY,
+    });
+    graphNodeDrag = { ...graphNodeDrag, moved };
+  }
+
+  function handleGraphNodePointerUp(event: PointerEvent) {
+    if (!graphNodeDrag || graphNodeDrag.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    const { address, moved } = graphNodeDrag;
+    graphNodeDrag = null;
+    if (!moved) inspectGraphFunction(address);
+  }
+
+  function handleGraphPanPointerDown(event: PointerEvent) {
+    if (event.button !== 2) return;
+    event.preventDefault();
+    const container = event.currentTarget as HTMLElement;
+    graphPanDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: container.scrollLeft,
+      scrollTop: container.scrollTop,
+    };
+    container.setPointerCapture(event.pointerId);
+  }
+
+  function handleGraphPanPointerMove(event: PointerEvent) {
+    if (!graphPanDrag || graphPanDrag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const container = event.currentTarget as HTMLElement;
+    container.scrollLeft = graphPanDrag.scrollLeft - (event.clientX - graphPanDrag.startX);
+    container.scrollTop = graphPanDrag.scrollTop - (event.clientY - graphPanDrag.startY);
+  }
+
+  function handleGraphPanPointerUp(event: PointerEvent) {
+    if (graphPanDrag?.pointerId === event.pointerId) graphPanDrag = null;
   }
 
   function resetGraph3dView() {
@@ -1627,6 +1741,7 @@ interface ApplyRenamesResult {
   }
 
   function handleGraph3dPointerDown(event: PointerEvent) {
+    if (event.button !== 0) return;
     if ((event.target as HTMLElement).closest("button")) return;
     graph3dDrag = {
       pointerId: event.pointerId,
@@ -3133,13 +3248,39 @@ interface ApplyRenamesResult {
             <input type="search" placeholder="Nom ou adresse…" bind:value={graphFunctionSearch} oninput={() => (graphFunctionPage = 1)} />
             <ul>
               {#each paginatedGraphFunctions as func (func.entry_address)}
-                <li><button type="button" class:active={func.entry_address === selectedFunctionAddress} onclick={() => navigateWithinGraph(func.entry_address)}><span>{func.name}</span><code>{func.entry_address}</code></button></li>
+                <li>
+                  <button
+                    type="button"
+                    class:root={func.entry_address === selectedFunctionAddress}
+                    class:active={func.entry_address === graphInspectedFunction?.entry_address}
+                    onclick={() => inspectGraphFunction(func.entry_address)}
+                    ondblclick={() => navigateWithinGraph(func.entry_address)}
+                    title="Clic : afficher les informations. Double-clic : recentrer le graphe."
+                  >
+                    <span class="graph-function-name">{func.name}</span>
+                    <span class="graph-function-meta">
+                      <code>{func.entry_address}</code>
+                      <small>{func.is_external ? "Externe" : func.is_thunk ? "Thunk" : "Interne"}</small>
+                      <small>{func.calls.length} appel{func.calls.length > 1 ? "s" : ""}</small>
+                    </span>
+                  </button>
+                </li>
               {/each}
             </ul>
             <nav><button type="button" disabled={currentGraphFunctionPage === 1} onclick={() => (graphFunctionPage = Math.max(1, currentGraphFunctionPage - 1))}>←</button><span>{currentGraphFunctionPage} / {graphFunctionPageCount}</span><button type="button" disabled={currentGraphFunctionPage === graphFunctionPageCount} onclick={() => (graphFunctionPage = Math.min(graphFunctionPageCount, currentGraphFunctionPage + 1))}>→</button></nav>
           </aside>
 
-          <div class="graph-stage-wrap">
+          <div
+            class="graph-stage-wrap"
+            class:panning={graphPanDrag !== null}
+            onpointerdown={handleGraphPanPointerDown}
+            onpointermove={handleGraphPanPointerMove}
+            onpointerup={handleGraphPanPointerUp}
+            onpointercancel={handleGraphPanPointerUp}
+            oncontextmenu={(event) => event.preventDefault()}
+            role="region"
+            aria-label="Zone interactive du graphe d'appels"
+          >
             {#if isLoadingCallGraph}
               <p class="graph-message">Construction du graphe…</p>
             {:else if callGraphError}
@@ -3155,6 +3296,13 @@ interface ApplyRenamesResult {
                 {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
                 profondeur {callGraphResult.depth_reached}
               </p>
+              <div class="graph-interaction-toolbar">
+                <span>Clic : informations · double-clic : recentrer · glisser un nœud : l'écarter · clic droit : déplacer la vue</span>
+                <div>
+                  <button type="button" onclick={resetGraphNodePositions}>Réorganiser les nœuds</button>
+                  {#if graphViewMode === "3d"}<button type="button" onclick={resetGraph3dView}>Réinitialiser la caméra</button>{/if}
+                </div>
+              </div>
               {#if graphViewMode === "2d"}
                 <div class="graph-stage" style={`width:${graphCanvasWidth}px;height:${callGraphLayout.height}px`}>
                   <svg class="graph-edges" viewBox={`0 0 ${graphCanvasWidth} ${callGraphLayout.height}`} aria-hidden="true">
@@ -3166,11 +3314,25 @@ interface ApplyRenamesResult {
                     {/each}
                   </svg>
                   {#each callGraphLayout.nodes as node (node.entry_address)}
-                    <button type="button" class="visual-graph-node" class:root={node.entry_address === selectedFunctionAddress} class:external={node.is_external} class:thunk={node.is_thunk} style={`left:${node.x}px;top:${node.y}px;width:${graphNodeWidth}px;height:${graphNodeHeight}px`} onclick={() => navigateWithinGraph(node.entry_address)}><strong>{node.name}</strong><code>{node.entry_address}</code></button>
+                    <button
+                      type="button"
+                      class="visual-graph-node"
+                      class:root={node.entry_address === selectedFunctionAddress}
+                      class:inspected={node.entry_address === graphInspectedFunction?.entry_address}
+                      class:dragging={graphNodeDrag?.address === node.entry_address}
+                      class:external={node.is_external}
+                      class:thunk={node.is_thunk}
+                      style={`left:${node.x}px;top:${node.y}px;width:${graphNodeWidth}px;height:${graphNodeHeight}px`}
+                      onpointerdown={(event) => handleGraphNodePointerDown(event, node.entry_address)}
+                      onpointermove={handleGraphNodePointerMove}
+                      onpointerup={handleGraphNodePointerUp}
+                      onpointercancel={handleGraphNodePointerUp}
+                      ondblclick={() => navigateWithinGraph(node.entry_address)}
+                    ><strong>{node.name}</strong><code>{node.entry_address}</code></button>
                   {/each}
                 </div>
               {:else}
-                <div class="graph-3d-toolbar"><span>Glisse pour tourner · molette pour zoomer</span><button type="button" onclick={resetGraph3dView}>Réinitialiser la vue</button></div>
+                <div class="graph-3d-toolbar"><span>Glisse le fond pour tourner · molette pour zoomer</span></div>
                 <div
                   class="graph-stage graph-stage-3d"
                   class:dragging={graph3dDrag !== null}
@@ -3194,10 +3356,16 @@ interface ApplyRenamesResult {
                       type="button"
                       class="visual-graph-node graph-node-3d"
                       class:root={node.entry_address === selectedFunctionAddress}
+                      class:inspected={node.entry_address === graphInspectedFunction?.entry_address}
+                      class:dragging={graphNodeDrag?.address === node.entry_address}
                       class:external={node.is_external}
                       class:thunk={node.is_thunk}
                       style={`left:${node.x - graph3dNodeWidth / 2}px;top:${node.y - graph3dNodeHeight / 2}px;width:${graph3dNodeWidth}px;height:${graph3dNodeHeight}px;transform:scale(${Math.max(0.68, Math.min(1.22, node.scale))});z-index:${Math.round(1000 - node.z)}`}
-                      onclick={() => navigateWithinGraph(node.entry_address)}
+                      onpointerdown={(event) => handleGraphNodePointerDown(event, node.entry_address)}
+                      onpointermove={handleGraphNodePointerMove}
+                      onpointerup={handleGraphNodePointerUp}
+                      onpointercancel={handleGraphNodePointerUp}
+                      ondblclick={() => navigateWithinGraph(node.entry_address)}
                     ><strong>{node.name}</strong><code>{node.entry_address}</code></button>
                   {/each}
                 </div>
@@ -3220,19 +3388,19 @@ interface ApplyRenamesResult {
             {/if}
 
             <p class="detail-label">Fonction sélectionnée</p>
-            <h3>{selectedFunction?.name ?? "Aucune fonction"}</h3>
-            {#if selectedFunction}
-              <code>{selectedFunction.entry_address}</code>
+            <h3>{graphInspectedFunction?.name ?? "Aucune fonction"}</h3>
+            {#if graphInspectedFunction}
+              <code>{graphInspectedFunction.entry_address}</code>
               <dl>
-                <div><dt>Type</dt><dd>{selectedFunction.is_external ? "Externe" : selectedFunction.is_thunk ? "Thunk" : "Interne"}</dd></div>
-                <div><dt>Appels</dt><dd>{selectedFunction.calls.length}</dd></div>
-                <div><dt>Chaînes</dt><dd>{selectedFunction.strings.length}</dd></div>
-                <div><dt>Paramètres</dt><dd>{displayedParameters.length}</dd></div>
+                <div><dt>Type</dt><dd>{graphInspectedFunction.is_external ? "Externe" : graphInspectedFunction.is_thunk ? "Thunk" : "Interne"}</dd></div>
+                <div><dt>Appels</dt><dd>{graphInspectedFunction.calls.length}</dd></div>
+                <div><dt>Chaînes</dt><dd>{graphInspectedFunction.strings.length}</dd></div>
+                <div><dt>Paramètres</dt><dd>{graphInspectedFunction.parameters.length}</dd></div>
               </dl>
-              {#if callGraphDirection === "outgoing" && callGraphResult?.edges.length === 0}
+              {#if graphInspectedFunction.entry_address === selectedFunctionAddress && callGraphDirection === "outgoing" && callGraphResult?.edges.length === 0}
                 <button type="button" class="graph-callers-button" onclick={() => (callGraphDirection = "incoming")}>Afficher les fonctions qui l'appellent</button>
               {/if}
-              <button type="button" onclick={() => (activeWorkspaceView = "functions")}>Voir les détails</button>
+              <button type="button" onclick={() => openFunction(graphInspectedFunction?.entry_address ?? null)}>Voir les détails</button>
             {/if}
           </aside>
         </div>
@@ -4929,7 +5097,7 @@ interface ApplyRenamesResult {
 
   .graph-layout {
     display: grid;
-    grid-template-columns: 230px minmax(0, 1fr) 220px;
+    grid-template-columns: 280px minmax(0, 1fr) 230px;
     min-height: 610px;
     margin-top: 0.75rem;
     border: 1px solid #1e2c42;
@@ -4954,16 +5122,19 @@ interface ApplyRenamesResult {
     border-bottom: 1px solid #1e2c42;
   }
 
-  .graph-function-browser > header strong { font-size: 0.72rem; }
-  .graph-function-browser > header span { color: #71819a; font-size: 0.58rem; }
-  .graph-function-browser > input { margin: 0.55rem; padding: 0.45rem 0.55rem; font-size: 0.62rem; }
+  .graph-function-browser > header strong { font-size: 0.78rem; }
+  .graph-function-browser > header span { color: #71819a; font-size: 0.64rem; }
+  .graph-function-browser > input { margin: 0.6rem; padding: 0.52rem 0.62rem; font-size: 0.68rem; }
   .graph-function-browser ul { display: grid; align-content: start; margin: 0; padding: 0; list-style: none; }
   .graph-function-browser li { border-top: 1px solid #18263a; }
-  .graph-function-browser li > button { display: grid; width: 100%; gap: 0.1rem; padding: 0.48rem 0.65rem; border-radius: 0; background: transparent; color: #dbe5f2; text-align: left; }
+  .graph-function-browser li > button { display: grid; width: 100%; gap: 0.26rem; padding: 0.58rem 0.72rem; border-radius: 0; background: transparent; color: #dbe5f2; text-align: left; }
   .graph-function-browser li > button:hover:not(:disabled) { background: #13243a; }
-  .graph-function-browser li > button.active { box-shadow: inset 3px 0 #8b5cf6; background: #172746; }
-  .graph-function-browser li span { overflow: hidden; font-size: 0.66rem; text-overflow: ellipsis; white-space: nowrap; }
-  .graph-function-browser li code { color: #729fc9; font-size: 0.54rem; }
+  .graph-function-browser li > button.root { box-shadow: inset 3px 0 #8b5cf6; }
+  .graph-function-browser li > button.active { background: #172d4b; outline: 1px solid rgb(34 211 238 / 28%); outline-offset: -1px; }
+  .graph-function-name { overflow: hidden; font-size: 0.72rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+  .graph-function-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 0.45rem; color: #7486a2; }
+  .graph-function-meta code { overflow: hidden; color: #7db2e8; font-size: 0.58rem; text-overflow: ellipsis; }
+  .graph-function-meta small { padding: 0.12rem 0.28rem; border-radius: 4px; background: #111e31; font-size: 0.52rem; white-space: nowrap; }
   .graph-function-browser > nav { display: flex; align-items: center; justify-content: center; gap: 0.6rem; padding: 0.5rem; border-top: 1px solid #1e2c42; }
   .graph-function-browser > nav button { padding: 0.25rem 0.5rem; border: 1px solid #354765; background: #111e31; color: #d6e0ee; }
   .graph-function-browser > nav button:disabled { cursor: default; opacity: 0.3; }
@@ -4977,6 +5148,22 @@ interface ApplyRenamesResult {
     background-image: radial-gradient(#27364e 0.7px, transparent 0.7px);
     background-size: 18px 18px;
   }
+
+  .graph-stage-wrap.panning { cursor: grabbing; user-select: none; }
+
+  .graph-interaction-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-width: 720px;
+    margin-top: 0.38rem;
+    color: #7587a3;
+    font-size: 0.58rem;
+  }
+
+  .graph-interaction-toolbar > div { display: flex; gap: 0.35rem; }
+  .graph-interaction-toolbar button { padding: 0.28rem 0.48rem; border: 1px solid #4c3a83; background: #211845; color: #ddd6fe; font-size: 0.55rem; white-space: nowrap; }
 
   .graph-mode-toggle {
     display: flex;
@@ -5004,8 +5191,6 @@ interface ApplyRenamesResult {
     color: #71819a;
     font-size: 0.58rem;
   }
-
-  .graph-3d-toolbar button { padding: 0.3rem 0.5rem; border: 1px solid #4c3a83; background: #211845; color: #ddd6fe; font-size: 0.56rem; }
 
   .graph-stage-3d {
     overflow: hidden;
@@ -5049,8 +5234,13 @@ interface ApplyRenamesResult {
     background: #102447;
     box-shadow: 0 10px 28px rgb(0 0 0 / 22%);
     color: #eaf2ff;
+    cursor: grab;
     text-align: center;
+    touch-action: none;
+    user-select: none;
   }
+
+  .visual-graph-node.dragging { cursor: grabbing; }
 
   .visual-graph-node:hover:not(:disabled) {
     border-color: #60a5fa;
@@ -5078,6 +5268,12 @@ interface ApplyRenamesResult {
     border-color: #8b5cf6;
     background: #29205a;
     box-shadow: 0 0 0 2px rgb(139 92 246 / 18%);
+  }
+
+  .visual-graph-node.inspected {
+    outline: 2px solid #22d3ee;
+    outline-offset: 3px;
+    box-shadow: 0 0 0 5px rgb(34 211 238 / 10%), 0 10px 28px rgb(0 0 0 / 22%);
   }
 
   .visual-graph-node.external {
