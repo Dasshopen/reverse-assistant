@@ -877,7 +877,8 @@ fn inspect_java_command(program: &Path, java_home: Option<&Path>) -> SetupCompon
                     state: SetupComponentState::Ready,
                     version,
                     path: java_home.map(Path::to_path_buf),
-                    detail: "A compatible 64-bit Java runtime is available for Ghidra.".to_owned(),
+                    detail: "Un environnement Java 64 bits compatible est disponible pour Ghidra."
+                        .to_owned(),
                     required: true,
                 }
             } else {
@@ -941,16 +942,16 @@ pub fn inspect_setup(app: &AppHandle) -> Result<SetupOverview, String> {
                 state: SetupComponentState::Ready,
                 version: Some(installation.version_label.clone()),
                 path: Some(installation.install_dir),
-                detail: "Ghidra headless is configured and ready.".to_owned(),
+                detail: "Le mode headless de Ghidra est configuré et prêt.".to_owned(),
                 required: true,
             },
             SetupComponent {
                 id: "extension",
-                label: "Reverse Assistant extension",
+                label: "Extension Reverse Assistant",
                 state: SetupComponentState::Ready,
                 version: None,
                 path: Some(installation.extensions_dir),
-                detail: "Exporter, decompiler, FunctionID and rename scripts are installed."
+                detail: "Les scripts d’export, de décompilation, FunctionID et de renommage sont installés."
                     .to_owned(),
                 required: true,
             },
@@ -962,16 +963,16 @@ pub fn inspect_setup(app: &AppHandle) -> Result<SetupOverview, String> {
                 state: SetupComponentState::Missing,
                 version: None,
                 path: None,
-                detail: "No Ghidra installation is configured.".to_owned(),
+                detail: "Aucune installation Ghidra n’est configurée.".to_owned(),
                 required: true,
             },
             SetupComponent {
                 id: "extension",
-                label: "Reverse Assistant extension",
+                label: "Extension Reverse Assistant",
                 state: SetupComponentState::Missing,
                 version: None,
                 path: None,
-                detail: "The extension will be installed after Ghidra.".to_owned(),
+                detail: "L’extension sera installée après Ghidra.".to_owned(),
                 required: true,
             },
         ),
@@ -1004,7 +1005,7 @@ pub fn inspect_setup(app: &AppHandle) -> Result<SetupOverview, String> {
                 },
                 SetupComponent {
                     id: "extension",
-                    label: "Reverse Assistant extension",
+                    label: "Extension Reverse Assistant",
                     state: if extension_problem {
                         SetupComponentState::Invalid
                     } else {
@@ -1022,26 +1023,26 @@ pub fn inspect_setup(app: &AppHandle) -> Result<SetupOverview, String> {
     let corpus = match bsim_corpus::locate_available_corpus(app) {
         Ok(Some(path)) => SetupComponent {
             id: "bsim",
-            label: "BSim seed corpus",
+            label: "Corpus de référence BSim",
             state: SetupComponentState::Ready,
             version: None,
             path: Some(path),
-            detail: "The local similarity corpus is available.".to_owned(),
+            detail: "Le corpus local de similarité est disponible.".to_owned(),
             required: false,
         },
         Ok(None) => SetupComponent {
             id: "bsim",
-            label: "BSim seed corpus",
+            label: "Corpus de référence BSim",
             state: SetupComponentState::Missing,
             version: None,
             path: None,
-            detail: "Function similarity will be unavailable until the corpus is installed."
+            detail: "La recherche de fonctions similaires restera indisponible tant que le corpus ne sera pas installé."
                 .to_owned(),
             required: false,
         },
         Err(error) => SetupComponent {
             id: "bsim",
-            label: "BSim seed corpus",
+            label: "Corpus de référence BSim",
             state: SetupComponentState::Invalid,
             version: None,
             path: None,

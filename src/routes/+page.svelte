@@ -1370,6 +1370,10 @@ interface ApplyRenamesResult {
     }
   }
 
+  function displayFilesystemPath(path: string): string {
+    return path.startsWith("\\\\?\\") ? path.slice(4) : path;
+  }
+
   function startRenamingProject(project: ProjectSummary) {
     renamingProjectId = project.id;
     renameDraft = project.name;
@@ -2487,11 +2491,11 @@ interface ApplyRenamesResult {
                 <div><strong>{component.label}</strong><small>{component.version ?? (component.required ? "Requis" : "Optionnel")}</small></div>
                 <b>{component.state === "ready" ? "Prêt" : component.state === "missing" ? "Absent" : "Invalide"}</b>
                 <p>{component.detail}</p>
-                {#if component.path}<code title={component.path}>{component.path}</code>{/if}
+                {#if component.path}<code title={displayFilesystemPath(component.path)}>{displayFilesystemPath(component.path)}</code>{/if}
               </article>
             {/each}
           </div>
-          <div class="settings-managed-root"><span>Répertoire géré par l’application</span><code>{setupOverview.managed_root}</code></div>
+          <div class="settings-managed-root"><span>Répertoire géré par l’application</span><code>{displayFilesystemPath(setupOverview.managed_root)}</code></div>
         {:else if setupOverviewError}
           <p class="error" role="alert">{setupOverviewError}</p>
         {:else}
@@ -2504,8 +2508,8 @@ interface ApplyRenamesResult {
         {#if ghidraInstallationStatus?.status === "valid"}
           <dl>
             <div><dt>Version</dt><dd>{ghidraInstallationStatus.installation.version_label}</dd></div>
-            <div><dt>Dossier d’installation</dt><dd><code>{ghidraInstallationStatus.installation.install_dir}</code></dd></div>
-            <div><dt>Extensions utilisateur</dt><dd><code>{ghidraInstallationStatus.installation.extensions_dir}</code></dd></div>
+            <div><dt>Dossier d’installation</dt><dd><code title={displayFilesystemPath(ghidraInstallationStatus.installation.install_dir)}>{displayFilesystemPath(ghidraInstallationStatus.installation.install_dir)}</code></dd></div>
+            <div><dt>Extensions utilisateur</dt><dd><code title={displayFilesystemPath(ghidraInstallationStatus.installation.extensions_dir)}>{displayFilesystemPath(ghidraInstallationStatus.installation.extensions_dir)}</code></dd></div>
           </dl>
           <div class="settings-actions"><button type="button" class="secondary-button" onclick={selectGhidraInstallDir}>Changer d’installation</button><button type="button" disabled={isAnalyzing} onclick={selectAndAnalyzeBinary}>{isAnalyzing ? "Analyse en cours…" : "Tester avec un binaire"}</button></div>
         {:else}
@@ -4249,7 +4253,7 @@ interface ApplyRenamesResult {
   .settings-section > header > span.ready { background: #123326; color: #86efac; }
   .settings-section > header button { padding: 0.45rem 0.7rem; font-size: 0.7rem; }
 
-  .settings-components-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .settings-components-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .settings-components-grid article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.65rem; min-height: 118px; padding: 0.82rem 0.95rem; border-right: 1px solid #1e2d43; }
   .settings-components-grid article:last-child { border-right: 0; }
   .settings-component-indicator { width: 11px; height: 11px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 9px rgb(239 68 68 / 45%); }
@@ -4306,6 +4310,12 @@ interface ApplyRenamesResult {
     .settings-advanced-content { grid-template-columns: 1fr; }
     .ghidra-settings-card dl > div,
     .settings-advanced-content > article { border-right: 0; border-bottom: 1px solid #1e2d43; }
+  }
+
+  @media (min-width: 981px) and (max-width: 1400px) {
+    .settings-components-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .settings-components-grid article:nth-child(2n) { border-right: 0; }
+    .settings-components-grid article:nth-child(-n + 2) { border-bottom: 1px solid #1e2d43; }
   }
 
   .secondary-button {
