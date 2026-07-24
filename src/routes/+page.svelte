@@ -4236,67 +4236,67 @@ interface ApplyRenamesResult {
 
   .settings-workspace { display: grid; min-width: 0; gap: 0.65rem; }
   .settings-workspace-header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 0.15rem; }
-  .settings-workspace-header h2 { margin: 0.1rem 0 0.2rem; font-size: 1.18rem; }
-  .settings-workspace-header p:not(.detail-label) { margin: 0; color: #8191aa; font-size: 0.7rem; }
-  .settings-workspace-header > span { padding: 0.32rem 0.55rem; border: 1px solid #6b3a3a; border-radius: 999px; background: #2a151b; color: #fda4af; font-size: 0.58rem; white-space: nowrap; }
+  .settings-workspace-header h2 { margin: 0.1rem 0 0.25rem; font-size: 1.45rem; }
+  .settings-workspace-header p:not(.detail-label) { margin: 0; color: #8191aa; font-size: 0.84rem; }
+  .settings-workspace-header > span { padding: 0.4rem 0.7rem; border: 1px solid #6b3a3a; border-radius: 999px; background: #2a151b; color: #fda4af; font-size: 0.7rem; white-space: nowrap; }
   .settings-workspace-header > span.ready { border-color: #245241; background: #0d2a24; color: #6ee7b7; }
 
   .settings-section { border: 1px solid #24334b; border-radius: 10px; background: #0c1627; overflow: hidden; }
-  .settings-section > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.75rem; border-bottom: 1px solid #223149; }
-  .settings-section > header h3 { margin: 0; font-size: 0.78rem; }
-  .settings-section > header p { margin: 0.14rem 0 0; color: #71829d; font-size: 0.57rem; }
-  .settings-section > header > span { padding: 0.22rem 0.45rem; border-radius: 999px; background: #341923; color: #fda4af; font-size: 0.54rem; }
+  .settings-section > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.82rem 0.95rem; border-bottom: 1px solid #223149; }
+  .settings-section > header h3 { margin: 0; font-size: 0.94rem; }
+  .settings-section > header p { margin: 0.18rem 0 0; color: #71829d; font-size: 0.7rem; }
+  .settings-section > header > span { padding: 0.28rem 0.55rem; border-radius: 999px; background: #341923; color: #fda4af; font-size: 0.66rem; }
   .settings-section > header > span.ready { background: #123326; color: #86efac; }
-  .settings-section > header button { padding: 0.35rem 0.55rem; font-size: 0.58rem; }
+  .settings-section > header button { padding: 0.45rem 0.7rem; font-size: 0.7rem; }
 
   .settings-components-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .settings-components-grid article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.5rem; min-height: 94px; padding: 0.65rem 0.75rem; border-right: 1px solid #1e2d43; }
+  .settings-components-grid article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.65rem; min-height: 118px; padding: 0.82rem 0.95rem; border-right: 1px solid #1e2d43; }
   .settings-components-grid article:last-child { border-right: 0; }
-  .settings-component-indicator { width: 9px; height: 9px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 9px rgb(239 68 68 / 45%); }
+  .settings-component-indicator { width: 11px; height: 11px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 9px rgb(239 68 68 / 45%); }
   .settings-components-grid article.ready .settings-component-indicator { background: #22c55e; box-shadow: 0 0 9px rgb(34 197 94 / 45%); }
   .settings-components-grid article.missing .settings-component-indicator { background: #f59e0b; box-shadow: 0 0 9px rgb(245 158 11 / 40%); }
   .settings-components-grid article > div { display: grid; min-width: 0; gap: 0.12rem; }
-  .settings-components-grid strong { color: #e3eaf4; font-size: 0.68rem; }
-  .settings-components-grid small { color: #7890ad; font-size: 0.54rem; }
-  .settings-components-grid b { padding: 0.16rem 0.35rem; border-radius: 4px; background: #331923; color: #fda4af; font-size: 0.5rem; }
+  .settings-components-grid strong { color: #e3eaf4; font-size: 0.82rem; }
+  .settings-components-grid small { color: #7890ad; font-size: 0.66rem; }
+  .settings-components-grid b { padding: 0.2rem 0.42rem; border-radius: 4px; background: #331923; color: #fda4af; font-size: 0.62rem; }
   .settings-components-grid article.ready b { background: #123326; color: #86efac; }
   .settings-components-grid article.missing b { background: #392710; color: #fcd34d; }
-  .settings-components-grid p { grid-column: 2 / -1; margin: 0; color: #71819a; font-size: 0.54rem; line-height: 1.35; }
-  .settings-components-grid code { grid-column: 2 / -1; overflow: hidden; color: #7796b5; font-size: 0.5rem; text-overflow: ellipsis; white-space: nowrap; }
-  .settings-managed-root { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.65rem; padding: 0.45rem 0.75rem; border-top: 1px solid #223149; background: #0a1423; }
-  .settings-managed-root span { color: #71829d; font-size: 0.54rem; }
-  .settings-managed-root code { overflow: hidden; color: #86a5c5; font-size: 0.53rem; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-components-grid p { grid-column: 2 / -1; margin: 0; color: #71819a; font-size: 0.66rem; line-height: 1.4; }
+  .settings-components-grid code { grid-column: 2 / -1; overflow: hidden; color: #7796b5; font-size: 0.62rem; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-managed-root { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.8rem; padding: 0.58rem 0.95rem; border-top: 1px solid #223149; background: #0a1423; }
+  .settings-managed-root span { color: #71829d; font-size: 0.66rem; }
+  .settings-managed-root code { overflow: hidden; color: #86a5c5; font-size: 0.65rem; text-overflow: ellipsis; white-space: nowrap; }
 
   .ghidra-settings-card dl { display: grid; grid-template-columns: 0.45fr 1.2fr 1.2fr; margin: 0; }
-  .ghidra-settings-card dl > div { min-width: 0; padding: 0.65rem 0.75rem; border-right: 1px solid #1e2d43; }
+  .ghidra-settings-card dl > div { min-width: 0; padding: 0.82rem 0.95rem; border-right: 1px solid #1e2d43; }
   .ghidra-settings-card dl > div:last-child { border-right: 0; }
-  .ghidra-settings-card dt { color: #71829d; font-size: 0.54rem; }
-  .ghidra-settings-card dd { min-width: 0; margin: 0.2rem 0 0; color: #e1e9f4; font-size: 0.66rem; }
-  .ghidra-settings-card dd code { display: block; overflow: hidden; color: #83a9cd; font-size: 0.54rem; text-overflow: ellipsis; white-space: nowrap; }
-  .settings-actions { display: flex; gap: 0.45rem; padding: 0.55rem 0.75rem; border-top: 1px solid #223149; }
-  .settings-actions button { padding: 0.4rem 0.65rem; font-size: 0.6rem; }
-  .settings-inline-error { margin: 0.65rem 0.75rem; color: #fda4af; font-size: 0.62rem; }
+  .ghidra-settings-card dt { color: #71829d; font-size: 0.66rem; }
+  .ghidra-settings-card dd { min-width: 0; margin: 0.25rem 0 0; color: #e1e9f4; font-size: 0.8rem; }
+  .ghidra-settings-card dd code { display: block; overflow: hidden; color: #83a9cd; font-size: 0.66rem; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-actions { display: flex; gap: 0.55rem; padding: 0.68rem 0.95rem; border-top: 1px solid #223149; }
+  .settings-actions button { padding: 0.5rem 0.78rem; font-size: 0.72rem; }
+  .settings-inline-error { margin: 0.82rem 0.95rem; color: #fda4af; font-size: 0.74rem; }
 
-  .settings-advanced > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.75rem; cursor: pointer; list-style: none; }
+  .settings-advanced > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.82rem 0.95rem; cursor: pointer; list-style: none; }
   .settings-advanced > summary::-webkit-details-marker { display: none; }
-  .settings-advanced > summary h3 { margin: 0; font-size: 0.76rem; }
-  .settings-advanced > summary p { margin: 0.14rem 0 0; color: #71829d; font-size: 0.57rem; }
-  .settings-advanced > summary > span { color: #a78bfa; font-size: 0.58rem; }
+  .settings-advanced > summary h3 { margin: 0; font-size: 0.92rem; }
+  .settings-advanced > summary p { margin: 0.18rem 0 0; color: #71829d; font-size: 0.69rem; }
+  .settings-advanced > summary > span { color: #a78bfa; font-size: 0.7rem; }
   .settings-advanced[open] > summary { border-bottom: 1px solid #223149; }
   .settings-advanced[open] > summary > span { font-size: 0; }
-  .settings-advanced[open] > summary > span::after { font-size: 0.58rem; content: "Réduire"; }
+  .settings-advanced[open] > summary > span::after { font-size: 0.7rem; content: "Réduire"; }
   .settings-advanced-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .settings-advanced-content > article { display: grid; align-content: start; gap: 0.6rem; min-width: 0; padding: 0.75rem; border-right: 1px solid #1e2d43; }
+  .settings-advanced-content > article { display: grid; align-content: start; gap: 0.75rem; min-width: 0; padding: 0.95rem; border-right: 1px solid #1e2d43; }
   .settings-advanced-content > article:last-child { border-right: 0; }
-  .settings-advanced-content h4 { margin: 0; font-size: 0.68rem; }
-  .settings-advanced-content p { margin: 0.18rem 0 0; color: #71829d; font-size: 0.56rem; line-height: 1.4; }
+  .settings-advanced-content h4 { margin: 0; font-size: 0.82rem; }
+  .settings-advanced-content p { margin: 0.22rem 0 0; color: #71829d; font-size: 0.68rem; line-height: 1.45; }
   .settings-import-form { display: grid; gap: 0.45rem; }
-  .settings-import-form input { padding: 0.5rem 0.6rem; font-size: 0.58rem; }
+  .settings-import-form input { padding: 0.62rem 0.72rem; font-size: 0.7rem; }
   .settings-import-form button,
-  .settings-backend-check button { padding: 0.42rem 0.6rem; font-size: 0.58rem; }
+  .settings-backend-check button { padding: 0.52rem 0.72rem; font-size: 0.7rem; }
   .settings-import-form > button { justify-self: start; }
   .settings-backend-check { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
-  .settings-backend-check span { color: #86efac; font-size: 0.58rem; }
+  .settings-backend-check span { color: #86efac; font-size: 0.7rem; }
 
   @media (max-width: 980px) {
     .settings-components-grid { grid-template-columns: 1fr; }
