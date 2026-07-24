@@ -2,10 +2,14 @@ use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
+
+use crate::models::ghidra_installation::configure_java_environment;
+use crate::services::ghidra_installation::{self, GhidraInstallationStatus};
 
 const CORPUS_FILE_NAME: &str = "reverse-assistant-seed.mv.db";
 const CORPUS_PATH_ENV: &str = "REVERSE_ASSISTANT_BSIM_CORPUS_PATH";
@@ -47,6 +51,8 @@ struct CustomCorpusEntry {
     name: String,
     file_name: String,
     enabled: bool,
+    #[serde(default)]
+    libraries: Vec<String>,
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -277,7 +283,7 @@ pub fn list_corpora(app: &AppHandle) -> Result<Vec<BsimCorpusSummary>, String> {
             available: path.is_file(),
             size_bytes: fs::metadata(&path).ok().map(|metadata| metadata.len()),
             path,
-            libraries: Vec::new(),
+            libraries: entry.libraries,
             description: "Corpus personnel importé localement par l’utilisateur.".to_owned(),
             removable: true,
         });
@@ -386,6 +392,7 @@ pub fn import_custom_corpus(app: &AppHandle, source: &Path) -> Result<BsimCorpus
             name: name.clone(),
             file_name,
             enabled: true,
+            libraries: Vec::new(),
         });
     }
     write_registry(&app_data_dir, &registry)?;
@@ -393,6 +400,192 @@ pub fn import_custom_corpus(app: &AppHandle, source: &Path) -> Result<BsimCorpus
         .into_iter()
         .find(|summary| summary.id == id)
         .ok_or_else(|| "the imported BSim corpus was not found in its registry".to_owned())
+}
+
+fn command_error(tool: &str, output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let details = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let mut tail = details.chars().rev().take(4_000).collect::<String>();
+    tail = tail.chars().rev().collect();
+    format!("{tool} failed with {}: {}", output.status, tail.trim())
+}
+
+fn safe_stem(path: &Path) -> String {
+    let raw = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("library");
+    let value = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if value.is_empty() {
+        "library".to_owned()
+    } else {
+        value
+    }
+}
+
+pub fn build_corpus_from_library(
+    app: &AppHandle,
+    source: &Path,
+) -> Result<BsimCorpusSummary, String> {
+    let source = fs::canonicalize(source).map_err(|error| {
+        format!(
+            "unable to resolve the reference library '{}': {error}",
+            source.display()
+        )
+    })?;
+    if !source.is_file() {
+        return Err(format!(
+            "the selected reference library is not a file: {}",
+            source.display()
+        ));
+    }
+
+    let installation = match ghidra_installation::current_installation_status(app)? {
+        GhidraInstallationStatus::Valid { installation } => installation,
+        GhidraInstallationStatus::NotConfigured => {
+            return Err("Ghidra must be installed before adding a reference library".to_owned());
+        }
+        GhidraInstallationStatus::Invalid { reason, .. } => {
+            return Err(format!(
+                "the configured Ghidra installation is invalid: {reason}"
+            ));
+        }
+    };
+
+    let app_data_dir = app_data_dir(app)?;
+    let source_hash = file_sha256(&source)?;
+    let stem = safe_stem(&source);
+    let id = format!(
+        "library-{}-{}",
+        stem.to_ascii_lowercase(),
+        &source_hash[..12]
+    );
+    let file_name = format!("{id}.mv.db");
+    let custom_dir = custom_directory(&app_data_dir);
+    fs::create_dir_all(&custom_dir).map_err(|error| {
+        format!(
+            "failed to create custom BSim corpus directory '{}': {error}",
+            custom_dir.display()
+        )
+    })?;
+    let database = custom_dir.join(&file_name);
+
+    let mut registry = read_registry(&app_data_dir)?;
+    if registry.custom.iter().any(|entry| entry.id == id) && database.is_file() {
+        return list_corpora(app)?
+            .into_iter()
+            .find(|summary| summary.id == id)
+            .ok_or_else(|| "the existing reference library corpus is not registered".to_owned());
+    }
+
+    let work_dir = corpus_root(&app_data_dir).join("build-work").join(&id);
+    let project_dir = work_dir.join("project");
+    let signatures_dir = work_dir.join("signatures");
+    if work_dir.exists() {
+        fs::remove_dir_all(&work_dir)
+            .map_err(|error| format!("failed to reset the BSim build workspace: {error}"))?;
+    }
+    fs::create_dir_all(&project_dir)
+        .and_then(|_| fs::create_dir_all(&signatures_dir))
+        .map_err(|error| format!("failed to prepare the BSim build workspace: {error}"))?;
+    if database.exists() {
+        fs::remove_file(&database).map_err(|error| {
+            format!(
+                "failed to replace the existing custom corpus '{}': {error}",
+                database.display()
+            )
+        })?;
+    }
+
+    let bsim = installation.install_dir.join("support").join("bsim.bat");
+    let analyze_headless = installation
+        .install_dir
+        .join("support")
+        .join("analyzeHeadless.bat");
+    let database_url = database_url(&database)?;
+    let project_name = format!("reference_{stem}");
+
+    let mut create = Command::new(&bsim);
+    configure_java_environment(&mut create, &installation);
+    let output = create
+        .arg("createdatabase")
+        .arg(&database_url)
+        .arg("medium_64")
+        .output()
+        .map_err(|error| format!("failed to launch Ghidra BSim: {error}"))?;
+    if !output.status.success() {
+        return Err(command_error("Ghidra BSim database creation", &output));
+    }
+
+    let mut analyze = Command::new(&analyze_headless);
+    configure_java_environment(&mut analyze, &installation);
+    analyze.env("GHIDRA_HEADLESS_MAXMEM", "8G");
+    let output = analyze
+        .arg(&project_dir)
+        .arg(&project_name)
+        .arg("-import")
+        .arg(&source)
+        .output()
+        .map_err(|error| format!("failed to launch Ghidra headless analysis: {error}"))?;
+    if !output.status.success() {
+        return Err(command_error("Ghidra reference library analysis", &output));
+    }
+
+    let project_url = format!(
+        "ghidra:/{}/{}",
+        project_dir.to_string_lossy().replace('\\', "/"),
+        project_name
+    );
+    let mut generate = Command::new(&bsim);
+    configure_java_environment(&mut generate, &installation);
+    let output = generate
+        .arg("generatesigs")
+        .arg(project_url)
+        .arg(&signatures_dir)
+        .arg("--bsim")
+        .arg(&database_url)
+        .arg("--commit")
+        .output()
+        .map_err(|error| format!("failed to launch BSim signature generation: {error}"))?;
+    if !output.status.success() {
+        return Err(command_error("Ghidra BSim signature generation", &output));
+    }
+
+    validate_database_file(&database)?;
+    let library_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&stem)
+        .to_owned();
+    registry.custom.retain(|entry| entry.id != id);
+    registry.custom.push(CustomCorpusEntry {
+        id: id.clone(),
+        name: format!("Bibliothèque : {library_name}"),
+        file_name,
+        enabled: true,
+        libraries: vec![library_name],
+    });
+    write_registry(&app_data_dir, &registry)?;
+    let _ = fs::remove_dir_all(&work_dir);
+
+    list_corpora(app)?
+        .into_iter()
+        .find(|summary| summary.id == id)
+        .ok_or_else(|| "the generated reference library corpus was not registered".to_owned())
 }
 
 pub fn set_corpus_enabled(app: &AppHandle, id: &str, enabled: bool) -> Result<(), String> {

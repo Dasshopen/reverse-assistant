@@ -158,6 +158,15 @@ fn import_bsim_corpus(app: AppHandle, path: String) -> Result<BsimCorpusSummary,
     bsim_corpus::import_custom_corpus(&app, Path::new(&path))
 }
 
+#[tauri::command(async)]
+fn add_bsim_reference_library(
+    app: AppHandle,
+    coordinator: tauri::State<'_, DecompileCoordinator>,
+    path: String,
+) -> Result<BsimCorpusSummary, String> {
+    coordinator.run_exclusive(|| bsim_corpus::build_corpus_from_library(&app, Path::new(&path)))
+}
+
 #[tauri::command]
 fn set_bsim_corpus_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
     bsim_corpus::set_corpus_enabled(&app, &id, enabled)
@@ -516,6 +525,7 @@ pub fn run() {
             get_setup_overview,
             list_bsim_corpora,
             import_bsim_corpus,
+            add_bsim_reference_library,
             set_bsim_corpus_enabled,
             remove_bsim_corpus,
             get_managed_setup_plan,

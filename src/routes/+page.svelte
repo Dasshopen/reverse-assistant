@@ -2270,6 +2270,26 @@ interface ApplyRenamesResult {
     }
   }
 
+  async function addBsimReferenceLibrary() {
+    if (isManagingBsimCorpus) return;
+    bsimCorporaError = "";
+    try {
+      const selected = await open({
+        title: "Ajouter une bibliothèque de référence à BSim",
+        multiple: false,
+        directory: false,
+      });
+      if (typeof selected !== "string") return;
+      isManagingBsimCorpus = true;
+      await invoke("add_bsim_reference_library", { path: selected });
+      await loadBsimCorpora();
+    } catch (error) {
+      bsimCorporaError = String(error);
+    } finally {
+      isManagingBsimCorpus = false;
+    }
+  }
+
   async function toggleBsimCorpus(corpus: BsimCorpusSummary) {
     if (corpus.origin !== "custom" || isManagingBsimCorpus) return;
     isManagingBsimCorpus = true;
@@ -2994,9 +3014,14 @@ interface ApplyRenamesResult {
             <h3>Corpus de reconnaissance BSim</h3>
             <p>Les corpus actifs sont interrogés ensemble lors de la décompilation d’une fonction.</p>
           </div>
-          <button type="button" disabled={isManagingBsimCorpus} onclick={addPersonalBsimCorpus}>
-            {isManagingBsimCorpus ? "Traitement…" : "+ Ajouter un corpus personnel"}
-          </button>
+          <div class="bsim-header-actions">
+            <button type="button" disabled={isManagingBsimCorpus} onclick={addBsimReferenceLibrary}>
+              {isManagingBsimCorpus ? "Analyse en cours…" : "+ Ajouter une bibliothèque"}
+            </button>
+            <button type="button" class="secondary-button" disabled={isManagingBsimCorpus} onclick={addPersonalBsimCorpus}>
+              Importer une base .mv.db
+            </button>
+          </div>
         </header>
         <div class="bsim-corpus-list">
           {#each bsimCorpora as corpus (corpus.id)}
@@ -3031,7 +3056,7 @@ interface ApplyRenamesResult {
           {/each}
         </div>
         <footer>
-          <p><strong>Format accepté :</strong> base H2 créée par Ghidra BSim, avec un nom se terminant par <code>.mv.db</code>. Une copie vérifiée est conservée dans le dossier géré par l’application.</p>
+          <p><strong>Bibliothèque personnelle :</strong> choisis directement une DLL, un ELF ou un autre binaire. Ghidra l’analyse localement et construit sa base de signatures. L’import <code>.mv.db</code> reste disponible pour les corpus BSim déjà préparés.</p>
         </footer>
         {#if bsimCorporaError}<p class="settings-inline-error" role="alert">{bsimCorporaError}</p>{/if}
       </section>
@@ -4843,6 +4868,7 @@ interface ApplyRenamesResult {
   .settings-inline-error { margin: 0.82rem 0.95rem; color: #fda4af; font-size: 0.74rem; }
 
   .bsim-corpus-list { display: grid; }
+  .bsim-header-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 0.5rem; }
   .bsim-corpus-list article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 0.85rem; padding: 0.9rem 0.95rem; border-bottom: 1px solid #1e2d43; }
   .bsim-corpus-list article:last-child { border-bottom: 0; }
   .bsim-corpus-list article.disabled { opacity: 0.68; }
