@@ -115,6 +115,25 @@ type GhidraInstallationStatus =
   | { status: "invalid"; install_dir: string; reason: string }
   | { status: "valid"; installation: GhidraInstallation };
 
+type SetupComponentState = "ready" | "missing" | "invalid";
+
+interface SetupComponentStatus {
+  id: string;
+  label: string;
+  state: SetupComponentState;
+  version: string | null;
+  path: string | null;
+  detail: string;
+  required: boolean;
+}
+
+interface SetupOverview {
+  ready: boolean;
+  managed_install_available: boolean;
+  managed_root: string;
+  components: SetupComponentStatus[];
+}
+
 interface DecompiledFunctionDetails {
   decompiled_code: string | null;
   return_type: string;
@@ -414,6 +433,8 @@ interface ApplyRenamesResult {
   let isImporting = $state(false);
 
   let ghidraInstallationStatus = $state<GhidraInstallationStatus | null>(null);
+  let setupOverview = $state<SetupOverview | null>(null);
+  let setupOverviewError = $state("");
   let ghidraConfigError = $state("");
   let isConfiguringGhidra = $state(false);
   let analyzeError = $state("");
@@ -1168,7 +1189,7 @@ interface ApplyRenamesResult {
   });
 
   $effect(() => {
-    loadGhidraInstallationStatus();
+    refreshEnvironmentConfiguration();
   });
 
   $effect(() => {
@@ -1905,6 +1926,20 @@ interface ApplyRenamesResult {
     }
   }
 
+  async function loadSetupOverview() {
+    setupOverviewError = "";
+    try {
+      setupOverview = await invoke<SetupOverview>("get_setup_overview");
+    } catch (error) {
+      setupOverview = null;
+      setupOverviewError = String(error);
+    }
+  }
+
+  async function refreshEnvironmentConfiguration() {
+    await Promise.all([loadGhidraInstallationStatus(), loadSetupOverview()]);
+  }
+
   async function selectGhidraInstallDir() {
     ghidraConfigError = "";
 
@@ -1929,7 +1964,7 @@ interface ApplyRenamesResult {
 
     try {
       await invoke("adopt_existing_ghidra", { installDir });
-      await loadGhidraInstallationStatus();
+      await refreshEnvironmentConfiguration();
     } catch (error) {
       ghidraConfigError = String(error);
     } finally {
@@ -2073,7 +2108,7 @@ interface ApplyRenamesResult {
 </svelte:head>
 
 <main class="app-shell">
-  <SetupAssistant onready={loadGhidraInstallationStatus} />
+  <SetupAssistant onready={refreshEnvironmentConfiguration} />
   <aside class="app-sidebar">
     <div class="brand">
       <span class="brand-mark">RA</span>
@@ -2433,48 +2468,68 @@ interface ApplyRenamesResult {
     </section>
 
     <section
-      class="ghidra-setup"
+      class="settings-workspace"
       class:view-hidden={activeWorkspaceView !== "settings"}
-      aria-labelledby="ghidra-setup-title"
+      aria-labelledby="settings-workspace-title"
     >
-      <h2 id="ghidra-setup-title">Ghidra installation</h2>
+      <header class="settings-workspace-header">
+        <div><p class="detail-label">Configuration locale</p><h2 id="settings-workspace-title">Paramètres</h2><p>Contrôle l’environnement d’analyse et les outils avancés de cette installation.</p></div>
+        <span class:ready={setupOverview?.ready}>{setupOverview?.ready ? "Environnement prêt" : "Configuration requise"}</span>
+      </header>
 
-      {#if ghidraInstallationStatus?.status === "valid"}
-        <p class="status">
-          Configured: {ghidraInstallationStatus.installation.version_label}
-        </p>
-
-        <button
-          type="button"
-          class="secondary-button"
-          onclick={selectGhidraInstallDir}
-        >
-          Change...
-        </button>
-
-        <button
-          type="button"
-          disabled={isAnalyzing}
-          onclick={selectAndAnalyzeBinary}
-        >
-          {isAnalyzing ? "Analyse en cours..." : "Analyser un binaire"}
-        </button>
-      {:else}
-        {#if ghidraInstallationStatus?.status === "invalid"}
-          <p class="error" role="alert">
-            {ghidraInstallationStatus.reason}
-          </p>
+      <section class="settings-section environment-settings">
+        <header><div><h3>Environnement d’analyse</h3><p>État réel des composants vérifié par le backend local.</p></div><button type="button" class="secondary-button" onclick={refreshEnvironmentConfiguration}>Actualiser</button></header>
+        {#if setupOverview}
+          <div class="settings-components-grid">
+            {#each setupOverview.components as component (component.id)}
+              <article class:ready={component.state === "ready"} class:missing={component.state === "missing"} class:invalid={component.state === "invalid"}>
+                <span class="settings-component-indicator"></span>
+                <div><strong>{component.label}</strong><small>{component.version ?? (component.required ? "Requis" : "Optionnel")}</small></div>
+                <b>{component.state === "ready" ? "Prêt" : component.state === "missing" ? "Absent" : "Invalide"}</b>
+                <p>{component.detail}</p>
+                {#if component.path}<code title={component.path}>{component.path}</code>{/if}
+              </article>
+            {/each}
+          </div>
+          <div class="settings-managed-root"><span>Répertoire géré par l’application</span><code>{setupOverview.managed_root}</code></div>
+        {:else if setupOverviewError}
+          <p class="error" role="alert">{setupOverviewError}</p>
+        {:else}
+          <p>Vérification de l’environnement…</p>
         {/if}
+      </section>
 
-        <button
-          type="button"
-          class="secondary-button"
-          disabled={isConfiguringGhidra}
-          onclick={selectGhidraInstallDir}
-        >
-          {isConfiguringGhidra ? "Configuring..." : "Configurer Ghidra"}
-        </button>
-      {/if}
+      <section class="settings-section ghidra-settings-card">
+        <header><div><h3>Installation Ghidra</h3><p>Installation utilisée pour l’analyse headless, la décompilation et les modifications.</p></div><span class:ready={ghidraInstallationStatus?.status === "valid"}>{ghidraInstallationStatus?.status === "valid" ? "Configurée" : "Non disponible"}</span></header>
+        {#if ghidraInstallationStatus?.status === "valid"}
+          <dl>
+            <div><dt>Version</dt><dd>{ghidraInstallationStatus.installation.version_label}</dd></div>
+            <div><dt>Dossier d’installation</dt><dd><code>{ghidraInstallationStatus.installation.install_dir}</code></dd></div>
+            <div><dt>Extensions utilisateur</dt><dd><code>{ghidraInstallationStatus.installation.extensions_dir}</code></dd></div>
+          </dl>
+          <div class="settings-actions"><button type="button" class="secondary-button" onclick={selectGhidraInstallDir}>Changer d’installation</button><button type="button" disabled={isAnalyzing} onclick={selectAndAnalyzeBinary}>{isAnalyzing ? "Analyse en cours…" : "Tester avec un binaire"}</button></div>
+        {:else}
+          {#if ghidraInstallationStatus?.status === "invalid"}<p class="settings-inline-error">{ghidraInstallationStatus.reason}</p>{/if}
+          <div class="settings-actions"><button type="button" disabled={isConfiguringGhidra} onclick={selectGhidraInstallDir}>{isConfiguringGhidra ? "Configuration…" : "Choisir une installation Ghidra"}</button></div>
+        {/if}
+      </section>
+
+      <details class="settings-section settings-advanced">
+        <summary><div><h3>Outils avancés</h3><p>Import JSON de diagnostic et vérification directe du backend Rust.</p></div><span>Développer</span></summary>
+        <div class="settings-advanced-content">
+          <article>
+            <div><h4>Import manuel d’un export Ghidra</h4><p>Réservé au débogage ou à la reprise d’un export JSON existant. Le projet sera ouvert en mode snapshot.</p></div>
+            <form class="settings-import-form" onsubmit={(event) => { event.preventDefault(); importGhidraExport(); }}>
+              <div class="path-picker"><input id="export-path" type="text" bind:value={exportPath} placeholder="Aucun export JSON sélectionné" readonly /><button type="button" class="secondary-button" onclick={selectGhidraExport}>Parcourir…</button></div>
+              <button type="submit" disabled={isImporting}>{isImporting ? "Import…" : "Importer le JSON"}</button>
+            </form>
+          </article>
+          <article>
+            <div><h4>Connexion au backend</h4><p>Envoie une commande légère à la couche Rust pour vérifier que Tauri communique correctement.</p></div>
+            <div class="settings-backend-check"><button type="button" class="secondary-button" onclick={checkBackendStatus}>Tester le backend Rust</button>{#if backendStatus}<span>{backendStatus}</span>{/if}</div>
+          </article>
+        </div>
+      </details>
 
       {#if ghidraConfigError}
         <p class="error" role="alert">{ghidraConfigError}</p>
@@ -2483,46 +2538,9 @@ interface ApplyRenamesResult {
       {#if analyzeError}
         <p class="error" role="alert">{analyzeError}</p>
       {/if}
+
+      {#if importError}<p class="error" role="alert">{importError}</p>{/if}
     </section>
-
-    <h2 class="manual-import-title" class:view-hidden={activeWorkspaceView !== "settings"}>
-      Manual JSON import (debug)
-    </h2>
-
-    <form
-      class="import-form"
-      class:view-hidden={activeWorkspaceView !== "settings"}
-      onsubmit={(event) => {
-        event.preventDefault();
-        importGhidraExport();
-      }}
-    >
-      <label for="export-path">Ghidra export path</label>
-
-      <div class="path-picker">
-        <input
-          id="export-path"
-          type="text"
-          bind:value={exportPath}
-          placeholder="No Ghidra JSON export selected"
-          readonly
-      />
-
-        <button type="button" class="secondary-button" onclick={selectGhidraExport}>
-          Browse...
-        </button>
-      </div>
-
-      <button type="submit" disabled={isImporting}>
-        {isImporting ? "Importing..." : "Import Ghidra export"}
-      </button>
-    </form>
-
-    {#if importError}
-      <p class="error" class:view-hidden={activeWorkspaceView !== "settings"} role="alert">
-        {importError}
-      </p>
-    {/if}
 
     {#if importSummary}
       <section
@@ -3818,15 +3836,6 @@ interface ApplyRenamesResult {
 </section>
 {/if}
 
-    <div class="backend-check" class:view-hidden={activeWorkspaceView !== "settings"}>
-      <button type="button" class="secondary-button" onclick={checkBackendStatus}>
-        Check Rust backend
-      </button>
-
-      {#if backendStatus}
-        <p class="status">{backendStatus}</p>
-      {/if}
-        </div>
       </section>
     </div>
   </section>
@@ -3870,11 +3879,6 @@ interface ApplyRenamesResult {
   .description {
     margin-bottom: 2rem;
     color: #cbd5e1;
-  }
-
-  .import-form {
-    display: grid;
-    gap: 0.75rem;
   }
 
   .path-picker {
@@ -4230,35 +4234,78 @@ interface ApplyRenamesResult {
     .comparison-evidence { grid-column: 1 / -1; }
   }
 
-  .backend-check {
-    margin-top: 2rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #334155;
-  }
+  .settings-workspace { display: grid; min-width: 0; gap: 0.65rem; }
+  .settings-workspace-header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 0.15rem; }
+  .settings-workspace-header h2 { margin: 0.1rem 0 0.2rem; font-size: 1.18rem; }
+  .settings-workspace-header p:not(.detail-label) { margin: 0; color: #8191aa; font-size: 0.7rem; }
+  .settings-workspace-header > span { padding: 0.32rem 0.55rem; border: 1px solid #6b3a3a; border-radius: 999px; background: #2a151b; color: #fda4af; font-size: 0.58rem; white-space: nowrap; }
+  .settings-workspace-header > span.ready { border-color: #245241; background: #0d2a24; color: #6ee7b7; }
 
-  .ghidra-setup {
-    display: grid;
-    gap: 0.75rem;
-    margin-bottom: 2rem;
-    padding-bottom: 1.5rem;
-    border-bottom: 1px solid #334155;
-  }
+  .settings-section { border: 1px solid #24334b; border-radius: 10px; background: #0c1627; overflow: hidden; }
+  .settings-section > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.75rem; border-bottom: 1px solid #223149; }
+  .settings-section > header h3 { margin: 0; font-size: 0.78rem; }
+  .settings-section > header p { margin: 0.14rem 0 0; color: #71829d; font-size: 0.57rem; }
+  .settings-section > header > span { padding: 0.22rem 0.45rem; border-radius: 999px; background: #341923; color: #fda4af; font-size: 0.54rem; }
+  .settings-section > header > span.ready { background: #123326; color: #86efac; }
+  .settings-section > header button { padding: 0.35rem 0.55rem; font-size: 0.58rem; }
 
-  .ghidra-setup h2 {
-    margin: 0;
-    font-size: 1.25rem;
-  }
+  .settings-components-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .settings-components-grid article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.5rem; min-height: 94px; padding: 0.65rem 0.75rem; border-right: 1px solid #1e2d43; }
+  .settings-components-grid article:last-child { border-right: 0; }
+  .settings-component-indicator { width: 9px; height: 9px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 9px rgb(239 68 68 / 45%); }
+  .settings-components-grid article.ready .settings-component-indicator { background: #22c55e; box-shadow: 0 0 9px rgb(34 197 94 / 45%); }
+  .settings-components-grid article.missing .settings-component-indicator { background: #f59e0b; box-shadow: 0 0 9px rgb(245 158 11 / 40%); }
+  .settings-components-grid article > div { display: grid; min-width: 0; gap: 0.12rem; }
+  .settings-components-grid strong { color: #e3eaf4; font-size: 0.68rem; }
+  .settings-components-grid small { color: #7890ad; font-size: 0.54rem; }
+  .settings-components-grid b { padding: 0.16rem 0.35rem; border-radius: 4px; background: #331923; color: #fda4af; font-size: 0.5rem; }
+  .settings-components-grid article.ready b { background: #123326; color: #86efac; }
+  .settings-components-grid article.missing b { background: #392710; color: #fcd34d; }
+  .settings-components-grid p { grid-column: 2 / -1; margin: 0; color: #71819a; font-size: 0.54rem; line-height: 1.35; }
+  .settings-components-grid code { grid-column: 2 / -1; overflow: hidden; color: #7796b5; font-size: 0.5rem; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-managed-root { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.65rem; padding: 0.45rem 0.75rem; border-top: 1px solid #223149; background: #0a1423; }
+  .settings-managed-root span { color: #71829d; font-size: 0.54rem; }
+  .settings-managed-root code { overflow: hidden; color: #86a5c5; font-size: 0.53rem; text-overflow: ellipsis; white-space: nowrap; }
 
-  .ghidra-setup button {
-    justify-self: start;
-  }
+  .ghidra-settings-card dl { display: grid; grid-template-columns: 0.45fr 1.2fr 1.2fr; margin: 0; }
+  .ghidra-settings-card dl > div { min-width: 0; padding: 0.65rem 0.75rem; border-right: 1px solid #1e2d43; }
+  .ghidra-settings-card dl > div:last-child { border-right: 0; }
+  .ghidra-settings-card dt { color: #71829d; font-size: 0.54rem; }
+  .ghidra-settings-card dd { min-width: 0; margin: 0.2rem 0 0; color: #e1e9f4; font-size: 0.66rem; }
+  .ghidra-settings-card dd code { display: block; overflow: hidden; color: #83a9cd; font-size: 0.54rem; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-actions { display: flex; gap: 0.45rem; padding: 0.55rem 0.75rem; border-top: 1px solid #223149; }
+  .settings-actions button { padding: 0.4rem 0.65rem; font-size: 0.6rem; }
+  .settings-inline-error { margin: 0.65rem 0.75rem; color: #fda4af; font-size: 0.62rem; }
 
-  .manual-import-title {
-    margin: 0 0 0.75rem;
-    color: #94a3b8;
-    font-size: 0.95rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  .settings-advanced > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.75rem; cursor: pointer; list-style: none; }
+  .settings-advanced > summary::-webkit-details-marker { display: none; }
+  .settings-advanced > summary h3 { margin: 0; font-size: 0.76rem; }
+  .settings-advanced > summary p { margin: 0.14rem 0 0; color: #71829d; font-size: 0.57rem; }
+  .settings-advanced > summary > span { color: #a78bfa; font-size: 0.58rem; }
+  .settings-advanced[open] > summary { border-bottom: 1px solid #223149; }
+  .settings-advanced[open] > summary > span { font-size: 0; }
+  .settings-advanced[open] > summary > span::after { font-size: 0.58rem; content: "Réduire"; }
+  .settings-advanced-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-advanced-content > article { display: grid; align-content: start; gap: 0.6rem; min-width: 0; padding: 0.75rem; border-right: 1px solid #1e2d43; }
+  .settings-advanced-content > article:last-child { border-right: 0; }
+  .settings-advanced-content h4 { margin: 0; font-size: 0.68rem; }
+  .settings-advanced-content p { margin: 0.18rem 0 0; color: #71829d; font-size: 0.56rem; line-height: 1.4; }
+  .settings-import-form { display: grid; gap: 0.45rem; }
+  .settings-import-form input { padding: 0.5rem 0.6rem; font-size: 0.58rem; }
+  .settings-import-form button,
+  .settings-backend-check button { padding: 0.42rem 0.6rem; font-size: 0.58rem; }
+  .settings-import-form > button { justify-self: start; }
+  .settings-backend-check { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+  .settings-backend-check span { color: #86efac; font-size: 0.58rem; }
+
+  @media (max-width: 980px) {
+    .settings-components-grid { grid-template-columns: 1fr; }
+    .settings-components-grid article { border-right: 0; border-bottom: 1px solid #1e2d43; }
+    .settings-components-grid article:last-child { border-bottom: 0; }
+    .ghidra-settings-card dl,
+    .settings-advanced-content { grid-template-columns: 1fr; }
+    .ghidra-settings-card dl > div,
+    .settings-advanced-content > article { border-right: 0; border-bottom: 1px solid #1e2d43; }
   }
 
   .secondary-button {
@@ -4876,7 +4923,7 @@ interface ApplyRenamesResult {
   }
 
   .saved-projects,
-  .ghidra-setup,
+  .settings-workspace,
   .summary,
   .function-explorer {
     margin-top: 0;
