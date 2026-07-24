@@ -36,6 +36,16 @@ $libraries = @(
         Name = "zlib"
         ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\zlib"
         Program = "zlib1.dll"
+    },
+    @{
+        Name = "lz4"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\lz4"
+        Program = "lz4.dll"
+    },
+    @{
+        Name = "xxhash"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\xxhash"
+        Program = "xxhash.dll"
     }
 )
 

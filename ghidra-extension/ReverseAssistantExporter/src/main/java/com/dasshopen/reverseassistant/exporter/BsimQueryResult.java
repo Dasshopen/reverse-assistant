@@ -23,6 +23,10 @@ public record BsimQueryResult(
         return new BsimQueryResult(AVAILABLE, matches, null);
     }
 
+    public static BsimQueryResult available(List<BsimCandidate> matches, String message) {
+        return new BsimQueryResult(AVAILABLE, matches, message);
+    }
+
     public static BsimQueryResult unavailable(String message) {
         return new BsimQueryResult(UNAVAILABLE, List.of(), message);
     }

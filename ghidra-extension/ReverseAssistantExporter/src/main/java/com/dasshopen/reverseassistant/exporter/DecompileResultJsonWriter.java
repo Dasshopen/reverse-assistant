@@ -65,6 +65,7 @@ public final class DecompileResultJsonWriter {
             JsonObject candidateObject = new JsonObject();
             candidateObject.addProperty("name", candidate.name());
             candidateObject.addProperty("executable", candidate.executable());
+            candidateObject.addProperty("corpus", candidate.corpus());
             candidateObject.addProperty("similarity", candidate.similarity());
             candidateObject.addProperty("significance", candidate.significance());
             bsimMatches.add(candidateObject);

@@ -5,7 +5,10 @@
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 
+import com.dasshopen.reverseassistant.exporter.BsimCorpus;
 import com.dasshopen.reverseassistant.exporter.DecompileFunctionService;
 
 import ghidra.app.script.GhidraScript;
@@ -19,7 +22,7 @@ public class DecompileFunctionJson extends GhidraScript {
         String[] args = getScriptArgs();
 
         if (args.length < 2 || args[0].isBlank() || args[1].isBlank()) {
-            printerr("Usage: DecompileFunctionJson <entry-address> <destination-json-path> [bsim-database-url]");
+            printerr("Usage: DecompileFunctionJson <entry-address> <destination-json-path> [--bsim-corpus <id> <name> <database-url>]...");
             throw new IllegalArgumentException(
                 "missing entry address or destination path for DecompileFunctionJson"
             );
@@ -38,14 +41,20 @@ public class DecompileFunctionJson extends GhidraScript {
         }
 
         Path destination = Paths.get(args[1]);
-        String bsimDatabaseUrl = args.length >= 3 ? args[2] : null;
+        List<BsimCorpus> bsimCorpora = new ArrayList<>();
+        for (int index = 2; index < args.length; index += 4) {
+            if (index + 3 >= args.length || !"--bsim-corpus".equals(args[index])) {
+                throw new IllegalArgumentException("invalid BSim corpus arguments");
+            }
+            bsimCorpora.add(new BsimCorpus(args[index + 1], args[index + 2], args[index + 3]));
+        }
 
         try {
             new DecompileFunctionService().decompileAndWrite(
                 currentProgram,
                 entryAddress,
                 destination,
-                bsimDatabaseUrl,
+                bsimCorpora,
                 monitor
             );
 

@@ -153,8 +153,22 @@ interface DecompiledFunctionDetails {
 interface BsimCandidate {
   name: string;
   executable: string;
+  corpus: string;
   similarity: number;
   significance: number;
+}
+
+interface BsimCorpusSummary {
+  id: string;
+  name: string;
+  origin: "built_in" | "custom" | "environment";
+  enabled: boolean;
+  available: boolean;
+  path: string;
+  size_bytes: number | null;
+  libraries: string[];
+  description: string;
+  removable: boolean;
 }
 
 interface BsimQueryResult {
@@ -469,6 +483,9 @@ interface ApplyRenamesResult {
   let ghidraInstallationStatus = $state<GhidraInstallationStatus | null>(null);
   let setupOverview = $state<SetupOverview | null>(null);
   let setupOverviewError = $state("");
+  let bsimCorpora = $state<BsimCorpusSummary[]>([]);
+  let bsimCorporaError = $state("");
+  let isManagingBsimCorpus = $state(false);
   let ghidraConfigError = $state("");
   let isConfiguringGhidra = $state(false);
   let analyzeError = $state("");
@@ -704,7 +721,15 @@ interface ApplyRenamesResult {
         candidate.similarity > previous.similarity ||
         (candidate.similarity === previous.similarity && candidate.significance > previous.significance)
       ) {
-        bestByName.set(candidate.name, candidate);
+        const corpora = previous
+          ? [...new Set([...previous.corpus.split(" + "), candidate.corpus])].join(" + ")
+          : candidate.corpus;
+        bestByName.set(candidate.name, { ...candidate, corpus: corpora });
+      } else if (previous && !previous.corpus.split(" + ").includes(candidate.corpus)) {
+        bestByName.set(candidate.name, {
+          ...previous,
+          corpus: `${previous.corpus} + ${candidate.corpus}`,
+        });
       }
     }
     return [...bestByName.values()].sort(
@@ -801,7 +826,7 @@ interface ApplyRenamesResult {
             name: safeName,
             source: "bsim",
             scoreLabel: `similarité ${bestBsim.similarity.toFixed(3)}`,
-            evidenceLabel: `${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
+            evidenceLabel: `${bestBsim.corpus} · ${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
             alternativeCount: Math.max(0, bsimCandidates.length - 1),
             decisionLabel: isAmbiguous
               ? "Meilleure proposition BSim nettoyée, confiance limitée clairement signalée"
@@ -2214,8 +2239,74 @@ interface ApplyRenamesResult {
     }
   }
 
+  async function loadBsimCorpora() {
+    bsimCorporaError = "";
+    try {
+      bsimCorpora = await invoke<BsimCorpusSummary[]>("list_bsim_corpora");
+    } catch (error) {
+      bsimCorpora = [];
+      bsimCorporaError = String(error);
+    }
+  }
+
+  async function addPersonalBsimCorpus() {
+    if (isManagingBsimCorpus) return;
+    bsimCorporaError = "";
+    try {
+      const selected = await open({
+        title: "Ajouter une base BSim Ghidra (.mv.db)",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Base BSim Ghidra", extensions: ["db"] }],
+      });
+      if (typeof selected !== "string") return;
+      isManagingBsimCorpus = true;
+      await invoke("import_bsim_corpus", { path: selected });
+      await loadBsimCorpora();
+    } catch (error) {
+      bsimCorporaError = String(error);
+    } finally {
+      isManagingBsimCorpus = false;
+    }
+  }
+
+  async function toggleBsimCorpus(corpus: BsimCorpusSummary) {
+    if (corpus.origin !== "custom" || isManagingBsimCorpus) return;
+    isManagingBsimCorpus = true;
+    bsimCorporaError = "";
+    try {
+      await invoke("set_bsim_corpus_enabled", { id: corpus.id, enabled: !corpus.enabled });
+      await loadBsimCorpora();
+    } catch (error) {
+      bsimCorporaError = String(error);
+    } finally {
+      isManagingBsimCorpus = false;
+    }
+  }
+
+  async function deleteBsimCorpus(corpus: BsimCorpusSummary) {
+    if (!corpus.removable || isManagingBsimCorpus) return;
+    if (!confirm(`Supprimer le corpus local « ${corpus.name} » ? Le fichier d’origine ne sera pas touché.`)) return;
+    isManagingBsimCorpus = true;
+    bsimCorporaError = "";
+    try {
+      await invoke("remove_bsim_corpus", { id: corpus.id });
+      await loadBsimCorpora();
+    } catch (error) {
+      bsimCorporaError = String(error);
+    } finally {
+      isManagingBsimCorpus = false;
+    }
+  }
+
+  function formatFileSize(size: number | null) {
+    if (size === null) return "taille inconnue";
+    if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} Ko`;
+    return `${(size / (1024 * 1024)).toFixed(1)} Mo`;
+  }
+
   async function refreshEnvironmentConfiguration() {
-    await Promise.all([loadGhidraInstallationStatus(), loadSetupOverview()]);
+    await Promise.all([loadGhidraInstallationStatus(), loadSetupOverview(), loadBsimCorpora()]);
   }
 
   async function selectGhidraInstallDir() {
@@ -2895,6 +2986,54 @@ interface ApplyRenamesResult {
           {#if ghidraInstallationStatus?.status === "invalid"}<p class="settings-inline-error">{ghidraInstallationStatus.reason}</p>{/if}
           <div class="settings-actions"><button type="button" disabled={isConfiguringGhidra} onclick={selectGhidraInstallDir}>{isConfiguringGhidra ? "Configuration…" : "Choisir une installation Ghidra"}</button></div>
         {/if}
+      </section>
+
+      <section class="settings-section bsim-corpora-card">
+        <header>
+          <div>
+            <h3>Corpus de reconnaissance BSim</h3>
+            <p>Les corpus actifs sont interrogés ensemble lors de la décompilation d’une fonction.</p>
+          </div>
+          <button type="button" disabled={isManagingBsimCorpus} onclick={addPersonalBsimCorpus}>
+            {isManagingBsimCorpus ? "Traitement…" : "+ Ajouter un corpus personnel"}
+          </button>
+        </header>
+        <div class="bsim-corpus-list">
+          {#each bsimCorpora as corpus (corpus.id)}
+            <article class:disabled={!corpus.enabled} class:unavailable={!corpus.available}>
+              <div class="bsim-corpus-state" class:active={corpus.enabled && corpus.available}></div>
+              <div class="bsim-corpus-copy">
+                <div class="bsim-corpus-heading">
+                  <strong>{corpus.name}</strong>
+                  <span>{corpus.origin === "built_in" ? "Fourni" : corpus.origin === "environment" ? "Environnement" : "Personnel"}</span>
+                  <small>{formatFileSize(corpus.size_bytes)}</small>
+                </div>
+                <p>{corpus.description}</p>
+                {#if corpus.libraries.length > 0}
+                  <div class="bsim-library-tags">
+                    {#each corpus.libraries as library}<span>{library}</span>{/each}
+                  </div>
+                {/if}
+                <code title={displayFilesystemPath(corpus.path)}>{displayFilesystemPath(corpus.path)}</code>
+              </div>
+              <div class="bsim-corpus-actions">
+                <b class:ready={corpus.enabled && corpus.available}>
+                  {!corpus.available ? "Fichier absent" : corpus.enabled ? "Actif" : "Désactivé"}
+                </b>
+                {#if corpus.origin === "custom"}
+                  <button type="button" class="secondary-button" disabled={isManagingBsimCorpus || !corpus.available} onclick={() => toggleBsimCorpus(corpus)}>{corpus.enabled ? "Désactiver" : "Activer"}</button>
+                  <button type="button" class="danger-button" disabled={isManagingBsimCorpus} onclick={() => deleteBsimCorpus(corpus)}>Supprimer</button>
+                {/if}
+              </div>
+            </article>
+          {:else}
+            <p class="bsim-corpus-empty">Aucun corpus BSim n’est disponible.</p>
+          {/each}
+        </div>
+        <footer>
+          <p><strong>Format accepté :</strong> base H2 créée par Ghidra BSim, avec un nom se terminant par <code>.mv.db</code>. Une copie vérifiée est conservée dans le dossier géré par l’application.</p>
+        </footer>
+        {#if bsimCorporaError}<p class="settings-inline-error" role="alert">{bsimCorporaError}</p>{/if}
       </section>
 
       <details class="settings-section settings-advanced">
@@ -3638,7 +3777,7 @@ interface ApplyRenamesResult {
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "bsim")}
                           {@const proposedName = automaticChoice && candidate.name === selectedBsimResult.matches[0]?.name ? automaticChoice.name : candidate.name}
                           <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
-                            <span><strong>{candidate.name}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.executable}</small></span>
+                            <span><strong>{candidate.name}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.corpus} · {candidate.executable}</small></span>
                             <span><code>{candidate.similarity.toFixed(3)}</code><small>significativité {candidate.significance.toFixed(1)}</small></span>
                           </button>
                         {/each}
@@ -4195,7 +4334,7 @@ interface ApplyRenamesResult {
                             >
                               <span>
                                 {candidate.name}
-                                <em>({candidate.executable})</em>
+                                <em>({candidate.corpus} · {candidate.executable})</em>
                               </span>
                               <code>
                                 similarity {candidate.similarity.toFixed(3)} · significance
@@ -4703,6 +4842,32 @@ interface ApplyRenamesResult {
   .settings-actions button { padding: 0.5rem 0.78rem; font-size: 0.72rem; }
   .settings-inline-error { margin: 0.82rem 0.95rem; color: #fda4af; font-size: 0.74rem; }
 
+  .bsim-corpus-list { display: grid; }
+  .bsim-corpus-list article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 0.85rem; padding: 0.9rem 0.95rem; border-bottom: 1px solid #1e2d43; }
+  .bsim-corpus-list article:last-child { border-bottom: 0; }
+  .bsim-corpus-list article.disabled { opacity: 0.68; }
+  .bsim-corpus-list article.unavailable { background: rgb(127 29 29 / 8%); }
+  .bsim-corpus-state { width: 11px; height: 11px; margin-top: 0.25rem; border-radius: 50%; background: #64748b; }
+  .bsim-corpus-state.active { background: #22c55e; box-shadow: 0 0 9px rgb(34 197 94 / 45%); }
+  .bsim-corpus-copy { display: grid; min-width: 0; gap: 0.35rem; }
+  .bsim-corpus-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+  .bsim-corpus-heading strong { color: #e5edf8; font-size: 0.86rem; }
+  .bsim-corpus-heading span { padding: 0.18rem 0.38rem; border-radius: 4px; background: #251653; color: #c4b5fd; font-size: 0.6rem; font-weight: 700; }
+  .bsim-corpus-heading small { color: #71829d; font-size: 0.65rem; }
+  .bsim-corpus-copy p { margin: 0; color: #8192ad; font-size: 0.72rem; line-height: 1.45; }
+  .bsim-corpus-copy code { overflow: hidden; color: #7596b8; font-size: 0.64rem; text-overflow: ellipsis; white-space: nowrap; }
+  .bsim-library-tags { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .bsim-library-tags span { padding: 0.22rem 0.45rem; border: 1px solid #304561; border-radius: 999px; background: #101e32; color: #a8c2df; font-size: 0.63rem; }
+  .bsim-corpus-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 0.4rem; max-width: 260px; }
+  .bsim-corpus-actions b { padding: 0.25rem 0.45rem; border-radius: 4px; background: #312033; color: #fda4af; font-size: 0.62rem; }
+  .bsim-corpus-actions b.ready { background: #123326; color: #86efac; }
+  .bsim-corpus-actions button { padding: 0.4rem 0.58rem; font-size: 0.65rem; }
+  .danger-button { border: 1px solid #7f3f4b; background: transparent; color: #fda4af; }
+  .bsim-corpora-card > footer { padding: 0.65rem 0.95rem; border-top: 1px solid #223149; background: #0a1423; }
+  .bsim-corpora-card > footer p,
+  .bsim-corpus-empty { margin: 0; color: #71829d; font-size: 0.68rem; line-height: 1.45; }
+  .bsim-corpus-empty { padding: 1rem; }
+
   .settings-advanced > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.82rem 0.95rem; cursor: pointer; list-style: none; }
   .settings-advanced > summary::-webkit-details-marker { display: none; }
   .settings-advanced > summary h3 { margin: 0; font-size: 0.92rem; }
@@ -4732,6 +4897,8 @@ interface ApplyRenamesResult {
     .settings-advanced-content { grid-template-columns: 1fr; }
     .ghidra-settings-card dl > div,
     .settings-advanced-content > article { border-right: 0; border-bottom: 1px solid #1e2d43; }
+    .bsim-corpus-list article { grid-template-columns: auto minmax(0, 1fr); }
+    .bsim-corpus-actions { grid-column: 2; justify-content: flex-start; max-width: none; }
   }
 
   @media (min-width: 981px) and (max-width: 1400px) {

@@ -37,12 +37,14 @@ $dbUrl = "file:/" + ($corpusRoot -replace '\\', '/') + "/build/$dbBaseName"
 
 $libraries = @(
     @{ Name = "sqlite3"; Dll = Join-Path $corpusRoot "build\sqlite3-3.53.3-x64-release-syms\sqlite3.dll" },
-    @{ Name = "zlib"; Dll = Join-Path $corpusRoot "build\zlib-1.3.2-x64-release-syms\zlib1.dll" }
+    @{ Name = "zlib"; Dll = Join-Path $corpusRoot "build\zlib-1.3.2-x64-release-syms\zlib1.dll" },
+    @{ Name = "lz4"; Dll = Join-Path $corpusRoot "build\lz4-1.10.0-x64-release-syms\lz4.dll" },
+    @{ Name = "xxhash"; Dll = Join-Path $corpusRoot "build\xxhash-0.8.3-x64-release-syms\xxhash.dll" }
 )
 
 foreach ($library in $libraries) {
     if (-not (Test-Path -LiteralPath $library.Dll -PathType Leaf)) {
-        throw "$($library.Name) DLL not found at $($library.Dll); run build-$($library.Name).ps1 (or build-sqlite.ps1/build-zlib.ps1) first."
+        throw "$($library.Name) DLL not found at $($library.Dll); run its build script first."
     }
 }
 

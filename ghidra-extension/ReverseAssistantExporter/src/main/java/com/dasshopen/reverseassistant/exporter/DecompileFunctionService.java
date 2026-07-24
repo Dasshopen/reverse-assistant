@@ -2,6 +2,9 @@ package com.dasshopen.reverseassistant.exporter;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
 
 import ghidra.app.decompiler.DecompInterface;
@@ -32,12 +35,13 @@ public final class DecompileFunctionService {
         Program program,
         Address entryAddress,
         Path destination,
-        String bsimDatabaseUrl,
+        List<BsimCorpus> bsimCorpora,
         TaskMonitor monitor
     ) throws IOException, CancelledException {
         Objects.requireNonNull(program, "program must not be null");
         Objects.requireNonNull(entryAddress, "entryAddress must not be null");
         Objects.requireNonNull(destination, "destination must not be null");
+        Objects.requireNonNull(bsimCorpora, "bsimCorpora must not be null");
         Objects.requireNonNull(monitor, "monitor must not be null");
 
         Function function =
@@ -58,25 +62,48 @@ public final class DecompileFunctionService {
 
             BsimQueryResult bsimResult;
 
-            if (bsimDatabaseUrl == null || bsimDatabaseUrl.isBlank()) {
+            if (bsimCorpora.isEmpty()) {
                 bsimResult = BsimQueryResult.unavailable(
-                    "The BSim seed corpus is not installed."
+                    "No active BSim corpus is installed."
                 );
             }
             else {
-                try {
-                    bsimResult = bsimQueryService.query(
-                        program,
-                        function,
-                        bsimDatabaseUrl,
-                        monitor
-                    );
+                List<BsimCandidate> matches = new ArrayList<>();
+                List<String> failures = new ArrayList<>();
+
+                for (BsimCorpus corpus : bsimCorpora) {
+                    try {
+                        BsimQueryResult result = bsimQueryService.query(
+                            program,
+                            function,
+                            corpus.name(),
+                            corpus.databaseUrl(),
+                            monitor
+                        );
+                        matches.addAll(result.matches());
+                    }
+                    catch (CancelledException exception) {
+                        throw exception;
+                    }
+                    catch (Exception exception) {
+                        failures.add(corpus.name() + ": " + exception.getMessage());
+                    }
                 }
-                catch (CancelledException exception) {
-                    throw exception;
+
+                matches.sort(
+                    Comparator.comparingDouble(BsimCandidate::similarity)
+                        .thenComparingDouble(BsimCandidate::significance)
+                        .reversed()
+                );
+
+                if (failures.size() == bsimCorpora.size()) {
+                    bsimResult = BsimQueryResult.error(String.join(" | ", failures));
                 }
-                catch (Exception exception) {
-                    bsimResult = BsimQueryResult.error(exception.getMessage());
+                else {
+                    String warning = failures.isEmpty()
+                        ? null
+                        : "Some BSim corpora could not be queried: " + String.join(" | ", failures);
+                    bsimResult = BsimQueryResult.available(matches, warning);
                 }
             }
 

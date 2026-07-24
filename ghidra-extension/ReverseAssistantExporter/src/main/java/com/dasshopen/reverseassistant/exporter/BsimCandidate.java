@@ -5,6 +5,7 @@ import java.util.Objects;
 public record BsimCandidate(
     String name,
     String executable,
+    String corpus,
     double similarity,
     double significance
 ) {
@@ -12,5 +13,6 @@ public record BsimCandidate(
     public BsimCandidate {
         Objects.requireNonNull(name, "name must not be null");
         Objects.requireNonNull(executable, "executable must not be null");
+        Objects.requireNonNull(corpus, "corpus must not be null");
     }
 }

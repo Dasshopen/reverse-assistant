@@ -21,6 +21,28 @@
                           "license":  "zlib License",
                           "license_url":  "https://zlib.net/zlib_license.html",
                           "retrieved_date":  "2026-07-23"
+                      },
+                      {
+                          "name":  "lz4",
+                          "version":  "1.10.0",
+                          "source_url":  "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.zip",
+                          "archive_name":  "lz4-v1.10.0.zip",
+                          "sha256":  "3224b4c80f351f194984526ef396f6079bd6332dd9825c72ac0d7a37b3cdc565",
+                          "sha3_256":  null,
+                          "license":  "BSD 2-Clause",
+                          "license_url":  "https://github.com/lz4/lz4/blob/v1.10.0/LICENSE",
+                          "retrieved_date":  "2026-07-24"
+                      },
+                      {
+                          "name":  "xxhash",
+                          "version":  "0.8.3",
+                          "source_url":  "https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.zip",
+                          "archive_name":  "xxhash-v0.8.3.zip",
+                          "sha256":  "db2c12e6f05d45546d3581b6881b25090fd65ab5194891da0b2a1a9c49beda66",
+                          "sha3_256":  null,
+                          "license":  "BSD 2-Clause (library)",
+                          "license_url":  "https://github.com/Cyan4973/xxHash/blob/v0.8.3/LICENSE",
+                          "retrieved_date":  "2026-07-24"
                       }
                   ]
 }

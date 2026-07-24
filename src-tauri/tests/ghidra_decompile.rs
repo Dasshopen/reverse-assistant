@@ -47,7 +47,11 @@ fn builds_the_expected_argument_order_and_values() {
         &session,
         "0x140001000",
         &destination_json,
-        Some("file:/C:/corpus/reverse-assistant-seed"),
+        &[(
+            "core".to_owned(),
+            "Pack essentiel".to_owned(),
+            "file:/C:/corpus/reverse-assistant-seed".to_owned(),
+        )],
     );
 
     assert_eq!(
@@ -74,6 +78,9 @@ fn builds_the_expected_argument_order_and_values() {
             "DecompileFunctionJson.java".to_owned(),
             "0x140001000".to_owned(),
             destination_json.to_string_lossy().into_owned(),
+            "--bsim-corpus".to_owned(),
+            "core".to_owned(),
+            "Pack essentiel".to_owned(),
             "file:/C:/corpus/reverse-assistant-seed".to_owned(),
         ]
     );
@@ -109,13 +116,17 @@ fn handles_paths_containing_spaces_as_separate_arguments() {
         &session,
         "0x140001000",
         &destination_json,
-        Some("file:/C:/My Corpus/reverse-assistant-seed"),
+        &[(
+            "core".to_owned(),
+            "Pack essentiel".to_owned(),
+            "file:/C:/My Corpus/reverse-assistant-seed".to_owned(),
+        )],
     );
 
     assert_eq!(invocation.args[3], "sample under test.exe");
-    assert_eq!(invocation.args.len(), 13);
+    assert_eq!(invocation.args.len(), 16);
     assert_eq!(
-        invocation.args[12],
+        invocation.args[15],
         "file:/C:/My Corpus/reverse-assistant-seed"
     );
 }

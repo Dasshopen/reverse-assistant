@@ -10,6 +10,7 @@ use models::ghidra_identification::FunctionIdentification;
 use models::ghidra_installation::GhidraInstallation;
 use models::ghidra_session::AnalysisSession;
 use models::project::ProjectMetadata;
+use services::bsim_corpus::{self, BsimCorpusSummary};
 use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
 use services::comparison::{self, ProjectComparison};
 use services::ghidra_decompile::{self, DecompiledFunctionDetails};
@@ -145,6 +146,26 @@ fn get_ghidra_installation_status(app: AppHandle) -> Result<GhidraInstallationSt
 #[tauri::command]
 fn get_setup_overview(app: AppHandle) -> Result<SetupOverview, String> {
     setup::inspect_setup(&app)
+}
+
+#[tauri::command]
+fn list_bsim_corpora(app: AppHandle) -> Result<Vec<BsimCorpusSummary>, String> {
+    bsim_corpus::list_corpora(&app)
+}
+
+#[tauri::command]
+fn import_bsim_corpus(app: AppHandle, path: String) -> Result<BsimCorpusSummary, String> {
+    bsim_corpus::import_custom_corpus(&app, Path::new(&path))
+}
+
+#[tauri::command]
+fn set_bsim_corpus_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
+    bsim_corpus::set_corpus_enabled(&app, &id, enabled)
+}
+
+#[tauri::command]
+fn remove_bsim_corpus(app: AppHandle, id: String) -> Result<(), String> {
+    bsim_corpus::remove_custom_corpus(&app, &id)
 }
 
 #[tauri::command]
@@ -493,6 +514,10 @@ pub fn run() {
             configure_ghidra_installation,
             get_ghidra_installation_status,
             get_setup_overview,
+            list_bsim_corpora,
+            import_bsim_corpus,
+            set_bsim_corpus_enabled,
+            remove_bsim_corpus,
             get_managed_setup_plan,
             install_managed_setup,
             adopt_existing_ghidra,

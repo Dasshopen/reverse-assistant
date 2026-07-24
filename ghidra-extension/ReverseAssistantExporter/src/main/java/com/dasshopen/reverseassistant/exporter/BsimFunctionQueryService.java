@@ -28,11 +28,13 @@ public final class BsimFunctionQueryService {
     public BsimQueryResult query(
         Program program,
         Function function,
+        String corpus,
         String databaseUrl,
         TaskMonitor monitor
     ) throws Exception {
         Objects.requireNonNull(program, "program must not be null");
         Objects.requireNonNull(function, "function must not be null");
+        Objects.requireNonNull(corpus, "corpus must not be null");
         Objects.requireNonNull(databaseUrl, "databaseUrl must not be null");
         Objects.requireNonNull(monitor, "monitor must not be null");
 
@@ -73,6 +75,7 @@ public final class BsimFunctionQueryService {
                         candidates.add(new BsimCandidate(
                             match.getFunctionName(),
                             match.getExecutableRecord().getNameExec(),
+                            corpus,
                             note.getSimilarity(),
                             note.getSignificance()
                         ));

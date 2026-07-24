@@ -3,11 +3,51 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 const CORPUS_FILE_NAME: &str = "reverse-assistant-seed.mv.db";
 const CORPUS_PATH_ENV: &str = "REVERSE_ASSISTANT_BSIM_CORPUS_PATH";
+pub const DEFAULT_CORPUS_SHA256: &str =
+    "849f147b9273626a6fc4d292419d512256cc4504be4ad71fb7d84c70f226e5a9";
+const REGISTRY_FILE_NAME: &str = "corpora.json";
+const CUSTOM_DIRECTORY_NAME: &str = "custom";
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BsimCorpusSummary {
+    pub id: String,
+    pub name: String,
+    pub origin: String,
+    pub enabled: bool,
+    pub available: bool,
+    pub path: PathBuf,
+    pub size_bytes: Option<u64>,
+    pub libraries: Vec<String>,
+    pub description: String,
+    pub removable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveBsimCorpus {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+struct CorpusRegistry {
+    #[serde(default)]
+    custom: Vec<CustomCorpusEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct CustomCorpusEntry {
+    id: String,
+    name: String,
+    file_name: String,
+    enabled: bool,
+}
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -29,6 +69,103 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), String> {
 
 pub fn cached_db_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("bsim-corpus").join(CORPUS_FILE_NAME)
+}
+
+fn corpus_root(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("bsim-corpus")
+}
+
+fn registry_path(app_data_dir: &Path) -> PathBuf {
+    corpus_root(app_data_dir).join(REGISTRY_FILE_NAME)
+}
+
+fn custom_directory(app_data_dir: &Path) -> PathBuf {
+    corpus_root(app_data_dir).join(CUSTOM_DIRECTORY_NAME)
+}
+
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("unable to resolve the application data directory: {error}"))
+}
+
+fn read_registry(app_data_dir: &Path) -> Result<CorpusRegistry, String> {
+    let path = registry_path(app_data_dir);
+    if !path.is_file() {
+        return Ok(CorpusRegistry::default());
+    }
+
+    let json = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "failed to read BSim corpus registry '{}': {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&json)
+        .map_err(|error| format!("invalid BSim corpus registry '{}': {error}", path.display()))
+}
+
+fn write_registry(app_data_dir: &Path, registry: &CorpusRegistry) -> Result<(), String> {
+    let path = registry_path(app_data_dir);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "the BSim registry path has no parent directory".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create BSim corpus directory '{}': {error}",
+            parent.display()
+        )
+    })?;
+    let json = serde_json::to_string_pretty(registry)
+        .map_err(|error| format!("failed to serialize BSim corpus registry: {error}"))?;
+    let temporary = parent.join(".corpora.json.tmp");
+    fs::write(&temporary, format!("{json}\n")).map_err(|error| {
+        format!(
+            "failed to write BSim corpus registry '{}': {error}",
+            temporary.display()
+        )
+    })?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| {
+            format!(
+                "failed to replace BSim corpus registry '{}': {error}",
+                path.display()
+            )
+        })?;
+    }
+    fs::rename(&temporary, &path).map_err(|error| {
+        format!(
+            "failed to install BSim corpus registry '{}': {error}",
+            path.display()
+        )
+    })
+}
+
+fn validate_database_file(path: &Path) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if !file_name.to_ascii_lowercase().ends_with(".mv.db") {
+        return Err("a BSim corpus must be an H2 database whose name ends with .mv.db".to_owned());
+    }
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("unable to read BSim corpus '{}': {error}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(format!(
+            "the selected BSim corpus is empty or not a file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("failed to read BSim corpus '{}': {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(hex_encode(&hasher.finalize()))
 }
 
 pub fn database_url(database_path: &Path) -> Result<String, String> {
@@ -79,33 +216,230 @@ pub fn locate_available_corpus(app: &AppHandle) -> Result<Option<PathBuf>, Strin
         .path()
         .app_data_dir()
         .map_err(|error| format!("unable to resolve the application data directory: {error}"))?;
-    let cached = cached_db_path(&app_data_dir);
+    locate_default_corpus(app, &app_data_dir)
+}
 
-    if cached.is_file() {
+pub fn list_corpora(app: &AppHandle) -> Result<Vec<BsimCorpusSummary>, String> {
+    let app_data_dir = app_data_dir(app)?;
+    let mut summaries = Vec::new();
+
+    if let Some(configured) = env::var_os(CORPUS_PATH_ENV) {
+        let path = PathBuf::from(configured);
+        summaries.push(BsimCorpusSummary {
+            id: "environment-override".to_owned(),
+            name: "Corpus défini par l’environnement".to_owned(),
+            origin: "environment".to_owned(),
+            enabled: true,
+            available: path.is_file(),
+            size_bytes: fs::metadata(&path).ok().map(|metadata| metadata.len()),
+            path,
+            libraries: Vec::new(),
+            description: format!("Corpus imposé par la variable {CORPUS_PATH_ENV}."),
+            removable: false,
+        });
+    }
+
+    let default_path = locate_default_corpus(app, &app_data_dir)?;
+    let default_display_path = default_path
+        .clone()
+        .unwrap_or_else(|| cached_db_path(&app_data_dir));
+    summaries.push(BsimCorpusSummary {
+        id: "reverse-assistant-core".to_owned(),
+        name: "Pack essentiel Reverse Assistant".to_owned(),
+        origin: "built_in".to_owned(),
+        enabled: true,
+        available: default_path.is_some(),
+        size_bytes: default_path
+            .as_ref()
+            .and_then(|path| fs::metadata(path).ok())
+            .map(|metadata| metadata.len()),
+        path: default_display_path,
+        libraries: vec![
+            "SQLite 3.53.3".to_owned(),
+            "zlib 1.3.2".to_owned(),
+            "LZ4 1.10.0".to_owned(),
+            "xxHash 0.8.3".to_owned(),
+        ],
+        description:
+            "Stockage, compression et hachage couramment intégrés aux binaires x64 optimisés."
+                .to_owned(),
+        removable: false,
+    });
+
+    let registry = read_registry(&app_data_dir)?;
+    for entry in registry.custom {
+        let path = custom_directory(&app_data_dir).join(&entry.file_name);
+        summaries.push(BsimCorpusSummary {
+            id: entry.id,
+            name: entry.name,
+            origin: "custom".to_owned(),
+            enabled: entry.enabled,
+            available: path.is_file(),
+            size_bytes: fs::metadata(&path).ok().map(|metadata| metadata.len()),
+            path,
+            libraries: Vec::new(),
+            description: "Corpus personnel importé localement par l’utilisateur.".to_owned(),
+            removable: true,
+        });
+    }
+
+    Ok(summaries)
+}
+
+fn locate_default_corpus(app: &AppHandle, app_data_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let cached = cached_db_path(app_data_dir);
+    if cached.is_file() && file_sha256(&cached)?.eq_ignore_ascii_case(DEFAULT_CORPUS_SHA256) {
         return fs::canonicalize(&cached).map(Some).map_err(|error| {
             format!(
-                "failed to resolve the cached BSim corpus '{}': {error}",
+                "failed to resolve cached BSim corpus '{}': {error}",
                 cached.display()
             )
         });
     }
-
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("bsim-corpus")
         .join("build")
         .join(CORPUS_FILE_NAME);
-
-    if development.is_file() {
+    if development.is_file()
+        && file_sha256(&development)?.eq_ignore_ascii_case(DEFAULT_CORPUS_SHA256)
+    {
         return fs::canonicalize(&development).map(Some).map_err(|error| {
             format!(
-                "failed to resolve the development BSim corpus '{}': {error}",
+                "failed to resolve development BSim corpus '{}': {error}",
                 development.display()
             )
         });
     }
-
+    let _ = app;
     Ok(None)
+}
+
+pub fn active_corpora(app: &AppHandle) -> Result<Vec<ActiveBsimCorpus>, String> {
+    let mut corpora = Vec::new();
+    for summary in list_corpora(app)? {
+        if !summary.enabled || !summary.available {
+            continue;
+        }
+        validate_database_file(&summary.path)?;
+        corpora.push(ActiveBsimCorpus {
+            id: summary.id,
+            name: summary.name,
+            path: fs::canonicalize(&summary.path).map_err(|error| {
+                format!(
+                    "failed to resolve BSim corpus '{}': {error}",
+                    summary.path.display()
+                )
+            })?,
+        });
+    }
+    Ok(corpora)
+}
+
+pub fn import_custom_corpus(app: &AppHandle, source: &Path) -> Result<BsimCorpusSummary, String> {
+    validate_database_file(source)?;
+    let app_data_dir = app_data_dir(app)?;
+    let hash = file_sha256(source)?;
+    let id = format!("custom-{}", &hash[..16]);
+    let name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_suffix(".mv.db"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Corpus personnel")
+        .to_owned();
+    let file_name = format!("{id}.mv.db");
+    let directory = custom_directory(&app_data_dir);
+    fs::create_dir_all(&directory).map_err(|error| {
+        format!(
+            "failed to create custom BSim corpus directory '{}': {error}",
+            directory.display()
+        )
+    })?;
+    let destination = directory.join(&file_name);
+    if !destination.is_file() {
+        let temporary = directory.join(format!(".{id}.tmp"));
+        fs::copy(source, &temporary).map_err(|error| {
+            format!(
+                "failed to copy custom BSim corpus '{}': {error}",
+                source.display()
+            )
+        })?;
+        if file_sha256(&temporary)? != hash {
+            let _ = fs::remove_file(&temporary);
+            return Err("the copied BSim corpus failed its SHA-256 integrity check".to_owned());
+        }
+        fs::rename(&temporary, &destination).map_err(|error| {
+            format!(
+                "failed to install custom BSim corpus '{}': {error}",
+                destination.display()
+            )
+        })?;
+    }
+
+    let mut registry = read_registry(&app_data_dir)?;
+    if let Some(existing) = registry.custom.iter_mut().find(|entry| entry.id == id) {
+        existing.enabled = true;
+    } else {
+        registry.custom.push(CustomCorpusEntry {
+            id: id.clone(),
+            name: name.clone(),
+            file_name,
+            enabled: true,
+        });
+    }
+    write_registry(&app_data_dir, &registry)?;
+    list_corpora(app)?
+        .into_iter()
+        .find(|summary| summary.id == id)
+        .ok_or_else(|| "the imported BSim corpus was not found in its registry".to_owned())
+}
+
+pub fn set_corpus_enabled(app: &AppHandle, id: &str, enabled: bool) -> Result<(), String> {
+    let app_data_dir = app_data_dir(app)?;
+    let mut registry = read_registry(&app_data_dir)?;
+    let entry = registry
+        .custom
+        .iter_mut()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| "only a custom BSim corpus can be enabled or disabled".to_owned())?;
+    entry.enabled = enabled;
+    write_registry(&app_data_dir, &registry)
+}
+
+pub fn remove_custom_corpus(app: &AppHandle, id: &str) -> Result<(), String> {
+    let app_data_dir = app_data_dir(app)?;
+    let mut registry = read_registry(&app_data_dir)?;
+    let index = registry
+        .custom
+        .iter()
+        .position(|entry| entry.id == id)
+        .ok_or_else(|| "only a registered custom BSim corpus can be removed".to_owned())?;
+    let entry = registry.custom.remove(index);
+    let target = custom_directory(&app_data_dir).join(entry.file_name);
+    if target.exists() {
+        let directory = fs::canonicalize(custom_directory(&app_data_dir)).map_err(|error| {
+            format!("failed to resolve the managed custom corpus directory: {error}")
+        })?;
+        let canonical_target = fs::canonicalize(&target).map_err(|error| {
+            format!(
+                "failed to resolve custom BSim corpus '{}': {error}",
+                target.display()
+            )
+        })?;
+        if !canonical_target.starts_with(&directory) || canonical_target == directory {
+            return Err(
+                "refusing to remove a BSim corpus outside the managed corpus directory".to_owned(),
+            );
+        }
+        fs::remove_file(&canonical_target).map_err(|error| {
+            format!(
+                "failed to remove custom BSim corpus '{}': {error}",
+                canonical_target.display()
+            )
+        })?;
+    }
+    write_registry(&app_data_dir, &registry)
 }
 
 // Downloads the BSim seed corpus from a GitHub Release asset on first use,
@@ -228,6 +562,52 @@ mod tests {
         .expect_err("a mismatched hash should be rejected");
 
         assert!(error.contains("SHA-256 mismatch"));
+    }
+
+    #[test]
+    fn database_validation_accepts_a_non_empty_mv_db_file() {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock should be after the Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "reverse-assistant-bsim-validation-test-{unique_suffix}"
+        ));
+        let database = directory.join("personal-corpus.mv.db");
+
+        fs::create_dir_all(&directory).expect("the test directory should be created");
+        fs::write(&database, b"test database").expect("the test database should be written");
+
+        validate_database_file(&database).expect("a non-empty .mv.db file should be accepted");
+
+        fs::remove_dir_all(directory).expect("the test directory should be removed");
+    }
+
+    #[test]
+    fn database_validation_rejects_an_empty_or_wrongly_named_file() {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock should be after the Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "reverse-assistant-bsim-validation-errors-{unique_suffix}"
+        ));
+        let empty_database = directory.join("empty.mv.db");
+        let wrong_extension = directory.join("corpus.db");
+
+        fs::create_dir_all(&directory).expect("the test directory should be created");
+        fs::write(&empty_database, []).expect("the empty test file should be written");
+        fs::write(&wrong_extension, b"test database")
+            .expect("the wrongly named test file should be written");
+
+        assert!(validate_database_file(&empty_database)
+            .expect_err("an empty database should be rejected")
+            .contains("empty"));
+        assert!(validate_database_file(&wrong_extension)
+            .expect_err("a database without the .mv.db suffix should be rejected")
+            .contains(".mv.db"));
+
+        fs::remove_dir_all(directory).expect("the test directory should be removed");
     }
 
     // Not run by default (needs network access) -- exercises the real

@@ -26,7 +26,6 @@ const EXTENSION_RESOURCE: &str = "managed/ReverseAssistantExporter.zip";
 const EXTENSION_SOURCE_RESOURCE: &str = "managed/extension-source";
 const EXTENSION_SHA256: &str = "0d20b2808a4074bcd17e2913df6eda0b36450e505bf4e262110bfd2ec02833b5";
 const BSIM_RESOURCE: &str = "managed/reverse-assistant-seed.mv.db";
-const BSIM_SHA256: &str = "94daf5e4da0ddf30d766f0cd42d7da5c15b0a9dc94a606a9ea9dc70d70d0a7d6";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,10 +135,10 @@ pub fn managed_install_plan(app: &AppHandle) -> Result<SetupInstallPlan, String>
             SetupInstallItem {
                 id: "bsim",
                 label: "BSim seed corpus",
-                version: "SQLite 3.53.3 + zlib 1.3.2",
+                version: "SQLite 3.53.3 + zlib 1.3.2 + LZ4 1.10.0 + xxHash 0.8.3",
                 source: "Locally reproducible Reverse Assistant corpus",
-                license: "Public Domain + zlib License",
-                license_url: "https://www.zlib.net/zlib_license.html",
+                license: "Public Domain + zlib License + BSD 2-Clause",
+                license_url: "https://github.com/lz4/lz4/blob/v1.10.0/LICENSE",
                 download_required: false,
             },
         ],
@@ -524,7 +523,9 @@ fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
         .app_data_dir()
         .map_err(|error| format!("unable to resolve application data directory: {error}"))?;
     let destination = bsim_corpus::cached_db_path(&app_data_dir);
-    if destination.is_file() && verify_file(&destination, BSIM_SHA256).is_ok() {
+    if destination.is_file()
+        && verify_file(&destination, bsim_corpus::DEFAULT_CORPUS_SHA256).is_ok()
+    {
         return Ok(Some(destination));
     }
 
@@ -544,7 +545,7 @@ fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let Some(bundled) = bundled else {
         return Ok(None);
     };
-    verify_file(&bundled, BSIM_SHA256)?;
+    verify_file(&bundled, bsim_corpus::DEFAULT_CORPUS_SHA256)?;
     let parent = destination
         .parent()
         .ok_or_else(|| "the BSim destination has no parent directory".to_owned())?;
@@ -557,7 +558,7 @@ fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let temporary = parent.join(".reverse-assistant-seed.mv.db.tmp");
     fs::copy(&bundled, &temporary)
         .map_err(|error| format!("failed to copy bundled BSim corpus: {error}"))?;
-    verify_file(&temporary, BSIM_SHA256)?;
+    verify_file(&temporary, bsim_corpus::DEFAULT_CORPUS_SHA256)?;
     if destination.exists() {
         fs::remove_file(&destination).map_err(|error| {
             format!(

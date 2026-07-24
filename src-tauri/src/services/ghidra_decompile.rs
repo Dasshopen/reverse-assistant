@@ -8,7 +8,7 @@ use tauri::AppHandle;
 use crate::models::ghidra_export::{is_valid_address, FunctionParameter};
 use crate::models::ghidra_installation::{configure_java_environment, GhidraInstallation};
 use crate::models::ghidra_session::AnalysisSession;
-use crate::services::bsim_corpus::{database_url, locate_available_corpus};
+use crate::services::bsim_corpus::{active_corpora, database_url, ActiveBsimCorpus};
 use crate::services::ghidra_headless::{tail, HEADLESS_MAX_HEAP};
 use crate::services::ghidra_installation::{load_persisted_install_dir, validate_installation};
 
@@ -17,7 +17,7 @@ const STDERR_TAIL_BYTES: usize = 4000;
 // Bump this value whenever the Java result semantics change. Keeping the
 // version in the file name makes persistent cached results safe across app
 // upgrades without having to delete a user's analyzed Ghidra project.
-const DECOMPILE_CACHE_VERSION: &str = "native-prototype-bsim-v2";
+const DECOMPILE_CACHE_VERSION: &str = "native-prototype-bsim-packs-v3";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecompileFunctionInvocation {
@@ -30,7 +30,7 @@ pub fn build_decompile_function_args(
     session: &AnalysisSession,
     entry_address: &str,
     destination_json: &Path,
-    bsim_database_url: Option<&str>,
+    bsim_corpora: &[(String, String, String)],
 ) -> DecompileFunctionInvocation {
     let program = installation
         .install_dir
@@ -54,8 +54,13 @@ pub fn build_decompile_function_args(
         destination_json.to_string_lossy().into_owned(),
     ];
 
-    if let Some(url) = bsim_database_url {
-        args.push(url.to_owned());
+    for (id, name, url) in bsim_corpora {
+        args.extend([
+            "--bsim-corpus".to_owned(),
+            id.clone(),
+            name.clone(),
+            url.clone(),
+        ]);
     }
 
     DecompileFunctionInvocation { program, args }
@@ -81,8 +86,14 @@ pub struct BsimQueryResult {
 pub struct BsimCandidate {
     pub name: String,
     pub executable: String,
+    #[serde(default = "legacy_corpus_name")]
+    pub corpus: String,
     pub similarity: f64,
     pub significance: f64,
+}
+
+fn legacy_corpus_name() -> String {
+    "Corpus BSim historique".to_owned()
 }
 
 #[derive(Deserialize)]
@@ -119,10 +130,32 @@ fn should_reuse_cached_result(
     !bsim_database_available || cached.bsim.status == "available"
 }
 
-fn decompile_cache_path(cache_dir: &Path, entry_address: &str) -> PathBuf {
+fn corpus_cache_key(corpora: &[ActiveBsimCorpus]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest;
+    for corpus in corpora {
+        hasher.update(corpus.id.as_bytes());
+        hasher.update(corpus.path.to_string_lossy().as_bytes());
+        if let Ok(metadata) = fs::metadata(&corpus.path) {
+            hasher.update(metadata.len().to_le_bytes());
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    hasher.update(duration.as_secs().to_le_bytes());
+                }
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn decompile_cache_path(cache_dir: &Path, entry_address: &str, corpus_key: &str) -> PathBuf {
     cache_dir.join(format!(
-        "{}-{DECOMPILE_CACHE_VERSION}.json",
-        &entry_address[2..]
+        "{}-{DECOMPILE_CACHE_VERSION}-{corpus_key}.json",
+        &entry_address[2..],
     ))
 }
 
@@ -140,7 +173,7 @@ pub fn run_decompile_function(
     installation: &GhidraInstallation,
     session: &AnalysisSession,
     entry_address: &str,
-    bsim_database_path: Option<&Path>,
+    bsim_corpora: &[ActiveBsimCorpus],
 ) -> Result<DecompiledFunctionDetails, String> {
     validate_entry_address(entry_address)?;
 
@@ -153,7 +186,8 @@ pub fn run_decompile_function(
         )
     })?;
 
-    let destination_json = decompile_cache_path(&cache_dir, entry_address);
+    let corpus_key = corpus_cache_key(bsim_corpora);
+    let destination_json = decompile_cache_path(&cache_dir, entry_address, &corpus_key);
 
     // A Ghidra analysis session is immutable during on-demand decompilation
     // (-readOnly and -noanalysis), so a result for this project/address can be
@@ -164,7 +198,7 @@ pub fn run_decompile_function(
             // A missing corpus or a transient BSim failure must not become a
             // permanent cached result. Retry once a corpus is available;
             // successful matches (including an empty match list) stay cached.
-            if should_reuse_cached_result(&cached, bsim_database_path.is_some()) {
+            if should_reuse_cached_result(&cached, !bsim_corpora.is_empty()) {
                 return Ok(cached);
             }
         }
@@ -173,13 +207,22 @@ pub fn run_decompile_function(
         let _ = fs::remove_file(&destination_json);
     }
 
-    let bsim_database_url = bsim_database_path.map(database_url).transpose()?;
+    let bsim_arguments = bsim_corpora
+        .iter()
+        .map(|corpus| {
+            Ok((
+                corpus.id.clone(),
+                corpus.name.clone(),
+                database_url(&corpus.path)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let invocation = build_decompile_function_args(
         installation,
         session,
         entry_address,
         &destination_json,
-        bsim_database_url.as_deref(),
+        &bsim_arguments,
     );
 
     let mut command = Command::new(&invocation.program);
@@ -231,14 +274,9 @@ pub fn decompile_function(
 
     let installation = validate_installation(app, &install_dir)?;
 
-    let bsim_database = locate_available_corpus(app).ok().flatten();
+    let bsim_corpora = active_corpora(app).unwrap_or_default();
 
-    run_decompile_function(
-        &installation,
-        session,
-        entry_address,
-        bsim_database.as_deref(),
-    )
+    run_decompile_function(&installation, session, entry_address, &bsim_corpora)
 }
 
 #[cfg(test)]
@@ -248,8 +286,8 @@ mod tests {
     #[test]
     fn cache_path_is_stable_and_versioned() {
         assert_eq!(
-            decompile_cache_path(Path::new("cache"), "0x140001170"),
-            PathBuf::from("cache/140001170-native-prototype-bsim-v2.json")
+            decompile_cache_path(Path::new("cache"), "0x140001170", "abc123"),
+            PathBuf::from("cache/140001170-native-prototype-bsim-packs-v3-abc123.json")
         );
     }
 
@@ -297,7 +335,7 @@ mod tests {
 
         let entry_address = "0x140001170";
         fs::write(
-            decompile_cache_path(&cache_dir, entry_address),
+            decompile_cache_path(&cache_dir, entry_address, &corpus_cache_key(&[])),
             r#"{
                 "decompiled_code": "int cached(void) { return 1; }",
                 "return_type": "int",
@@ -324,7 +362,7 @@ mod tests {
             program_path_in_project: "cached-test.exe".to_owned(),
         };
 
-        let result = run_decompile_function(&installation, &session, entry_address, None)
+        let result = run_decompile_function(&installation, &session, entry_address, &[])
             .expect("a valid cached result should bypass the missing Ghidra executable");
 
         assert_eq!(result.return_type, "int");

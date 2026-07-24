@@ -18,7 +18,8 @@ used to validate BSim end to end before deciding whether/how to scale it.
     computed from a direct HTTPS download of the official URL and recorded
     once, deliberately, as the trust anchor for all future runs — not
     auto-recorded by the script.
-- `scripts/build-sqlite.ps1`, `scripts/build-zlib.ps1` — download the
+- `scripts/build-sqlite.ps1`, `scripts/build-zlib.ps1`,
+  `scripts/build-lz4.ps1`, `scripts/build-xxhash.ps1` — download the
   official source (skipped if already present), verify its hash against
   `manifest.json`, and compile it as an x64 DLL **with debugging symbols
   kept, `/MD` (dynamic CRT)** using the locally installed Visual Studio
@@ -58,6 +59,8 @@ working hashes but weak or absent names.
 # 1. Compile the reference libraries (downloads + verifies sources first)
 .\scripts\build-sqlite.ps1
 .\scripts\build-zlib.ps1
+.\scripts\build-lz4.ps1
+.\scripts\build-xxhash.ps1
 
 # 2. Analyze them and build the BSim database
 .\scripts\build-corpus-database.ps1 -GhidraInstallDir "C:\path\to\ghidra_12.x_PUBLIC"
@@ -71,7 +74,8 @@ This produces `build\reverse-assistant-seed.mv.db`.
 ## Current scope (deliberately narrow)
 
 One architecture (x64) and one compile profile (optimized, `/MD`, symbols
-kept), two libraries (SQLite 3.53.3, zlib 1.3.2). This was validated end to
+kept), four high-value libraries (SQLite 3.53.3, zlib 1.3.2, LZ4 1.10.0,
+xxHash 0.8.3). This was validated end to
 end (`VerifyBsimQuery.java` confirmed real function names matching
 correctly) before any decision to expand to more libraries, architectures,
 or compile profiles — expand only after checking the pipeline still holds.
