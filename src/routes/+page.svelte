@@ -389,6 +389,10 @@ interface ApplyRenamesResult {
   let functionSearch = $state("");
   let functionPage = $state(1);
   const functionPageSize = 15;
+  let decompileCache = $state(new Map<string, DecompiledFunctionDetails>());
+  let pendingDecompiles = $state(new Set<string>());
+  let decompileErrors = $state(new Map<string, string>());
+  let identifications = $state(new Map<string, FidCandidate[]>());
   let identificationPage = $state(1);
   const identificationPageSize = 10;
   let automaticIdentificationMode = $state(false);
@@ -438,7 +442,13 @@ interface ApplyRenamesResult {
   let identificationQueue = $derived(
     unidentifiedFunctions.filter(
       (func) => !ignoredIdentificationAddresses.has(func.entry_address),
-    ),
+    ).sort((a, b) => {
+      const aHasEvidence = (identifications.get(a.entry_address)?.length ?? 0) > 0 ||
+        decompileCache.get(a.entry_address)?.bsim.status === "available";
+      const bHasEvidence = (identifications.get(b.entry_address)?.length ?? 0) > 0 ||
+        decompileCache.get(b.entry_address)?.bsim.status === "available";
+      return Number(bHasEvidence) - Number(aHasEvidence);
+    }),
   );
   let identificationPageCount = $derived(
     Math.max(1, Math.ceil(identificationQueue.length / identificationPageSize)),
@@ -585,10 +595,6 @@ interface ApplyRenamesResult {
     projectComparison?.matches.filter((match) => match.changes.length > 0).length ?? 0,
   );
 
-  let decompileCache = $state(new Map<string, DecompiledFunctionDetails>());
-  let pendingDecompiles = $state(new Set<string>());
-  let decompileErrors = $state(new Map<string, string>());
-  let identifications = $state(new Map<string, FidCandidate[]>());
   let functionIdAnalysisAvailable = $state(false);
   let functionRenameDraft = $state("");
   let isApplyingFunctionRename = $state(false);
@@ -596,7 +602,10 @@ interface ApplyRenamesResult {
   let functionRenameSuccess = $state("");
   let renameDraftAddress: string | null = null;
 
-  const automaticFidMinimumScore = 20;
+  // Ghidra's bundled FunctionID databases already discard matches below
+  // 14.6. Keep that native threshold, then add the more important unique-name
+  // margin check so equal-scored candidates are never presented as a winner.
+  const automaticFidMinimumScore = 14.6;
   const automaticFidMinimumMargin = 3;
   const automaticBsimMinimumSimilarity = 0.85;
   const automaticBsimMinimumSignificance = 10;
@@ -607,6 +616,27 @@ interface ApplyRenamesResult {
     // namespace. Keep automatic writes conservative; decorated C++ names and
     // namespace syntax remain available for manual review instead.
     return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name.length <= 200;
+  }
+
+  function normalizedAutomaticSymbolName(name: string): string | null {
+    if (isSafeAutomaticSymbolName(name)) return name;
+
+    const deletingDestructor = name.match(/^\?\?_G([^@]+)@([^@]+)@@/);
+    if (deletingDestructor) {
+      return `${deletingDestructor[2]}_${deletingDestructor[1]}_deleting_destructor`;
+    }
+
+    const constructor = name.match(/^\?\?0([^@]+)@([^@]+)@@(.*)$/);
+    if (constructor) {
+      const suffix = constructor[3];
+      return `${constructor[2]}_${constructor[1]}_${suffix.includes("AEBV") ? "copy_constructor" : "constructor"}`;
+    }
+
+    if (/^\?\?2@/.test(name)) return "operator_new";
+    if (/^\?\?3@/.test(name)) return "operator_delete";
+
+    const globalFunction = name.match(/^\?([A-Za-z_][A-Za-z0-9_]*)@@/);
+    return globalFunction?.[1] ?? null;
   }
 
   function displayCandidateName(name: string): string {
@@ -627,6 +657,23 @@ interface ApplyRenamesResult {
     const member = name.match(/^\?([^@]+)@([^@]+)@@/);
     if (member) return `${member[2]}::${member[1]} (nom C++ décoré)`;
     return name;
+  }
+
+  function describeAmbiguousFidCandidates(candidates: FidCandidate[]): string {
+    const names = candidates.map((candidate) => candidate.name);
+    if (names.length > 1 && names.every((name) => name.startsWith("??0"))) {
+      return `Constructeur de copie C++ · ${names.length} classes possibles`;
+    }
+    if (names.length > 1 && names.every((name) => name.startsWith("??_G"))) {
+      return `Destructeur C++ · ${names.length} classes possibles`;
+    }
+    if (names.length > 1 && names.every((name) => name.startsWith("_RTC_"))) {
+      return `Fonction Runtime Check · ${names.length} noms possibles`;
+    }
+    if (names.length > 1 && names.every((name) => name.includes("environment"))) {
+      return `Gestion de l'environnement CRT · ${names.length} noms possibles`;
+    }
+    return `${names.length} noms FunctionID ex æquo`;
   }
 
   function uniqueFidCandidates(candidates: FidCandidate[]): FidCandidate[] {
@@ -676,21 +723,26 @@ interface ApplyRenamesResult {
       if (bestFid) {
         const runnerUp = fidCandidates[1];
         const margin = runnerUp ? bestFid.overall_score - runnerUp.overall_score : null;
+        const isAmbiguous = margin !== null && margin < automaticFidMinimumMargin;
+        const normalizedName = normalizedAutomaticSymbolName(bestFid.name);
         let reason = "";
-        if (!isSafeAutomaticSymbolName(bestFid.name)) {
-          reason = "Nom C++ décoré ou non compatible avec le renommage automatique.";
+        if (isAmbiguous) {
+          reason = margin === 0
+            ? `FunctionID attribue exactement le même score à ${fidCandidates.length} noms : aucun gagnant réel.`
+            : `Correspondance ambiguë : seulement ${margin.toFixed(1)} point(s) d'écart avec le deuxième nom.`;
+        } else if (!normalizedName) {
+          reason = "Nom C++ impossible à convertir sans perdre son sens.";
         } else if (bestFid.overall_score < automaticFidMinimumScore) {
           reason = `Score ${bestFid.overall_score.toFixed(1)} trop faible (minimum automatique : ${automaticFidMinimumScore.toFixed(1)}).`;
-        } else if (margin !== null && margin < automaticFidMinimumMargin) {
-          reason = `Correspondance ambiguë : seulement ${margin.toFixed(1)} point(s) d'écart avec le deuxième nom.`;
-        } else if (reservedNames.has(bestFid.name)) {
+        } else if (reservedNames.has(normalizedName)) {
           reason = "Ce nom est déjà utilisé par une autre fonction ; collision refusée.";
         }
 
         if (!reason) {
+          const safeName = normalizedName as string;
           choices.push({
             func,
-            name: bestFid.name,
+            name: safeName,
             source: "function_id",
             scoreLabel: `score ${bestFid.overall_score.toFixed(1)}`,
             evidenceLabel: `${bestFid.library_family} ${bestFid.library_version} · ${bestFid.match_mode}`,
@@ -699,14 +751,16 @@ interface ApplyRenamesResult {
               ? "Candidat unique au-dessus du seuil de sécurité"
               : `Marge de ${margin.toFixed(1)} points sur le deuxième candidat`,
           });
-          reservedNames.add(bestFid.name);
+          reservedNames.add(safeName);
           continue;
         }
 
         fidRejection = {
           func,
-          candidateName: bestFid.name,
-          candidateDisplayName: displayCandidateName(bestFid.name),
+          candidateName: isAmbiguous ? "" : bestFid.name,
+          candidateDisplayName: isAmbiguous
+            ? describeAmbiguousFidCandidates(fidCandidates)
+            : displayCandidateName(bestFid.name),
           source: "function_id",
           evidenceLabel: `score ${bestFid.overall_score.toFixed(1)} · ${bestFid.library_family} ${bestFid.library_version}`,
           reason,
@@ -792,9 +846,16 @@ interface ApplyRenamesResult {
 
   let selectedIdentificationCandidates = $derived(
     selectedFunctionAddress
-      ? (identifications.get(selectedFunctionAddress) ?? [])
+      ? uniqueFidCandidates(identifications.get(selectedFunctionAddress) ?? [])
       : [],
   );
+  let selectedIdentificationTopTieCount = $derived.by(() => {
+    const topScore = selectedIdentificationCandidates[0]?.overall_score;
+    if (topScore === undefined) return 0;
+    return selectedIdentificationCandidates.filter(
+      (candidate) => Math.abs(candidate.overall_score - topScore) < 0.0001,
+    ).length;
+  });
 
   // Real, honest stand-in for "functions identified": how many internal
   // (non-external) functions have at least one FunctionID candidate, out of
@@ -823,7 +884,13 @@ interface ApplyRenamesResult {
   });
 
   function topIdentificationFor(entryAddress: string): FidCandidate | null {
-    return identifications.get(entryAddress)?.[0] ?? null;
+    const candidates = uniqueFidCandidates(identifications.get(entryAddress) ?? []);
+    if (candidates.length === 0) return null;
+    if (
+      candidates.length > 1 &&
+      Math.abs(candidates[0].overall_score - candidates[1].overall_score) < 0.0001
+    ) return null;
+    return candidates[0];
   }
 
   function initialFunctionAddress(exportData: GhidraExport): string | null {
@@ -1933,6 +2000,24 @@ interface ApplyRenamesResult {
     functionRenameSuccess = "";
   }
 
+  function selectIdentificationEvidenceFirst() {
+    const selectedHasEvidence = selectedFunctionAddress !== null &&
+      ((identifications.get(selectedFunctionAddress)?.length ?? 0) > 0 ||
+        decompileCache.get(selectedFunctionAddress)?.bsim.status === "available");
+    if (selectedHasEvidence) return;
+
+    const firstWithEvidence = identificationQueue.find(
+      (func) => (identifications.get(func.entry_address)?.length ?? 0) > 0 ||
+        decompileCache.get(func.entry_address)?.bsim.status === "available",
+    );
+    if (firstWithEvidence) selectedFunctionAddress = firstWithEvidence.entry_address;
+  }
+
+  function selectWorkspaceView(view: WorkspaceView) {
+    activeWorkspaceView = view;
+    if (view === "identification") selectIdentificationEvidenceFirst();
+  }
+
   function openFunction(entryAddress: string | null, navigateToFunctions = true) {
     if (!entryAddress) return;
     selectedFunctionAddress = entryAddress;
@@ -2475,7 +2560,7 @@ interface ApplyRenamesResult {
           <button
             type="button"
             class:active={activeWorkspaceView === view.id}
-            onclick={() => (activeWorkspaceView = view.id)}
+            onclick={() => selectWorkspaceView(view.id)}
           ><span>{view.icon}</span>{view.label}</button>
         {/each}
       </nav>
@@ -3390,6 +3475,7 @@ interface ApplyRenamesResult {
             onclick={() => {
               automaticIdentificationMode = !automaticIdentificationMode;
               automaticIdentificationPage = 1;
+              if (!automaticIdentificationMode) selectIdentificationEvidenceFirst();
             }}
           ><span></span><b>Choix automatique</b></button>
         </section>
@@ -3412,6 +3498,7 @@ interface ApplyRenamesResult {
           {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
           {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
 
+          {#if automaticRenameCandidates.length > 0}
           <section class="automatic-choice-preview">
             <header>
               <div><h3>Choix préparés</h3><span>Chaque ligne conserve la preuve utilisée avant l'écriture dans Ghidra.</span></div>
@@ -3440,9 +3527,10 @@ interface ApplyRenamesResult {
               <button type="button" disabled={currentAutomaticIdentificationPage === automaticIdentificationPageCount} onclick={() => (automaticIdentificationPage = Math.min(automaticIdentificationPageCount, currentAutomaticIdentificationPage + 1))}>→</button>
             </nav>
           </section>
+          {/if}
 
           {#if automaticRenameRejections.length > 0}
-            <details class="automatic-rejections">
+            <details class="automatic-rejections" open>
               <summary>
                 <span><strong>{automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Scores insuffisants, ambiguïtés, noms décorés ou collisions</small></span>
                 <b>Voir les raisons</b>
@@ -3451,7 +3539,7 @@ interface ApplyRenamesResult {
                 {#each automaticRenameRejections as item (item.func.entry_address)}
                   <article>
                     <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
-                    <div><span>{item.candidateDisplayName}</span>{#if item.candidateDisplayName !== item.candidateName}<code title="Nom brut FunctionID">{item.candidateName}</code>{/if}</div>
+                    <div><span>{item.candidateDisplayName}</span>{#if item.candidateName && item.candidateDisplayName !== item.candidateName}<code title="Nom brut FunctionID">{item.candidateName}</code>{/if}</div>
                     <div><small>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.evidenceLabel}</small><b>{item.reason}</b></div>
                     <button type="button" onclick={() => { automaticIdentificationMode = false; openFunction(item.func.entry_address, false); }}>Vérifier manuellement</button>
                   </article>
@@ -3475,6 +3563,7 @@ interface ApplyRenamesResult {
               <ol>
                 {#each paginatedIdentificationQueue as func (func.entry_address)}
                   {@const candidate = topIdentificationFor(func.entry_address)}
+                  {@const evidenceCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? [])}
                   <li>
                     <button
                       type="button"
@@ -3484,6 +3573,8 @@ interface ApplyRenamesResult {
                       <span><strong>{func.name}</strong><code>{func.entry_address}</code></span>
                       {#if candidate}
                         <span class="queue-candidate"><small>Proposition</small><b>{candidate.name}</b></span>
+                      {:else if evidenceCandidates.length > 0}
+                        <span class="queue-candidate ambiguous"><small>FunctionID ambigu</small><b>{evidenceCandidates.length} noms ex æquo</b></span>
                       {:else}
                         <span class="queue-no-evidence">Sans correspondance</span>
                       {/if}
@@ -3511,10 +3602,15 @@ interface ApplyRenamesResult {
 
                     {#if selectedIdentificationCandidates.length > 0}
                       <div class="evidence-source-group">
-                        <h5>FunctionID</h5>
+                        <h5>FunctionID
+                          {#if selectedIdentificationTopTieCount > 1}
+                            <span>{selectedIdentificationTopTieCount} noms ex æquo : FunctionID reconnaît la forme, mais ne peut pas choisir le nom exact.</span>
+                          {/if}
+                        </h5>
                         {#each selectedIdentificationCandidates as candidate}
                           {@const displayedName = displayCandidateName(candidate.name)}
-                          <button type="button" class:selected={functionRenameDraft === candidate.name} onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
+                          {@const proposedName = normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}
+                          <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
                             <span><strong>{displayedName}</strong>{#if displayedName !== candidate.name}<small>Nom brut : {candidate.name}</small>{/if}<small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small></span>
                             <span><code>score {candidate.overall_score.toFixed(1)}</code><small>{candidate.match_mode}</small></span>
                           </button>
@@ -4032,15 +4128,16 @@ interface ApplyRenamesResult {
                   <ul>
                     {#each selectedIdentificationCandidates as candidate}
                       {@const displayedName = displayCandidateName(candidate.name)}
+                      {@const proposedName = normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}
                       <li
                         class="rename-suggestion-item"
-                        class:selected={functionRenameDraft === candidate.name}
+                        class:selected={functionRenameDraft === proposedName}
                       >
                         <button
                           type="button"
                           class="rename-suggestion"
                           title={`Use ${candidate.name} as the proposed Ghidra name`}
-                          onclick={() => selectFunctionRenameSuggestion(candidate.name)}
+                          onclick={() => selectFunctionRenameSuggestion(proposedName)}
                         >
                           <span>
                             {displayedName}
@@ -6913,6 +7010,8 @@ interface ApplyRenamesResult {
   .identification-queue code { color: #79b9ee; font-size: 0.56rem; }
   .queue-candidate small { color: #6ee7b7; font-size: 0.5rem; }
   .queue-candidate b { color: #bbf7d0; }
+  .queue-candidate.ambiguous small,
+  .queue-candidate.ambiguous b { color: #fbbf24; }
   .queue-no-evidence { color: #66758d; font-size: 0.56rem; }
 
   .identification-pagination {
@@ -6941,13 +7040,15 @@ interface ApplyRenamesResult {
 
   .identification-evidence,
   .identification-code { min-width: 0; padding: 0.75rem; }
+  .identification-evidence { max-height: 410px; overflow: auto; }
   .identification-code { border-left: 1px solid #22324a; }
   .review-section-heading { display: grid; gap: 0.12rem; margin-bottom: 0.55rem; }
   .review-section-heading h4 { margin: 0; color: #c4b5fd; font-size: 0.78rem; }
   .review-section-heading span { color: #7f8faa; font-size: 0.56rem; overflow-wrap: anywhere; }
 
   .evidence-source-group { display: grid; gap: 0.35rem; margin-bottom: 0.65rem; }
-  .evidence-source-group h5 { margin: 0.15rem 0; color: #67e8f9; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .evidence-source-group h5 { display: grid; gap: 0.2rem; margin: 0.15rem 0; color: #67e8f9; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .evidence-source-group h5 span { color: #fbbf24; font-size: 0.58rem; font-weight: 500; letter-spacing: 0; line-height: 1.4; text-transform: none; }
   .evidence-source-group button {
     display: flex;
     width: 100%;
