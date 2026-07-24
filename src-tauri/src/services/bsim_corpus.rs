@@ -14,7 +14,7 @@ use crate::services::ghidra_installation::{self, GhidraInstallationStatus};
 const CORPUS_FILE_NAME: &str = "reverse-assistant-seed.mv.db";
 const CORPUS_PATH_ENV: &str = "REVERSE_ASSISTANT_BSIM_CORPUS_PATH";
 pub const DEFAULT_CORPUS_SHA256: &str =
-    "849f147b9273626a6fc4d292419d512256cc4504be4ad71fb7d84c70f226e5a9";
+    "d8585eb3c43b081ec37e5b1f33281ad4af94bcf7e37278b1021823e9f8c1086f";
 const REGISTRY_FILE_NAME: &str = "corpora.json";
 const CUSTOM_DIRECTORY_NAME: &str = "custom";
 

@@ -19,7 +19,10 @@ pub fn scan_unnamed_functions(
 ) -> Result<Vec<FunctionIdentification>, String> {
     let corpora = active_corpora(app)?;
     if corpora.is_empty() {
-        return Ok(Vec::new());
+        return Err(
+            "aucun corpus BSim actif n'est disponible; vérifie le pack BSim dans Paramètres"
+                .to_owned(),
+        );
     }
 
     let destination = session.project_dir.join("bsim-identifications.json");

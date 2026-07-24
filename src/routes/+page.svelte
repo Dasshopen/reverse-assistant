@@ -5616,7 +5616,10 @@ interface ApplyRenamesResult {
     min-width: 0;
     min-height: 0;
     overflow: auto;
+    scrollbar-width: none;
   }
+
+  .workspace-scroll::-webkit-scrollbar { display: none; }
 
   .workspace-scroll > .panel {
     width: 100%;
@@ -5992,7 +5995,7 @@ interface ApplyRenamesResult {
     position: relative;
     min-width: 0;
     padding: 0.75rem;
-    overflow: auto;
+    overflow: hidden;
     background-image: radial-gradient(#27364e 0.7px, transparent 0.7px);
     background-size: 18px 18px;
   }
@@ -6553,7 +6556,7 @@ interface ApplyRenamesResult {
 
   .overview-graph-scroll {
     min-height: 0;
-    overflow: auto hidden;
+    overflow: hidden;
     background-image: radial-gradient(#26354d 0.55px, transparent 0.55px);
     background-size: 15px 15px;
   }
@@ -6996,7 +6999,7 @@ interface ApplyRenamesResult {
   .function-graph-scroll {
     width: 100%;
     min-height: 282px;
-    overflow-x: auto;
+    overflow: hidden;
     border: 1px solid #1d2a40;
     border-radius: 7px;
     background-color: #091423;
@@ -7016,6 +7019,11 @@ interface ApplyRenamesResult {
   .function-list-column .function-table-wrap {
     max-height: none;
     overflow: hidden;
+  }
+
+  .function-details {
+    max-height: none;
+    overflow: visible;
   }
 
   .function-pagination {
@@ -7339,7 +7347,7 @@ interface ApplyRenamesResult {
 
   .identification-evidence,
   .identification-code { min-width: 0; padding: 0.75rem; }
-  .identification-evidence { max-height: 410px; overflow: auto; }
+  .identification-evidence { max-height: 410px; overflow: auto; scrollbar-width: none; }
   .identification-code { border-left: 1px solid #22324a; }
   .review-section-heading { display: grid; gap: 0.12rem; margin-bottom: 0.55rem; }
   .review-section-heading h4 { margin: 0; color: #c4b5fd; font-size: 0.78rem; }
@@ -7368,7 +7376,9 @@ interface ApplyRenamesResult {
   .evidence-source-group small { color: #8292ad; font-size: 0.54rem; }
   .evidence-source-group code { color: #a7f3d0; font-size: 0.58rem; }
 
-  .identification-code pre { max-height: 345px; margin: 0; padding: 0.7rem; border: 1px solid #24344c; border-radius: 7px; background: #050b14; overflow: auto; }
+  .identification-code pre { max-height: 345px; margin: 0; padding: 0.7rem; border: 1px solid #24344c; border-radius: 7px; background: #050b14; overflow: auto; scrollbar-width: none; }
+  .identification-evidence::-webkit-scrollbar,
+  .identification-code pre::-webkit-scrollbar { display: none; }
   .identification-code pre code { color: #cce8dc; font: 0.66rem/1.5 Consolas, monospace; white-space: pre; }
   .identification-code > p { color: #8292ad; font-size: 0.7rem; }
 
