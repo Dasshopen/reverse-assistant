@@ -150,6 +150,29 @@ interface DecompiledFunctionDetails {
   bsim: BsimQueryResult;
 }
 
+type InstructionFlowCategory =
+  | "fall_through"
+  | "unconditional_jump"
+  | "conditional_jump"
+  | "unconditional_call"
+  | "conditional_call"
+  | "terminator"
+  | "other";
+
+interface DisassembledInstruction {
+  address: string;
+  length: number;
+  bytes: string;
+  mnemonic: string;
+  operands: string;
+  flow_category: InstructionFlowCategory;
+  fall_through_address: string | null;
+}
+
+interface FunctionDisassembly {
+  instructions: DisassembledInstruction[];
+}
+
 interface BsimCandidate {
   name: string;
   executable: string;
@@ -427,6 +450,17 @@ interface ApplyRenamesResult {
   let graphNavigationHistory = $state<string[]>([]);
   let graphHistoryProgramSha: string | null = null;
   let identificationProgramSha: string | null = null;
+  type BrowserSymbolFilter = "all" | "internal" | "external" | "unnamed";
+  let browserSymbolFilter = $state<BrowserSymbolFilter>("all");
+  let browserSearch = $state("");
+  let browserPage = $state(1);
+  const browserPageSize = 50;
+  let browserHistory = $state<string[]>([]);
+  let browserHistoryIndex = $state(-1);
+  let browserHistoryProgramSha: string | null = null;
+  let disassemblyCache = $state(new Map<string, FunctionDisassembly>());
+  let pendingDisassemblies = $state(new Set<string>());
+  let disassemblyErrors = $state(new Map<string, string>());
 
   let selectedFunction = $derived(
     importedExport?.functions.find(
@@ -453,6 +487,29 @@ interface ApplyRenamesResult {
     filteredFunctions.slice(
       (currentFunctionPage - 1) * functionPageSize,
       currentFunctionPage * functionPageSize,
+    ),
+  );
+
+  let browserFunctions = $derived.by(() => {
+    if (!importedExport) return [];
+    const query = browserSearch.trim().toLowerCase();
+    return importedExport.functions.filter((func) => {
+      if (browserSymbolFilter === "internal" && func.is_external) return false;
+      if (browserSymbolFilter === "external" && !func.is_external) return false;
+      if (browserSymbolFilter === "unnamed" && !isGeneratedFunctionName(func.name)) return false;
+      return !query ||
+        func.name.toLowerCase().includes(query) ||
+        func.entry_address.toLowerCase().includes(query);
+    });
+  });
+  let browserPageCount = $derived(
+    Math.max(1, Math.ceil(browserFunctions.length / browserPageSize)),
+  );
+  let currentBrowserPage = $derived(Math.min(browserPage, browserPageCount));
+  let paginatedBrowserFunctions = $derived(
+    browserFunctions.slice(
+      (currentBrowserPage - 1) * browserPageSize,
+      currentBrowserPage * browserPageSize,
     ),
   );
 
@@ -536,6 +593,7 @@ interface ApplyRenamesResult {
   let activeProjectId = $state<string | null>(null);
   type WorkspaceView =
     | "overview"
+    | "browser"
     | "identification"
     | "functions"
     | "strings"
@@ -549,6 +607,7 @@ interface ApplyRenamesResult {
   let activeWorkspaceView = $state<WorkspaceView>("overview");
 
   const primaryViews: { id: WorkspaceView; label: string; icon: string }[] = [
+    { id: "browser", label: "Code Browser", icon: "{ }" },
     { id: "overview", label: "Aperçu", icon: "⌂" },
     { id: "identification", label: "Identification", icon: "✦" },
     { id: "functions", label: "Fonctions", icon: "ƒ" },
@@ -1477,6 +1536,23 @@ interface ApplyRenamesResult {
     return decompileCache.get(selectedFunction.entry_address)?.decompiled_code ?? null;
   });
 
+  let isDisassemblingSelected = $derived(
+    selectedFunctionAddress !== null &&
+      pendingDisassemblies.has(selectedFunctionAddress),
+  );
+
+  let selectedDisassemblyError = $derived(
+    selectedFunctionAddress === null
+      ? ""
+      : (disassemblyErrors.get(selectedFunctionAddress) ?? ""),
+  );
+
+  let selectedDisassembly = $derived(
+    selectedFunctionAddress === null
+      ? null
+      : (disassemblyCache.get(selectedFunctionAddress) ?? null),
+  );
+
   let enrichedDetails = $derived(
     selectedFunction && analysisSource === "automatic"
       ? decompileCache.get(selectedFunction.entry_address)
@@ -1541,6 +1617,21 @@ interface ApplyRenamesResult {
       automaticIdentificationPage = 1;
       automaticRenameError = "";
       automaticRenameSuccess = "";
+    }
+  });
+
+  $effect(() => {
+    const currentProgramSha = importedExport?.program.sha256 ?? null;
+    if (currentProgramSha !== browserHistoryProgramSha) {
+      browserHistoryProgramSha = currentProgramSha;
+      browserHistory = [];
+      browserHistoryIndex = -1;
+      browserSearch = "";
+      browserSymbolFilter = "all";
+      browserPage = 1;
+      disassemblyCache = new Map();
+      pendingDisassemblies = new Set();
+      disassemblyErrors = new Map();
     }
   });
 
@@ -1994,6 +2085,29 @@ interface ApplyRenamesResult {
     requestDecompiledCode(func.entry_address);
   });
 
+  // Disassembly is only fetched for the Code Browser tab -- unlike
+  // pseudocode, an instruction listing has no use elsewhere in the app yet,
+  // so there is no reason to pay for a Ghidra round trip when the user is
+  // looking at the Functions or Graph tabs instead.
+  $effect(() => {
+    const func = selectedFunction;
+
+    if (
+      activeWorkspaceView !== "browser" ||
+      !func ||
+      analysisSource !== "automatic" ||
+      func.is_external
+    )
+      return;
+    if (
+      disassemblyCache.has(func.entry_address) ||
+      pendingDisassemblies.has(func.entry_address)
+    )
+      return;
+
+    requestDisassembly(func.entry_address);
+  });
+
   $effect(() => {
     const address = selectedFunctionAddress;
     const direction = callGraphDirection;
@@ -2068,6 +2182,57 @@ interface ApplyRenamesResult {
       remainingDecompiles.delete(entryAddress);
       pendingDecompiles = remainingDecompiles;
     }
+  }
+
+  async function requestDisassembly(entryAddress: string) {
+    pendingDisassemblies = new Set(pendingDisassemblies).add(entryAddress);
+
+    const errorsWithoutCurrentAddress = new Map(disassemblyErrors);
+    errorsWithoutCurrentAddress.delete(entryAddress);
+    disassemblyErrors = errorsWithoutCurrentAddress;
+
+    try {
+      const disassembly = await invoke<FunctionDisassembly>(
+        "disassemble_function",
+        { entryAddress },
+      );
+
+      disassemblyCache = new Map(disassemblyCache).set(entryAddress, disassembly);
+    } catch (error) {
+      disassemblyErrors = new Map(disassemblyErrors).set(entryAddress, String(error));
+    } finally {
+      const remainingDisassemblies = new Set(pendingDisassemblies);
+      remainingDisassemblies.delete(entryAddress);
+      pendingDisassemblies = remainingDisassemblies;
+    }
+  }
+
+  // Code Browser back/forward: a real index-based history (not a push-only
+  // stack like the graph's) so forward navigation works after going back,
+  // matching what "back"/"forward" mean in a real code browser.
+  function openInBrowser(entryAddress: string | null) {
+    if (!entryAddress) return;
+
+    if (browserHistory[browserHistoryIndex] !== entryAddress) {
+      const truncated = browserHistory.slice(0, browserHistoryIndex + 1);
+      browserHistory = [...truncated, entryAddress];
+      browserHistoryIndex = browserHistory.length - 1;
+    }
+
+    selectedFunctionAddress = entryAddress;
+    activeWorkspaceView = "browser";
+  }
+
+  function browserGoBack() {
+    if (browserHistoryIndex <= 0) return;
+    browserHistoryIndex -= 1;
+    selectedFunctionAddress = browserHistory[browserHistoryIndex];
+  }
+
+  function browserGoForward() {
+    if (browserHistoryIndex >= browserHistory.length - 1) return;
+    browserHistoryIndex += 1;
+    selectedFunctionAddress = browserHistory[browserHistoryIndex];
   }
 
   async function applySelectedFunctionRename(): Promise<boolean> {
@@ -2209,6 +2374,32 @@ interface ApplyRenamesResult {
     if (!entryAddress) return;
     selectedFunctionAddress = entryAddress;
     if (navigateToFunctions) activeWorkspaceView = "functions";
+  }
+
+  const HEX_ADDRESS_IN_TEXT = /0x[0-9a-f]+/;
+
+  // A jump/call instruction's operand is Ghidra's own formatted target
+  // address (e.g. "0x00400550" for `CALL 0x00400550`) -- only surfaced as
+  // navigable when it resolves to a real function entry in this export, not
+  // whenever the text merely looks like an address.
+  function disasmTargetAddress(instruction: DisassembledInstruction): string | null {
+    const isBranch =
+      instruction.flow_category === "unconditional_call" ||
+      instruction.flow_category === "conditional_call" ||
+      instruction.flow_category === "unconditional_jump" ||
+      instruction.flow_category === "conditional_jump";
+
+    if (!isBranch || !importedExport) return null;
+
+    const match = instruction.operands.match(HEX_ADDRESS_IN_TEXT);
+    if (!match) return null;
+
+    const target = match[0];
+    const isKnownFunction = importedExport.functions.some(
+      (func) => func.entry_address === target,
+    );
+
+    return isKnownFunction ? target : null;
   }
 
   function navigateWithinGraph(entryAddress: string) {
@@ -4018,6 +4209,198 @@ interface ApplyRenamesResult {
                 {#if functionRenameError}<p class="error identification-message" role="alert">{functionRenameError}</p>{/if}
                 {#if functionRenameSuccess}<p class="status identification-message">{functionRenameSuccess}</p>{/if}
               </article>
+            {/if}
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    {#if importedExport}
+      <section
+        class="code-browser"
+        class:view-hidden={activeWorkspaceView !== "browser"}
+        aria-labelledby="code-browser-title"
+      >
+        <header class="section-toolbar">
+          <div>
+            <p class="detail-label">Navigation, désassemblage et pseudocode</p>
+            <h2 id="code-browser-title">Code Browser</h2>
+          </div>
+          <div class="code-browser-nav">
+            <button type="button" onclick={browserGoBack} disabled={browserHistoryIndex <= 0}>
+              ← Précédent
+            </button>
+            <button
+              type="button"
+              onclick={browserGoForward}
+              disabled={browserHistoryIndex >= browserHistory.length - 1}
+            >
+              Suivant →
+            </button>
+          </div>
+        </header>
+
+        <div class="code-browser-layout">
+          <aside class="code-browser-symbols">
+            <div class="code-browser-symbols-controls">
+              <input type="search" placeholder="Rechercher…" bind:value={browserSearch} />
+              <select bind:value={browserSymbolFilter}>
+                <option value="all">Tous</option>
+                <option value="internal">Internes</option>
+                <option value="external">Externes</option>
+                <option value="unnamed">Non identifiées</option>
+              </select>
+            </div>
+
+            <ul class="code-browser-symbol-list">
+              {#each paginatedBrowserFunctions as func (func.entry_address)}
+                <li>
+                  <button
+                    type="button"
+                    class:active={func.entry_address === selectedFunctionAddress}
+                    onclick={() => openInBrowser(func.entry_address)}
+                  >
+                    <span>{func.name}</span>
+                    <code>{func.entry_address}</code>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+
+            <div class="code-browser-pagination">
+              <button
+                type="button"
+                disabled={currentBrowserPage <= 1}
+                onclick={() => (browserPage = currentBrowserPage - 1)}
+              >‹</button>
+              <span>Page {currentBrowserPage} / {browserPageCount} ({browserFunctions.length})</span>
+              <button
+                type="button"
+                disabled={currentBrowserPage >= browserPageCount}
+                onclick={() => (browserPage = currentBrowserPage + 1)}
+              >›</button>
+            </div>
+          </aside>
+
+          <div class="code-browser-listing">
+            <p class="detail-label">
+              Désassemblage{#if selectedFunction} — {selectedFunction.name}{/if}
+            </p>
+
+            {#if !selectedFunction}
+              <p>Sélectionne une fonction dans la liste.</p>
+            {:else if selectedFunction.is_external}
+              <p>Fonction externe — pas de désassemblage local disponible.</p>
+            {:else if isDisassemblingSelected}
+              <p>Désassemblage en cours…</p>
+            {:else if selectedDisassemblyError}
+              <p class="error" role="alert">{selectedDisassemblyError}</p>
+            {:else if selectedDisassembly}
+              <div class="code-browser-listing-scroll">
+                <table class="disasm-table">
+                  <tbody>
+                    {#each selectedDisassembly.instructions as instruction (instruction.address)}
+                      {@const target = disasmTargetAddress(instruction)}
+                      <tr class={`flow-${instruction.flow_category}`}>
+                        <td><code>{instruction.address}</code></td>
+                        <td><code class="disasm-bytes">{instruction.bytes}</code></td>
+                        <td class="disasm-mnemonic">{instruction.mnemonic}</td>
+                        <td class="disasm-operands">
+                          {instruction.operands}
+                          {#if target}
+                            <button
+                              type="button"
+                              class="disasm-jump-target"
+                              onclick={() => openInBrowser(target)}
+                            >
+                              → voir la cible
+                            </button>
+                          {/if}
+                        </td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {:else}
+              <p>Aucun désassemblage disponible pour cette fonction.</p>
+            {/if}
+          </div>
+
+          <aside class="code-browser-decompiled">
+            <p class="detail-label">Pseudocode</p>
+
+            {#if !selectedFunction}
+              <p>—</p>
+            {:else if isDecompilingSelected}
+              <p>Décompilation en cours…</p>
+            {:else if selectedDecompileError}
+              <p class="error" role="alert">{selectedDecompileError}</p>
+            {:else if selectedDecompiledCode}
+              <pre><code>{selectedDecompiledCode}</code></pre>
+            {:else}
+              <p>Aucun pseudocode disponible pour cette fonction.</p>
+            {/if}
+          </aside>
+        </div>
+
+        {#if selectedFunction}
+          <div class="code-browser-bottom">
+            <section>
+              <h4>Appels sortants ({selectedFunction.calls.length})</h4>
+              {#if selectedFunction.calls.length === 0}
+                <p>Aucun appel sortant.</p>
+              {:else}
+                <ul class="code-browser-mini-list">
+                  {#each selectedFunction.calls as call}
+                    <li>
+                      <span>{call.target_name}</span>
+                      {#if call.target_address}
+                        <button type="button" onclick={() => openInBrowser(call.target_address)}>
+                          <code>{call.target_address}</code>
+                        </button>
+                      {:else}
+                        <em>adresse non résolue</em>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
+
+            <section>
+              <h4>Chaînes référencées ({selectedFunction.strings.length})</h4>
+              {#if selectedFunction.strings.length === 0}
+                <p>Aucune chaîne référencée.</p>
+              {:else}
+                <ul class="code-browser-mini-list">
+                  {#each selectedFunction.strings as referencedString}
+                    <li><code>{referencedString}</code></li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
+
+            {#if analysisSource === "automatic" && activeProjectId && !selectedFunction.is_external}
+              <section class="code-browser-rename">
+                <h4>Renommer</h4>
+                <div>
+                  <input type="text" maxlength="512" bind:value={functionRenameDraft} />
+                  <button
+                    type="button"
+                    disabled={isApplyingFunctionRename || functionRenameDraft.trim() === selectedFunction.name}
+                    onclick={applySelectedFunctionRename}
+                  >
+                    {isApplyingFunctionRename ? "Application…" : "Appliquer"}
+                  </button>
+                </div>
+                {#if functionRenameError}
+                  <p class="error" role="alert">{functionRenameError}</p>
+                {/if}
+                {#if functionRenameSuccess}
+                  <p class="status">{functionRenameSuccess}</p>
+                {/if}
+              </section>
             {/if}
           </div>
         {/if}
@@ -6026,6 +6409,304 @@ interface ApplyRenamesResult {
   .function-list-heading h2 {
     margin: 0.15rem 0 0;
     font-size: 1rem;
+  }
+
+  .code-browser {
+    min-width: 0;
+  }
+
+  .code-browser-nav {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .code-browser-nav button {
+    padding: 0.45rem 0.7rem;
+    font-size: 0.75rem;
+  }
+
+  .code-browser-layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1.6fr) minmax(0, 1fr);
+    min-height: 560px;
+    margin-top: 0.6rem;
+    border: 1px solid #1e2c42;
+    border-radius: 10px;
+    background: #080f1c;
+    overflow: hidden;
+  }
+
+  .code-browser-symbols {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    min-width: 0;
+    padding: 0.7rem;
+    border-right: 1px solid #1e2c42;
+    background: #0b1423;
+  }
+
+  .code-browser-symbols-controls {
+    display: grid;
+    gap: 0.4rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .code-browser-symbols-controls input,
+  .code-browser-symbols-controls select {
+    padding: 0.45rem 0.6rem;
+    font-size: 0.72rem;
+  }
+
+  .code-browser-symbol-list {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    gap: 0.15rem;
+    overflow-y: auto;
+    list-style: none;
+    align-content: start;
+  }
+
+  .code-browser-symbol-list button {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.42rem 0.55rem;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: #0e192a;
+    color: #d7e0ef;
+    font-size: 0.72rem;
+    text-align: left;
+  }
+
+  .code-browser-symbol-list button:hover:not(.active) {
+    border-color: #263349;
+  }
+
+  .code-browser-symbol-list button.active {
+    border-color: #6d28d9;
+    background: #24184c;
+    box-shadow: inset 3px 0 #8b5cf6;
+  }
+
+  .code-browser-symbol-list button span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .code-browser-symbol-list code {
+    flex-shrink: 0;
+    color: #93c5fd;
+    font-size: 0.64rem;
+  }
+
+  .code-browser-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #1e2c42;
+    color: #71819c;
+    font-size: 0.68rem;
+  }
+
+  .code-browser-pagination button {
+    padding: 0.3rem 0.55rem;
+    font-size: 0.72rem;
+  }
+
+  .code-browser-listing {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+    padding: 0.7rem;
+    border-right: 1px solid #1e2c42;
+  }
+
+  .code-browser-listing-scroll {
+    min-width: 0;
+    overflow: auto;
+  }
+
+  .disasm-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.72rem;
+  }
+
+  .disasm-table td {
+    padding: 0.22rem 0.55rem;
+    border-bottom: 1px solid #131c2c;
+    white-space: nowrap;
+  }
+
+  .disasm-table tr:hover td {
+    background: #101d30;
+  }
+
+  .disasm-table td:first-child code {
+    color: #6c7793;
+  }
+
+  .disasm-bytes {
+    color: #4c5872;
+    letter-spacing: 0.04em;
+  }
+
+  .disasm-mnemonic {
+    color: #93c5fd;
+    font-weight: 700;
+  }
+
+  .disasm-operands {
+    color: #d7e0ef;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .disasm-table tr.flow-unconditional_call td.disasm-mnemonic,
+  .disasm-table tr.flow-conditional_call td.disasm-mnemonic {
+    color: #a78bfa;
+  }
+
+  .disasm-table tr.flow-unconditional_jump td.disasm-mnemonic,
+  .disasm-table tr.flow-conditional_jump td.disasm-mnemonic {
+    color: #fbbf24;
+  }
+
+  .disasm-table tr.flow-terminator td.disasm-mnemonic {
+    color: #f87171;
+  }
+
+  .disasm-jump-target {
+    margin-left: 0.5rem;
+    padding: 0.15rem 0.45rem;
+    border: 1px solid #4c3a83;
+    background: #201743;
+    color: #c4b5fd;
+    font-family: Inter, Arial, sans-serif;
+    font-size: 0.62rem;
+    white-space: nowrap;
+  }
+
+  .code-browser-decompiled {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+    padding: 0.7rem;
+    background: #0b1423;
+  }
+
+  .code-browser-decompiled pre {
+    margin: 0;
+    padding: 0.75rem;
+    border: 1px solid #1d2a40;
+    border-radius: 6px;
+    background: #020617;
+    overflow: auto;
+  }
+
+  .code-browser-decompiled pre code {
+    color: #d1fae5;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    white-space: pre;
+  }
+
+  .code-browser-bottom {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.7rem;
+    margin-top: 0.7rem;
+  }
+
+  .code-browser-bottom > section {
+    min-width: 0;
+    padding: 0.7rem;
+    border: 1px solid #1d2a40;
+    border-radius: 8px;
+    background: #0b1423;
+  }
+
+  .code-browser-bottom h4 {
+    margin: 0 0 0.5rem;
+    color: #a78bfa;
+    font-size: 0.78rem;
+  }
+
+  .code-browser-mini-list {
+    display: grid;
+    max-height: 180px;
+    margin: 0;
+    padding: 0;
+    gap: 0.3rem;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .code-browser-mini-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid #1d2a40;
+    border-radius: 5px;
+    background: #101d30;
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+  }
+
+  .code-browser-mini-list li button {
+    padding: 0;
+    background: transparent;
+    color: #93c5fd;
+  }
+
+  .code-browser-rename > div {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .code-browser-rename input {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid #475569;
+    border-radius: 0.4rem;
+    background-color: #0f172a;
+    color: #f8fafc;
+    font-size: 0.75rem;
+  }
+
+  @media (max-width: 1180px) {
+    .code-browser-layout {
+      grid-template-columns: 1fr;
+      min-height: 0;
+    }
+
+    .code-browser-symbols,
+    .code-browser-listing {
+      border-right: 0;
+      border-bottom: 1px solid #1e2c42;
+    }
+
+    .code-browser-symbol-list {
+      max-height: 260px;
+    }
+
+    .code-browser-bottom {
+      grid-template-columns: 1fr;
+    }
   }
 
   .graph-workspace {

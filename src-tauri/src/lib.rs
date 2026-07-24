@@ -15,6 +15,7 @@ use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
 use services::comparison::{self, ProjectComparison};
 use services::ghidra_bsim_scan;
 use services::ghidra_decompile::{self, DecompiledFunctionDetails};
+use services::ghidra_disassemble::{self, FunctionDisassembly};
 use services::ghidra_edits::{self, ApplyRenamesResult, FunctionRename};
 use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
@@ -550,6 +551,27 @@ fn decompile_function(
     Ok(details)
 }
 
+#[tauri::command(async)]
+fn disassemble_function(
+    app: AppHandle,
+    session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
+    decompile_coordinator: tauri::State<'_, DecompileCoordinator>,
+    entry_address: String,
+) -> Result<FunctionDisassembly, String> {
+    let session = session_state
+        .lock()
+        .map_err(|_| "the analysis session lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| {
+            "No Ghidra analysis session is active. Analyze a binary before requesting a disassembly listing.".to_owned()
+        })?;
+
+    // Same exclusive-project-lock reasoning as decompile_function: Ghidra
+    // still takes an exclusive lock under -readOnly.
+    decompile_coordinator
+        .run_exclusive(|| ghidra_disassemble::disassemble_function(&app, &session, &entry_address))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -575,6 +597,7 @@ pub fn run() {
             analyze_binary_with_ghidra,
             scan_project_with_bsim,
             decompile_function,
+            disassemble_function,
             get_call_graph,
             get_global_strings,
             get_imports,

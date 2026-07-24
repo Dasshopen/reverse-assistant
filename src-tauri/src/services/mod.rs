@@ -3,6 +3,7 @@ pub mod call_graph;
 pub mod comparison;
 pub mod ghidra_bsim_scan;
 pub mod ghidra_decompile;
+pub mod ghidra_disassemble;
 pub mod ghidra_edits;
 pub mod ghidra_headless;
 pub mod ghidra_import;
