@@ -831,6 +831,7 @@ interface ApplyRenamesResult {
   let callGraphDirection = $state<CallGraphDirection>("outgoing");
   let callGraphDepth = $state(3);
   let graphViewMode = $state<"2d" | "3d">("2d");
+  let graph2dZoom = $state(1);
   let graphFunctionSearch = $state("");
   let graphFunctionPage = $state(1);
   const graphFunctionPageSize = 12;
@@ -1645,12 +1646,16 @@ interface ApplyRenamesResult {
   }
 
   function navigateWithinGraph(entryAddress: string) {
+    const isCurrentRoot = selectedFunctionAddress === entryAddress;
     if (selectedFunctionAddress && selectedFunctionAddress !== entryAddress) {
       graphNavigationHistory = [...graphNavigationHistory, selectedFunctionAddress];
     }
     graphInspectedFunctionAddress = entryAddress;
     graphNodeOffsets = new Map();
     openFunction(entryAddress, false);
+    if (isCurrentRoot && analysisSource !== "none") {
+      void requestCallGraph(entryAddress, callGraphDirection, callGraphDepth);
+    }
   }
 
   function navigateBackInGraph() {
@@ -1672,7 +1677,6 @@ interface ApplyRenamesResult {
 
   function handleGraphNodePointerDown(event: PointerEvent, entryAddress: string) {
     if (event.button !== 0) return;
-    event.preventDefault();
     event.stopPropagation();
     const offset = graphNodeOffsets.get(entryAddress) ?? { x: 0, y: 0 };
     graphNodeDrag = {
@@ -1690,8 +1694,9 @@ interface ApplyRenamesResult {
   function handleGraphNodePointerMove(event: PointerEvent) {
     if (!graphNodeDrag || graphNodeDrag.pointerId !== event.pointerId) return;
     event.stopPropagation();
-    const deltaX = event.clientX - graphNodeDrag.startX;
-    const deltaY = event.clientY - graphNodeDrag.startY;
+    const coordinateScale = graphViewMode === "2d" ? graph2dZoom : 1;
+    const deltaX = (event.clientX - graphNodeDrag.startX) / coordinateScale;
+    const deltaY = (event.clientY - graphNodeDrag.startY) / coordinateScale;
     const moved = graphNodeDrag.moved || Math.hypot(deltaX, deltaY) > 4;
     graphNodeOffsets = new Map(graphNodeOffsets).set(graphNodeDrag.address, {
       x: graphNodeDrag.offsetX + deltaX,
@@ -1732,6 +1737,19 @@ interface ApplyRenamesResult {
 
   function handleGraphPanPointerUp(event: PointerEvent) {
     if (graphPanDrag?.pointerId === event.pointerId) graphPanDrag = null;
+  }
+
+  function handleGraphStageWheel(event: WheelEvent) {
+    if (graphViewMode !== "2d") return;
+    event.preventDefault();
+    graph2dZoom = Math.max(
+      0.5,
+      Math.min(2, graph2dZoom - event.deltaY * 0.0012),
+    );
+  }
+
+  function resetGraph2dZoom() {
+    graph2dZoom = 1;
   }
 
   function resetGraph3dView() {
@@ -3242,6 +3260,21 @@ interface ApplyRenamesResult {
           </div>
         </header>
 
+        {#if callGraphResult}
+          <div class="graph-summary-bar">
+            <div class="graph-legend">
+              <span class="user">Fonction analysée</span>
+              <span class="internal">Fonction interne</span>
+              <span class="external">Bibliothèque / externe</span>
+              <span class="thunk">Thunk</span>
+            </div>
+            <p class="call-graph-stats">
+              {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
+              profondeur {callGraphResult.depth_reached}
+            </p>
+          </div>
+        {/if}
+
         <div class="graph-layout">
           <aside class="graph-function-browser">
             <header><strong>Fonctions</strong><span>{filteredGraphFunctions.length}</span></header>
@@ -3278,6 +3311,7 @@ interface ApplyRenamesResult {
             onpointerup={handleGraphPanPointerUp}
             onpointercancel={handleGraphPanPointerUp}
             oncontextmenu={(event) => event.preventDefault()}
+            onwheel={handleGraphStageWheel}
             role="region"
             aria-label="Zone interactive du graphe d'appels"
           >
@@ -3286,50 +3320,46 @@ interface ApplyRenamesResult {
             {:else if callGraphError}
               <p class="error" role="alert">{callGraphError}</p>
             {:else if callGraphResult}
-              <div class="graph-legend">
-                <span class="user">Fonction analysée</span>
-                <span class="internal">Fonction interne</span>
-                <span class="external">Bibliothèque / externe</span>
-                <span class="thunk">Thunk</span>
-              </div>
-              <p class="call-graph-stats">
-                {callGraphResult.nodes.length} fonctions · {callGraphResult.edges.length} appels ·
-                profondeur {callGraphResult.depth_reached}
-              </p>
               <div class="graph-interaction-toolbar">
                 <span>Clic : informations · double-clic : recentrer · glisser un nœud : l'écarter · clic droit : déplacer la vue</span>
                 <div>
+                  {#if graphViewMode === "2d"}
+                    <span class="graph-zoom-value">Zoom {Math.round(graph2dZoom * 100)} %</span>
+                    <button type="button" onclick={resetGraph2dZoom}>Zoom 100 %</button>
+                  {/if}
                   <button type="button" onclick={resetGraphNodePositions}>Réorganiser les nœuds</button>
                   {#if graphViewMode === "3d"}<button type="button" onclick={resetGraph3dView}>Réinitialiser la caméra</button>{/if}
                 </div>
               </div>
               {#if graphViewMode === "2d"}
-                <div class="graph-stage" style={`width:${graphCanvasWidth}px;height:${callGraphLayout.height}px`}>
-                  <svg class="graph-edges" viewBox={`0 0 ${graphCanvasWidth} ${callGraphLayout.height}`} aria-hidden="true">
-                    <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
-                    {#each callGraphResult.edges as edge (`${edge.from}-${edge.to}`)}
-                      {@const from = graphNodePosition.get(edge.from)}
-                      {@const to = graphNodePosition.get(edge.to)}
-                      {#if from && to}<path d={`M ${from.x + graphNodeWidth / 2} ${from.y + graphNodeHeight} C ${from.x + graphNodeWidth / 2} ${from.y + graphNodeHeight + 45}, ${to.x + graphNodeWidth / 2} ${to.y - 45}, ${to.x + graphNodeWidth / 2} ${to.y}`} marker-end="url(#arrow)"></path>{/if}
+                <div class="graph-stage-2d-viewport" style={`width:${graphCanvasWidth * graph2dZoom}px;height:${callGraphLayout.height * graph2dZoom}px`}>
+                  <div class="graph-stage graph-stage-2d-canvas" style={`width:${graphCanvasWidth}px;height:${callGraphLayout.height}px;transform:scale(${graph2dZoom})`}>
+                    <svg class="graph-edges" viewBox={`0 0 ${graphCanvasWidth} ${callGraphLayout.height}`} aria-hidden="true">
+                      <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
+                      {#each callGraphResult.edges as edge (`${edge.from}-${edge.to}`)}
+                        {@const from = graphNodePosition.get(edge.from)}
+                        {@const to = graphNodePosition.get(edge.to)}
+                        {#if from && to}<path d={`M ${from.x + graphNodeWidth / 2} ${from.y + graphNodeHeight} C ${from.x + graphNodeWidth / 2} ${from.y + graphNodeHeight + 45}, ${to.x + graphNodeWidth / 2} ${to.y - 45}, ${to.x + graphNodeWidth / 2} ${to.y}`} marker-end="url(#arrow)"></path>{/if}
+                      {/each}
+                    </svg>
+                    {#each callGraphLayout.nodes as node (node.entry_address)}
+                      <button
+                        type="button"
+                        class="visual-graph-node"
+                        class:root={node.entry_address === selectedFunctionAddress}
+                        class:inspected={node.entry_address === graphInspectedFunction?.entry_address}
+                        class:dragging={graphNodeDrag?.address === node.entry_address}
+                        class:external={node.is_external}
+                        class:thunk={node.is_thunk}
+                        style={`left:${node.x}px;top:${node.y}px;width:${graphNodeWidth}px;height:${graphNodeHeight}px`}
+                        onpointerdown={(event) => handleGraphNodePointerDown(event, node.entry_address)}
+                        onpointermove={handleGraphNodePointerMove}
+                        onpointerup={handleGraphNodePointerUp}
+                        onpointercancel={handleGraphNodePointerUp}
+                        ondblclick={() => navigateWithinGraph(node.entry_address)}
+                      ><strong>{node.name}</strong><code>{node.entry_address}</code></button>
                     {/each}
-                  </svg>
-                  {#each callGraphLayout.nodes as node (node.entry_address)}
-                    <button
-                      type="button"
-                      class="visual-graph-node"
-                      class:root={node.entry_address === selectedFunctionAddress}
-                      class:inspected={node.entry_address === graphInspectedFunction?.entry_address}
-                      class:dragging={graphNodeDrag?.address === node.entry_address}
-                      class:external={node.is_external}
-                      class:thunk={node.is_thunk}
-                      style={`left:${node.x}px;top:${node.y}px;width:${graphNodeWidth}px;height:${graphNodeHeight}px`}
-                      onpointerdown={(event) => handleGraphNodePointerDown(event, node.entry_address)}
-                      onpointermove={handleGraphNodePointerMove}
-                      onpointerup={handleGraphNodePointerUp}
-                      onpointercancel={handleGraphNodePointerUp}
-                      ondblclick={() => navigateWithinGraph(node.entry_address)}
-                    ><strong>{node.name}</strong><code>{node.entry_address}</code></button>
-                  {/each}
+                  </div>
                 </div>
               {:else}
                 <div class="graph-3d-toolbar"><span>Glisse le fond pour tourner · molette pour zoomer</span></div>
@@ -5099,7 +5129,7 @@ interface ApplyRenamesResult {
     display: grid;
     grid-template-columns: 280px minmax(0, 1fr) 230px;
     min-height: 610px;
-    margin-top: 0.75rem;
+    margin-top: 0.4rem;
     border: 1px solid #1e2c42;
     border-radius: 10px;
     background: #080f1c;
@@ -5124,7 +5154,7 @@ interface ApplyRenamesResult {
 
   .graph-function-browser > header strong { font-size: 0.78rem; }
   .graph-function-browser > header span { color: #71819a; font-size: 0.64rem; }
-  .graph-function-browser > input { margin: 0.6rem; padding: 0.52rem 0.62rem; font-size: 0.68rem; }
+  .graph-function-browser > input { width: calc(100% - 1.2rem); min-width: 0; margin: 0.6rem; padding: 0.52rem 0.62rem; box-sizing: border-box; font-size: 0.68rem; }
   .graph-function-browser ul { display: grid; align-content: start; margin: 0; padding: 0; list-style: none; }
   .graph-function-browser li { border-top: 1px solid #18263a; }
   .graph-function-browser li > button { display: grid; width: 100%; gap: 0.26rem; padding: 0.58rem 0.72rem; border-radius: 0; background: transparent; color: #dbe5f2; text-align: left; }
@@ -5151,6 +5181,21 @@ interface ApplyRenamesResult {
 
   .graph-stage-wrap.panning { cursor: grabbing; user-select: none; }
 
+  .graph-summary-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 34px;
+    margin-top: 0.55rem;
+    padding: 0.42rem 0.7rem;
+    border: 1px solid #1e2c42;
+    border-radius: 8px;
+    background: #0d1727;
+  }
+
+  .graph-summary-bar .call-graph-stats { margin: 0; white-space: nowrap; }
+
   .graph-interaction-toolbar {
     display: flex;
     align-items: center;
@@ -5163,6 +5208,7 @@ interface ApplyRenamesResult {
   }
 
   .graph-interaction-toolbar > div { display: flex; gap: 0.35rem; }
+  .graph-zoom-value { align-self: center; min-width: 64px; color: #a9b7cc; text-align: center; }
   .graph-interaction-toolbar button { padding: 0.28rem 0.48rem; border: 1px solid #4c3a83; background: #211845; color: #ddd6fe; font-size: 0.55rem; white-space: nowrap; }
 
   .graph-mode-toggle {
@@ -5181,6 +5227,18 @@ interface ApplyRenamesResult {
     position: relative;
     min-width: 100%;
     margin-top: 0.5rem;
+  }
+
+  .graph-stage-2d-viewport {
+    position: relative;
+    min-width: 1px;
+    margin-top: 0.5rem;
+  }
+
+  .graph-stage-2d-canvas {
+    min-width: 0;
+    margin-top: 0;
+    transform-origin: left top;
   }
 
   .graph-3d-toolbar {
