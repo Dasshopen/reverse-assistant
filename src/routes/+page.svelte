@@ -185,6 +185,7 @@ interface AutomaticRenameChoice {
   evidenceLabel: string;
   alternativeCount: number;
   decisionLabel: string;
+  ambiguous: boolean;
 }
 
 interface AutomaticRenameRejection {
@@ -621,15 +622,17 @@ interface ApplyRenamesResult {
   function normalizedAutomaticSymbolName(name: string): string | null {
     if (isSafeAutomaticSymbolName(name)) return name;
 
-    const deletingDestructor = name.match(/^\?\?_G([^@]+)@([^@]+)@@/);
+    const deletingDestructor = name.match(/^\?\?_G([^@]+)@(.+?)@@/);
     if (deletingDestructor) {
-      return `${deletingDestructor[2]}_${deletingDestructor[1]}_deleting_destructor`;
+      const scope = deletingDestructor[2].split("@").filter(Boolean).reverse().join("_");
+      return `${scope}_${deletingDestructor[1]}_deleting_destructor`;
     }
 
-    const constructor = name.match(/^\?\?0([^@]+)@([^@]+)@@(.*)$/);
+    const constructor = name.match(/^\?\?0([^@]+)@(.+?)@@(.*)$/);
     if (constructor) {
       const suffix = constructor[3];
-      return `${constructor[2]}_${constructor[1]}_${suffix.includes("AEBV") ? "copy_constructor" : "constructor"}`;
+      const scope = constructor[2].split("@").filter(Boolean).reverse().join("_");
+      return `${scope}_${constructor[1]}_${suffix.includes("AEBV") ? "copy_constructor" : "constructor"}`;
     }
 
     if (/^\?\?2@/.test(name)) return "operator_new";
@@ -639,41 +642,44 @@ interface ApplyRenamesResult {
     return globalFunction?.[1] ?? null;
   }
 
+  function reserveUniqueAutomaticName(
+    baseName: string,
+    entryAddress: string,
+    reservedNames: Set<string>,
+  ): string {
+    let chosenName = baseName;
+    if (reservedNames.has(chosenName)) {
+      chosenName = `${baseName}_${entryAddress.replace(/^0x/i, "")}`;
+    }
+    let suffix = 2;
+    while (reservedNames.has(chosenName)) {
+      chosenName = `${baseName}_${entryAddress.replace(/^0x/i, "")}_${suffix}`;
+      suffix += 1;
+    }
+    reservedNames.add(chosenName);
+    return chosenName;
+  }
+
   function displayCandidateName(name: string): string {
     // Display-only decoding for common MSVC constructors/destructors. This is
     // never written back because correct C++ application also needs namespace
     // and overload support in the Ghidra edit contract.
-    const deletingDestructor = name.match(/^\?\?_G([^@]+)@([^@]+)@@/);
+    const deletingDestructor = name.match(/^\?\?_G([^@]+)@(.+?)@@/);
     if (deletingDestructor) {
-      return `${deletingDestructor[2]}::${deletingDestructor[1]}::~${deletingDestructor[1]} (destructeur C++ décoré)`;
+      const scope = deletingDestructor[2].split("@").filter(Boolean).reverse().join("::");
+      return `${scope}::${deletingDestructor[1]}::~${deletingDestructor[1]} (destructeur C++ décoré)`;
     }
-    const special = name.match(/^\?\?([01])([^@]+)@([^@]+)@@/);
+    const special = name.match(/^\?\?([01])([^@]+)@(.+?)@@/);
     if (special) {
-      const [, kind, className, namespace] = special;
+      const [, kind, className, rawScope] = special;
+      const scope = rawScope.split("@").filter(Boolean).reverse().join("::");
       return kind === "0"
-        ? `${namespace}::${className}::${className} (nom C++ décoré)`
-        : `${namespace}::${className}::~${className} (nom C++ décoré)`;
+        ? `${scope}::${className}::${className} (nom C++ décoré)`
+        : `${scope}::${className}::~${className} (nom C++ décoré)`;
     }
     const member = name.match(/^\?([^@]+)@([^@]+)@@/);
     if (member) return `${member[2]}::${member[1]} (nom C++ décoré)`;
     return name;
-  }
-
-  function describeAmbiguousFidCandidates(candidates: FidCandidate[]): string {
-    const names = candidates.map((candidate) => candidate.name);
-    if (names.length > 1 && names.every((name) => name.startsWith("??0"))) {
-      return `Constructeur de copie C++ · ${names.length} classes possibles`;
-    }
-    if (names.length > 1 && names.every((name) => name.startsWith("??_G"))) {
-      return `Destructeur C++ · ${names.length} classes possibles`;
-    }
-    if (names.length > 1 && names.every((name) => name.startsWith("_RTC_"))) {
-      return `Fonction Runtime Check · ${names.length} noms possibles`;
-    }
-    if (names.length > 1 && names.every((name) => name.includes("environment"))) {
-      return `Gestion de l'environnement CRT · ${names.length} noms possibles`;
-    }
-    return `${names.length} noms FunctionID ex æquo`;
   }
 
   function uniqueFidCandidates(candidates: FidCandidate[]): FidCandidate[] {
@@ -726,20 +732,18 @@ interface ApplyRenamesResult {
         const isAmbiguous = margin !== null && margin < automaticFidMinimumMargin;
         const normalizedName = normalizedAutomaticSymbolName(bestFid.name);
         let reason = "";
-        if (isAmbiguous) {
-          reason = margin === 0
-            ? `FunctionID attribue exactement le même score à ${fidCandidates.length} noms : aucun gagnant réel.`
-            : `Correspondance ambiguë : seulement ${margin.toFixed(1)} point(s) d'écart avec le deuxième nom.`;
-        } else if (!normalizedName) {
+        if (!normalizedName) {
           reason = "Nom C++ impossible à convertir sans perdre son sens.";
         } else if (bestFid.overall_score < automaticFidMinimumScore) {
           reason = `Score ${bestFid.overall_score.toFixed(1)} trop faible (minimum automatique : ${automaticFidMinimumScore.toFixed(1)}).`;
-        } else if (reservedNames.has(normalizedName)) {
-          reason = "Ce nom est déjà utilisé par une autre fonction ; collision refusée.";
         }
 
         if (!reason) {
-          const safeName = normalizedName as string;
+          const safeName = reserveUniqueAutomaticName(
+            normalizedName as string,
+            func.entry_address,
+            reservedNames,
+          );
           choices.push({
             func,
             name: safeName,
@@ -747,20 +751,20 @@ interface ApplyRenamesResult {
             scoreLabel: `score ${bestFid.overall_score.toFixed(1)}`,
             evidenceLabel: `${bestFid.library_family} ${bestFid.library_version} · ${bestFid.match_mode}`,
             alternativeCount: Math.max(0, fidCandidates.length - 1),
-            decisionLabel: margin === null
+            decisionLabel: isAmbiguous
+              ? `${fidCandidates.length} noms ex æquo : premier choix FunctionID nettoyé, ambiguïté conservée`
+              : margin === null
               ? "Candidat unique au-dessus du seuil de sécurité"
               : `Marge de ${margin.toFixed(1)} points sur le deuxième candidat`,
+            ambiguous: isAmbiguous,
           });
-          reservedNames.add(safeName);
           continue;
         }
 
         fidRejection = {
           func,
-          candidateName: isAmbiguous ? "" : bestFid.name,
-          candidateDisplayName: isAmbiguous
-            ? describeAmbiguousFidCandidates(fidCandidates)
-            : displayCandidateName(bestFid.name),
+          candidateName: bestFid.name,
+          candidateDisplayName: displayCandidateName(bestFid.name),
           source: "function_id",
           evidenceLabel: `score ${bestFid.overall_score.toFixed(1)} · ${bestFid.library_family} ${bestFid.library_version}`,
           reason,
@@ -778,32 +782,34 @@ interface ApplyRenamesResult {
       if (bestBsim) {
         const runnerUp = bsimCandidates[1];
         const margin = runnerUp ? bestBsim.similarity - runnerUp.similarity : null;
+        const isAmbiguous = bestBsim.similarity < automaticBsimMinimumSimilarity ||
+          bestBsim.significance < automaticBsimMinimumSignificance ||
+          (margin !== null && margin < automaticBsimMinimumMargin);
         let reason = "";
         if (!isSafeAutomaticSymbolName(bestBsim.name)) {
           reason = "Nom non compatible avec le renommage automatique.";
-        } else if (bestBsim.similarity < automaticBsimMinimumSimilarity) {
-          reason = `Similarité ${bestBsim.similarity.toFixed(3)} trop faible (minimum : ${automaticBsimMinimumSimilarity.toFixed(2)}).`;
-        } else if (bestBsim.significance < automaticBsimMinimumSignificance) {
-          reason = `Significativité ${bestBsim.significance.toFixed(1)} trop faible (minimum : ${automaticBsimMinimumSignificance.toFixed(1)}).`;
-        } else if (margin !== null && margin < automaticBsimMinimumMargin) {
-          reason = `Correspondance BSim ambiguë : écart de seulement ${margin.toFixed(3)} avec le deuxième nom.`;
-        } else if (reservedNames.has(bestBsim.name)) {
-          reason = "Ce nom est déjà utilisé par une autre fonction ; collision refusée.";
         }
 
         if (!reason) {
+          const safeName = reserveUniqueAutomaticName(
+            bestBsim.name,
+            func.entry_address,
+            reservedNames,
+          );
           choices.push({
             func,
-            name: bestBsim.name,
+            name: safeName,
             source: "bsim",
             scoreLabel: `similarité ${bestBsim.similarity.toFixed(3)}`,
             evidenceLabel: `${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
             alternativeCount: Math.max(0, bsimCandidates.length - 1),
-            decisionLabel: margin === null
+            decisionLabel: isAmbiguous
+              ? "Meilleure proposition BSim nettoyée, confiance limitée clairement signalée"
+              : margin === null
               ? "Candidat unique au-dessus des seuils de sécurité"
               : `Marge de ${margin.toFixed(3)} sur le deuxième candidat`,
+            ambiguous: isAmbiguous,
           });
-          reservedNames.add(bestBsim.name);
           continue;
         }
 
@@ -825,6 +831,9 @@ interface ApplyRenamesResult {
   });
   let automaticRenameCandidates = $derived(automaticRenameEvaluation.choices);
   let automaticRenameRejections = $derived(automaticRenameEvaluation.rejections);
+  let automaticAmbiguousChoiceCount = $derived(
+    automaticRenameCandidates.filter((choice) => choice.ambiguous).length,
+  );
   let automaticRenameWithoutEvidenceCount = $derived(
     Math.max(0, unidentifiedFunctions.length - automaticRenameCandidates.length - automaticRenameRejections.length),
   );
@@ -1966,7 +1975,7 @@ interface ApplyRenamesResult {
     const batch = automaticRenameCandidates.slice(0, 500);
     if (batch.length === 0) return;
     if (!window.confirm(
-      `Appliquer ${batch.length} renommage(s) vérifié(s) dans Ghidra ? ${automaticRenameRejections.length} proposition(s) ambiguë(s), invalide(s) ou en collision resteront en validation manuelle.`,
+      `Appliquer ${batch.length} proposition(s) nettoyée(s) dans Ghidra ? ${automaticAmbiguousChoiceCount} choix sont marqués comme ambigus : le premier résultat FunctionID nettoyé sera utilisé, comme affiché dans le tableau.`,
     )) return;
 
     automaticRenameError = "";
@@ -3483,17 +3492,17 @@ interface ApplyRenamesResult {
         {#if automaticIdentificationMode}
           <section class="automatic-rename-panel">
             <div>
-              <strong>{automaticRenameCandidates.length} nom(s) suffisamment fiables peuvent être appliqués</strong>
+              <strong>{automaticRenameCandidates.length} proposition(s) nettoyée(s) peuvent être appliquées</strong>
               <span>
-                {automaticRenameRejections.length} proposition(s) écartée(s) par sécurité ·
-                {automaticRenameWithoutEvidenceCount} fonction(s) sans preuve. Aucun nom n'est inventé.
+                {automaticAmbiguousChoiceCount} choix ambigu(s) clairement signalé(s) ·
+                {automaticRenameWithoutEvidenceCount} fonction(s) sans preuve exploitable.
               </span>
             </div>
             <button
               type="button"
               disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
               onclick={applyAutomaticFunctionRenames}
-            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les noms fiables (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
+            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les propositions (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
           </section>
           {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
           {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
@@ -3532,7 +3541,7 @@ interface ApplyRenamesResult {
           {#if automaticRenameRejections.length > 0}
             <details class="automatic-rejections" open>
               <summary>
-                <span><strong>{automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Scores insuffisants, ambiguïtés, noms décorés ou collisions</small></span>
+                <span><strong>{automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Nom impossible à nettoyer sans perdre son sens</small></span>
                 <b>Voir les raisons</b>
               </summary>
               <div class="automatic-rejection-list">
@@ -3564,6 +3573,9 @@ interface ApplyRenamesResult {
                 {#each paginatedIdentificationQueue as func (func.entry_address)}
                   {@const candidate = topIdentificationFor(func.entry_address)}
                   {@const evidenceCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? [])}
+                  {@const topEvidenceScore = evidenceCandidates[0]?.overall_score}
+                  {@const tiedEvidenceCount = topEvidenceScore === undefined ? 0 : evidenceCandidates.filter((item) => Math.abs(item.overall_score - topEvidenceScore) < 0.0001).length}
+                  {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === func.entry_address)}
                   <li>
                     <button
                       type="button"
@@ -3571,10 +3583,10 @@ interface ApplyRenamesResult {
                       onclick={() => openFunction(func.entry_address, false)}
                     >
                       <span><strong>{func.name}</strong><code>{func.entry_address}</code></span>
-                      {#if candidate}
-                        <span class="queue-candidate"><small>Proposition</small><b>{candidate.name}</b></span>
-                      {:else if evidenceCandidates.length > 0}
-                        <span class="queue-candidate ambiguous"><small>FunctionID ambigu</small><b>{evidenceCandidates.length} noms ex æquo</b></span>
+                      {#if tiedEvidenceCount > 1}
+                        <span class="queue-candidate ambiguous"><small>{tiedEvidenceCount} noms ex æquo</small><b>{automaticChoice?.name ?? "Choix manuel requis"}</b></span>
+                      {:else if candidate}
+                        <span class="queue-candidate"><small>Proposition nettoyée</small><b>{automaticChoice?.name ?? normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}</b></span>
                       {:else}
                         <span class="queue-no-evidence">Sans correspondance</span>
                       {/if}
@@ -3609,9 +3621,10 @@ interface ApplyRenamesResult {
                         </h5>
                         {#each selectedIdentificationCandidates as candidate}
                           {@const displayedName = displayCandidateName(candidate.name)}
-                          {@const proposedName = normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}
+                          {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "function_id")}
+                          {@const proposedName = automaticChoice && candidate.name === selectedIdentificationCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
                           <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
-                            <span><strong>{displayedName}</strong>{#if displayedName !== candidate.name}<small>Nom brut : {candidate.name}</small>{/if}<small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small></span>
+                            <span><strong>{displayedName}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small></span>
                             <span><code>score {candidate.overall_score.toFixed(1)}</code><small>{candidate.match_mode}</small></span>
                           </button>
                         {/each}
@@ -3622,8 +3635,10 @@ interface ApplyRenamesResult {
                       <div class="evidence-source-group">
                         <h5>BSim</h5>
                         {#each selectedBsimResult.matches as candidate}
-                          <button type="button" class:selected={functionRenameDraft === candidate.name} onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
-                            <span><strong>{candidate.name}</strong><small>{candidate.executable}</small></span>
+                          {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "bsim")}
+                          {@const proposedName = automaticChoice && candidate.name === selectedBsimResult.matches[0]?.name ? automaticChoice.name : candidate.name}
+                          <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
+                            <span><strong>{candidate.name}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.executable}</small></span>
                             <span><code>{candidate.similarity.toFixed(3)}</code><small>significativité {candidate.significance.toFixed(1)}</small></span>
                           </button>
                         {/each}
@@ -4128,7 +4143,8 @@ interface ApplyRenamesResult {
                   <ul>
                     {#each selectedIdentificationCandidates as candidate}
                       {@const displayedName = displayCandidateName(candidate.name)}
-                      {@const proposedName = normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}
+                      {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction?.entry_address && choice.source === "function_id")}
+                      {@const proposedName = automaticChoice && candidate.name === selectedIdentificationCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
                       <li
                         class="rename-suggestion-item"
                         class:selected={functionRenameDraft === proposedName}
@@ -4141,7 +4157,7 @@ interface ApplyRenamesResult {
                         >
                           <span>
                             {displayedName}
-                            {#if displayedName !== candidate.name}<small>Nom brut : {candidate.name}</small>{/if}
+                            <small>Nom propre proposé : {proposedName}</small>
                             <em>
                               ({candidate.library_family} {candidate.library_version}
                               {candidate.library_variant}, {candidate.match_mode})
@@ -4165,15 +4181,17 @@ interface ApplyRenamesResult {
                     {:else}
                       <ul>
                         {#each selectedBsimResult.matches as candidate}
+                          {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction?.entry_address && choice.source === "bsim")}
+                          {@const proposedName = automaticChoice && candidate.name === selectedBsimResult.matches[0]?.name ? automaticChoice.name : candidate.name}
                           <li
                             class="rename-suggestion-item"
-                            class:selected={functionRenameDraft === candidate.name}
+                            class:selected={functionRenameDraft === proposedName}
                           >
                             <button
                               type="button"
                               class="rename-suggestion"
                               title={`Use ${candidate.name} as the proposed Ghidra name`}
-                              onclick={() => selectFunctionRenameSuggestion(candidate.name)}
+                              onclick={() => selectFunctionRenameSuggestion(proposedName)}
                             >
                               <span>
                                 {candidate.name}
