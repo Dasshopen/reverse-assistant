@@ -832,6 +832,8 @@ interface ApplyRenamesResult {
   let callGraphDepth = $state(3);
   let graphViewMode = $state<"2d" | "3d">("2d");
   let graph2dZoom = $state(1);
+  let graph2dPanX = $state(0);
+  let graph2dPanY = $state(0);
   let graphFunctionSearch = $state("");
   let graphFunctionPage = $state(1);
   const graphFunctionPageSize = 12;
@@ -855,6 +857,8 @@ interface ApplyRenamesResult {
     startY: number;
     scrollLeft: number;
     scrollTop: number;
+    panX: number;
+    panY: number;
   } | null>(null);
   let graph3dDrag = $state<{
     pointerId: number;
@@ -1086,6 +1090,8 @@ interface ApplyRenamesResult {
       graphNavigationHistory = [];
       graphInspectedFunctionAddress = null;
       graphNodeOffsets = new Map();
+      graph2dPanX = 0;
+      graph2dPanY = 0;
     }
   });
 
@@ -1652,6 +1658,8 @@ interface ApplyRenamesResult {
     }
     graphInspectedFunctionAddress = entryAddress;
     graphNodeOffsets = new Map();
+    graph2dPanX = 0;
+    graph2dPanY = 0;
     openFunction(entryAddress, false);
     if (isCurrentRoot && analysisSource !== "none") {
       void requestCallGraph(entryAddress, callGraphDirection, callGraphDepth);
@@ -1664,6 +1672,8 @@ interface ApplyRenamesResult {
     graphNavigationHistory = graphNavigationHistory.slice(0, -1);
     graphInspectedFunctionAddress = previousAddress;
     graphNodeOffsets = new Map();
+    graph2dPanX = 0;
+    graph2dPanY = 0;
     openFunction(previousAddress, false);
   }
 
@@ -1723,6 +1733,8 @@ interface ApplyRenamesResult {
       startY: event.clientY,
       scrollLeft: container.scrollLeft,
       scrollTop: container.scrollTop,
+      panX: graph2dPanX,
+      panY: graph2dPanY,
     };
     container.setPointerCapture(event.pointerId);
   }
@@ -1731,8 +1743,13 @@ interface ApplyRenamesResult {
     if (!graphPanDrag || graphPanDrag.pointerId !== event.pointerId) return;
     event.preventDefault();
     const container = event.currentTarget as HTMLElement;
-    container.scrollLeft = graphPanDrag.scrollLeft - (event.clientX - graphPanDrag.startX);
-    container.scrollTop = graphPanDrag.scrollTop - (event.clientY - graphPanDrag.startY);
+    if (graphViewMode === "2d") {
+      graph2dPanX = graphPanDrag.panX + (event.clientX - graphPanDrag.startX);
+      graph2dPanY = graphPanDrag.panY + (event.clientY - graphPanDrag.startY);
+    } else {
+      container.scrollLeft = graphPanDrag.scrollLeft - (event.clientX - graphPanDrag.startX);
+      container.scrollTop = graphPanDrag.scrollTop - (event.clientY - graphPanDrag.startY);
+    }
   }
 
   function handleGraphPanPointerUp(event: PointerEvent) {
@@ -1750,6 +1767,8 @@ interface ApplyRenamesResult {
 
   function resetGraph2dZoom() {
     graph2dZoom = 1;
+    graph2dPanX = 0;
+    graph2dPanY = 0;
   }
 
   function resetGraph3dView() {
@@ -3325,7 +3344,7 @@ interface ApplyRenamesResult {
                 <div>
                   {#if graphViewMode === "2d"}
                     <span class="graph-zoom-value">Zoom {Math.round(graph2dZoom * 100)} %</span>
-                    <button type="button" onclick={resetGraph2dZoom}>Zoom 100 %</button>
+                    <button type="button" onclick={resetGraph2dZoom}>Recentrer la vue</button>
                   {/if}
                   <button type="button" onclick={resetGraphNodePositions}>Réorganiser les nœuds</button>
                   {#if graphViewMode === "3d"}<button type="button" onclick={resetGraph3dView}>Réinitialiser la caméra</button>{/if}
@@ -3333,7 +3352,7 @@ interface ApplyRenamesResult {
               </div>
               {#if graphViewMode === "2d"}
                 <div class="graph-stage-2d-viewport" style={`width:${graphCanvasWidth * graph2dZoom}px;height:${callGraphLayout.height * graph2dZoom}px`}>
-                  <div class="graph-stage graph-stage-2d-canvas" style={`width:${graphCanvasWidth}px;height:${callGraphLayout.height}px;transform:scale(${graph2dZoom})`}>
+                  <div class="graph-stage graph-stage-2d-canvas" style={`width:${graphCanvasWidth}px;height:${callGraphLayout.height}px;transform:translate(${graph2dPanX}px, ${graph2dPanY}px) scale(${graph2dZoom})`}>
                     <svg class="graph-edges" viewBox={`0 0 ${graphCanvasWidth} ${callGraphLayout.height}`} aria-hidden="true">
                       <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
                       {#each callGraphResult.edges as edge (`${edge.from}-${edge.to}`)}
