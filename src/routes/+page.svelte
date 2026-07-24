@@ -6806,5 +6806,140 @@ interface ApplyRenamesResult {
     .libraries-grid { grid-template-columns: 1fr; }
   }
 
+  /* The settings screen is read at desktop distance: keep its diagnostic
+     information comfortably legible instead of inheriting dashboard density. */
+  .settings-workspace {
+    gap: 0.95rem;
+  }
+
+  .settings-workspace .detail-label {
+    font-size: 0.9rem;
+  }
+
+  .settings-workspace-header h2 {
+    font-size: 1.85rem;
+  }
+
+  .settings-workspace-header p:not(.detail-label) {
+    font-size: 1rem;
+  }
+
+  .settings-workspace-header > span {
+    padding: 0.5rem 0.85rem;
+    font-size: 0.85rem;
+  }
+
+  .settings-section > header {
+    padding: 1rem 1.15rem;
+  }
+
+  .settings-section > header h3 {
+    font-size: 1.1rem;
+  }
+
+  .settings-section > header p {
+    font-size: 0.86rem;
+  }
+
+  .settings-section > header > span,
+  .settings-section > header button {
+    font-size: 0.84rem;
+  }
+
+  .settings-components-grid article {
+    min-height: 152px;
+    padding: 1rem 1.15rem;
+    gap: 0.78rem;
+  }
+
+  .settings-component-indicator {
+    width: 13px;
+    height: 13px;
+  }
+
+  .settings-components-grid strong {
+    font-size: 1rem;
+  }
+
+  .settings-components-grid small {
+    font-size: 0.81rem;
+  }
+
+  .settings-components-grid b {
+    padding: 0.28rem 0.48rem;
+    font-size: 0.76rem;
+  }
+
+  .settings-components-grid article > p {
+    font-size: 0.81rem;
+    line-height: 1.5;
+  }
+
+  .settings-components-grid article > code {
+    font-size: 0.76rem;
+    line-height: 1.45;
+  }
+
+  .settings-managed-root,
+  .settings-managed-root code {
+    font-size: 0.78rem;
+  }
+
+  .ghidra-settings-card dt {
+    font-size: 0.8rem;
+  }
+
+  .ghidra-settings-card dd {
+    font-size: 0.96rem;
+  }
+
+  .ghidra-settings-card code {
+    font-size: 0.78rem;
+  }
+
+  .settings-actions button {
+    padding: 0.65rem 0.95rem;
+    font-size: 0.86rem;
+  }
+
+  .settings-inline-error {
+    font-size: 0.86rem;
+  }
+
+  .settings-advanced summary {
+    padding: 1rem 1.15rem;
+  }
+
+  .settings-advanced summary h3 {
+    font-size: 1.08rem;
+  }
+
+  .settings-advanced summary p,
+  .settings-advanced summary > span {
+    font-size: 0.84rem;
+  }
+
+  .settings-advanced[open] summary::after {
+    font-size: 0.82rem;
+  }
+
+  .settings-advanced-content {
+    padding: 1.1rem 1.15rem;
+  }
+
+  .settings-advanced-content h4 {
+    font-size: 0.98rem;
+  }
+
+  .settings-advanced-content p,
+  .settings-backend-check span {
+    font-size: 0.82rem;
+  }
+
+  .settings-advanced-content input,
+  .settings-advanced-content button {
+    font-size: 0.84rem;
+  }
+
 
 </style>
