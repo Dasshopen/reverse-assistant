@@ -461,6 +461,30 @@ interface ApplyRenamesResult {
   let disassemblyCache = $state(new Map<string, FunctionDisassembly>());
   let pendingDisassemblies = $state(new Set<string>());
   let disassemblyErrors = $state(new Map<string, string>());
+  let browserSymbolsCollapsed = $state(false);
+
+  // Ghidra has no single dedicated "program entry point" API -- confirmed by
+  // checking a real ELF's bookmarks, external-entry-point order, and
+  // PROGRAM_INFO options (none single it out). What genuinely identifies it
+  // is convention: toolchains name the real entry symbol one of a handful of
+  // well-known names depending on platform/compiler. Only ever resolves to a
+  // function that's actually present -- never fabricated.
+  const WELL_KNOWN_ENTRY_POINT_NAMES = [
+    "_start",
+    "entry",
+    "WinMainCRTStartup",
+    "mainCRTStartup",
+    "__start",
+  ];
+
+  let programEntryPointAddress = $derived.by(() => {
+    if (!importedExport) return null;
+    for (const name of WELL_KNOWN_ENTRY_POINT_NAMES) {
+      const match = importedExport.functions.find((func) => func.name === name);
+      if (match) return match.entry_address;
+    }
+    return null;
+  });
 
   let selectedFunction = $derived(
     importedExport?.functions.find(
@@ -2380,9 +2404,13 @@ interface ApplyRenamesResult {
 
   // A jump/call instruction's operand is Ghidra's own formatted target
   // address (e.g. "0x00400550" for `CALL 0x00400550`) -- only surfaced as
-  // navigable when it resolves to a real function entry in this export, not
-  // whenever the text merely looks like an address.
-  function disasmTargetAddress(instruction: DisassembledInstruction): string | null {
+  // a clickable function reference when it resolves to a real function
+  // entry in this export, not whenever the text merely looks like an
+  // address (e.g. a local jump into the middle of the current function,
+  // which isn't a separately browsable unit with the data we have).
+  function disasmTarget(
+    instruction: DisassembledInstruction,
+  ): { address: string; name: string } | null {
     const isBranch =
       instruction.flow_category === "unconditional_call" ||
       instruction.flow_category === "conditional_call" ||
@@ -2394,12 +2422,12 @@ interface ApplyRenamesResult {
     const match = instruction.operands.match(HEX_ADDRESS_IN_TEXT);
     if (!match) return null;
 
-    const target = match[0];
-    const isKnownFunction = importedExport.functions.some(
-      (func) => func.entry_address === target,
+    const address = match[0];
+    const targetFunction = importedExport.functions.find(
+      (func) => func.entry_address === address,
     );
 
-    return isKnownFunction ? target : null;
+    return targetFunction ? { address, name: targetFunction.name } : null;
   }
 
   function navigateWithinGraph(entryAddress: string) {
@@ -4227,6 +4255,14 @@ interface ApplyRenamesResult {
             <h2 id="code-browser-title">Code Browser</h2>
           </div>
           <div class="code-browser-nav">
+            <button
+              type="button"
+              title={programEntryPointAddress ? `Aller à ${programEntryPointAddress}` : "Point d'entrée non identifié"}
+              onclick={() => openInBrowser(programEntryPointAddress)}
+              disabled={!programEntryPointAddress}
+            >
+              ⌂ Origine
+            </button>
             <button type="button" onclick={browserGoBack} disabled={browserHistoryIndex <= 0}>
               ← Précédent
             </button>
@@ -4237,50 +4273,59 @@ interface ApplyRenamesResult {
             >
               Suivant →
             </button>
+            <button
+              type="button"
+              class="secondary-button"
+              onclick={() => (browserSymbolsCollapsed = !browserSymbolsCollapsed)}
+            >
+              {browserSymbolsCollapsed ? "» Symboles" : "« Masquer les symboles"}
+            </button>
           </div>
         </header>
 
-        <div class="code-browser-layout">
-          <aside class="code-browser-symbols">
-            <div class="code-browser-symbols-controls">
-              <input type="search" placeholder="Rechercher…" bind:value={browserSearch} />
-              <select bind:value={browserSymbolFilter}>
-                <option value="all">Tous</option>
-                <option value="internal">Internes</option>
-                <option value="external">Externes</option>
-                <option value="unnamed">Non identifiées</option>
-              </select>
-            </div>
+        <div class="code-browser-layout" class:symbols-collapsed={browserSymbolsCollapsed}>
+          {#if !browserSymbolsCollapsed}
+            <aside class="code-browser-symbols">
+              <div class="code-browser-symbols-controls">
+                <input type="search" placeholder="Rechercher…" bind:value={browserSearch} />
+                <select bind:value={browserSymbolFilter}>
+                  <option value="all">Tous</option>
+                  <option value="internal">Internes</option>
+                  <option value="external">Externes</option>
+                  <option value="unnamed">Non identifiées</option>
+                </select>
+              </div>
 
-            <ul class="code-browser-symbol-list">
-              {#each paginatedBrowserFunctions as func (func.entry_address)}
-                <li>
-                  <button
-                    type="button"
-                    class:active={func.entry_address === selectedFunctionAddress}
-                    onclick={() => openInBrowser(func.entry_address)}
-                  >
-                    <span>{func.name}</span>
-                    <code>{func.entry_address}</code>
-                  </button>
-                </li>
-              {/each}
-            </ul>
+              <ul class="code-browser-symbol-list">
+                {#each paginatedBrowserFunctions as func (func.entry_address)}
+                  <li>
+                    <button
+                      type="button"
+                      class:active={func.entry_address === selectedFunctionAddress}
+                      onclick={() => openInBrowser(func.entry_address)}
+                    >
+                      <span>{func.name}</span>
+                      <code>{func.entry_address}</code>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
 
-            <div class="code-browser-pagination">
-              <button
-                type="button"
-                disabled={currentBrowserPage <= 1}
-                onclick={() => (browserPage = currentBrowserPage - 1)}
-              >‹</button>
-              <span>Page {currentBrowserPage} / {browserPageCount} ({browserFunctions.length})</span>
-              <button
-                type="button"
-                disabled={currentBrowserPage >= browserPageCount}
-                onclick={() => (browserPage = currentBrowserPage + 1)}
-              >›</button>
-            </div>
-          </aside>
+              <div class="code-browser-pagination">
+                <button
+                  type="button"
+                  disabled={currentBrowserPage <= 1}
+                  onclick={() => (browserPage = currentBrowserPage - 1)}
+                >‹</button>
+                <span>Page {currentBrowserPage} / {browserPageCount} ({browserFunctions.length})</span>
+                <button
+                  type="button"
+                  disabled={currentBrowserPage >= browserPageCount}
+                  onclick={() => (browserPage = currentBrowserPage + 1)}
+                >›</button>
+              </div>
+            </aside>
+          {/if}
 
           <div class="code-browser-listing">
             <p class="detail-label">
@@ -4300,21 +4345,23 @@ interface ApplyRenamesResult {
                 <table class="disasm-table">
                   <tbody>
                     {#each selectedDisassembly.instructions as instruction (instruction.address)}
-                      {@const target = disasmTargetAddress(instruction)}
+                      {@const target = disasmTarget(instruction)}
                       <tr class={`flow-${instruction.flow_category}`}>
                         <td><code>{instruction.address}</code></td>
                         <td><code class="disasm-bytes">{instruction.bytes}</code></td>
                         <td class="disasm-mnemonic">{instruction.mnemonic}</td>
                         <td class="disasm-operands">
-                          {instruction.operands}
                           {#if target}
                             <button
                               type="button"
                               class="disasm-jump-target"
-                              onclick={() => openInBrowser(target)}
+                              title={`Ouvrir ${target.name} (${target.address}) et afficher son pseudocode`}
+                              onclick={() => openInBrowser(target.address)}
                             >
-                              → voir la cible
+                              {target.name}
                             </button>
+                          {:else}
+                            {instruction.operands}
                           {/if}
                         </td>
                       </tr>
@@ -6417,6 +6464,7 @@ interface ApplyRenamesResult {
 
   .code-browser-nav {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
 
@@ -6434,6 +6482,10 @@ interface ApplyRenamesResult {
     border-radius: 10px;
     background: #080f1c;
     overflow: hidden;
+  }
+
+  .code-browser-layout.symbols-collapsed {
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
   }
 
   .code-browser-symbols {
@@ -6587,14 +6639,21 @@ interface ApplyRenamesResult {
   }
 
   .disasm-jump-target {
-    margin-left: 0.5rem;
-    padding: 0.15rem 0.45rem;
-    border: 1px solid #4c3a83;
-    background: #201743;
+    padding: 0;
+    background: transparent;
+    border: 0;
     color: #c4b5fd;
-    font-family: Inter, Arial, sans-serif;
-    font-size: 0.62rem;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-decoration: underline;
+    text-decoration-color: rgb(196 181 253 / 45%);
     white-space: nowrap;
+  }
+
+  .disasm-jump-target:hover {
+    color: #e9e3ff;
+    text-decoration-color: currentColor;
   }
 
   .code-browser-decompiled {
