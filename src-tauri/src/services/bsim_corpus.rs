@@ -13,8 +13,6 @@ use crate::services::ghidra_installation::{self, GhidraInstallationStatus};
 
 const CORPUS_FILE_NAME: &str = "reverse-assistant-seed.mv.db";
 const CORPUS_PATH_ENV: &str = "REVERSE_ASSISTANT_BSIM_CORPUS_PATH";
-pub const DEFAULT_CORPUS_SHA256: &str =
-    "d8585eb3c43b081ec37e5b1f33281ad4af94bcf7e37278b1021823e9f8c1086f";
 const REGISTRY_FILE_NAME: &str = "corpora.json";
 const CUSTOM_DIRECTORY_NAME: &str = "custom";
 
@@ -147,7 +145,7 @@ fn write_registry(app_data_dir: &Path, registry: &CorpusRegistry) -> Result<(), 
     })
 }
 
-fn validate_database_file(path: &Path) -> Result<(), String> {
+pub fn validate_database_file(path: &Path) -> Result<(), String> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -160,6 +158,18 @@ fn validate_database_file(path: &Path) -> Result<(), String> {
     if !metadata.is_file() || metadata.len() == 0 {
         return Err(format!(
             "the selected BSim corpus is empty or not a file: {}",
+            path.display()
+        ));
+    }
+
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("unable to open BSim corpus '{}': {error}", path.display()))?;
+    let mut header = [0_u8; 2];
+    file.read_exact(&mut header)
+        .map_err(|error| format!("unable to read BSim corpus '{}': {error}", path.display()))?;
+    if header != *b"H:" {
+        return Err(format!(
+            "the selected file is not an H2 MVStore database: {}",
             path.display()
         ));
     }
@@ -294,7 +304,7 @@ pub fn list_corpora(app: &AppHandle) -> Result<Vec<BsimCorpusSummary>, String> {
 
 fn locate_default_corpus(app: &AppHandle, app_data_dir: &Path) -> Result<Option<PathBuf>, String> {
     let cached = cached_db_path(app_data_dir);
-    if cached.is_file() && file_sha256(&cached)?.eq_ignore_ascii_case(DEFAULT_CORPUS_SHA256) {
+    if cached.is_file() && validate_database_file(&cached).is_ok() {
         return fs::canonicalize(&cached).map(Some).map_err(|error| {
             format!(
                 "failed to resolve cached BSim corpus '{}': {error}",
@@ -307,9 +317,7 @@ fn locate_default_corpus(app: &AppHandle, app_data_dir: &Path) -> Result<Option<
         .join("bsim-corpus")
         .join("build")
         .join(CORPUS_FILE_NAME);
-    if development.is_file()
-        && file_sha256(&development)?.eq_ignore_ascii_case(DEFAULT_CORPUS_SHA256)
-    {
+    if development.is_file() && validate_database_file(&development).is_ok() {
         return fs::canonicalize(&development).map(Some).map_err(|error| {
             format!(
                 "failed to resolve development BSim corpus '{}': {error}",
@@ -715,11 +723,11 @@ pub fn ensure_corpus_downloaded(
         .app_data_dir()
         .map_err(|error| format!("unable to resolve the application data directory: {error}"))?;
 
-    download_and_cache(
-        &cached_db_path(&app_data_dir),
-        release_asset_url,
-        expected_sha256,
-    )
+    let destination = cached_db_path(&app_data_dir);
+    if destination.is_file() && validate_database_file(&destination).is_ok() {
+        return Ok(destination);
+    }
+    download_and_cache(&destination, release_asset_url, expected_sha256)
 }
 
 #[cfg(test)]
@@ -769,7 +777,7 @@ mod tests {
         let database = directory.join("personal-corpus.mv.db");
 
         fs::create_dir_all(&directory).expect("the test directory should be created");
-        fs::write(&database, b"test database").expect("the test database should be written");
+        fs::write(&database, b"H:2,test database").expect("the test database should be written");
 
         validate_database_file(&database).expect("a non-empty .mv.db file should be accepted");
 
@@ -787,11 +795,14 @@ mod tests {
         ));
         let empty_database = directory.join("empty.mv.db");
         let wrong_extension = directory.join("corpus.db");
+        let wrong_contents = directory.join("not-h2.mv.db");
 
         fs::create_dir_all(&directory).expect("the test directory should be created");
         fs::write(&empty_database, []).expect("the empty test file should be written");
-        fs::write(&wrong_extension, b"test database")
+        fs::write(&wrong_extension, b"H:2,test database")
             .expect("the wrongly named test file should be written");
+        fs::write(&wrong_contents, b"not an H2 database")
+            .expect("the invalid database should be written");
 
         assert!(validate_database_file(&empty_database)
             .expect_err("an empty database should be rejected")
@@ -799,6 +810,9 @@ mod tests {
         assert!(validate_database_file(&wrong_extension)
             .expect_err("a database without the .mv.db suffix should be rejected")
             .contains(".mv.db"));
+        assert!(validate_database_file(&wrong_contents)
+            .expect_err("a non-H2 file should be rejected")
+            .contains("not an H2"));
 
         fs::remove_dir_all(directory).expect("the test directory should be removed");
     }

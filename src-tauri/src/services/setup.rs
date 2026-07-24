@@ -523,9 +523,7 @@ fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
         .app_data_dir()
         .map_err(|error| format!("unable to resolve application data directory: {error}"))?;
     let destination = bsim_corpus::cached_db_path(&app_data_dir);
-    if destination.is_file()
-        && verify_file(&destination, bsim_corpus::DEFAULT_CORPUS_SHA256).is_ok()
-    {
+    if destination.is_file() && bsim_corpus::validate_database_file(&destination).is_ok() {
         return Ok(Some(destination));
     }
 
@@ -545,7 +543,7 @@ fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let Some(bundled) = bundled else {
         return Ok(None);
     };
-    verify_file(&bundled, bsim_corpus::DEFAULT_CORPUS_SHA256)?;
+    bsim_corpus::validate_database_file(&bundled)?;
     let parent = destination
         .parent()
         .ok_or_else(|| "the BSim destination has no parent directory".to_owned())?;
@@ -558,7 +556,7 @@ fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let temporary = parent.join(".reverse-assistant-seed.mv.db.tmp");
     fs::copy(&bundled, &temporary)
         .map_err(|error| format!("failed to copy bundled BSim corpus: {error}"))?;
-    verify_file(&temporary, bsim_corpus::DEFAULT_CORPUS_SHA256)?;
+    bsim_corpus::validate_database_file(&temporary)?;
     if destination.exists() {
         fs::remove_file(&destination).map_err(|error| {
             format!(
