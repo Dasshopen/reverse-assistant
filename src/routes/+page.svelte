@@ -184,6 +184,21 @@ interface AutomaticRenameChoice {
   scoreLabel: string;
   evidenceLabel: string;
   alternativeCount: number;
+  decisionLabel: string;
+}
+
+interface AutomaticRenameRejection {
+  func: GhidraFunction;
+  candidateName: string;
+  candidateDisplayName: string;
+  source: "function_id" | "bsim";
+  evidenceLabel: string;
+  reason: string;
+}
+
+interface AutomaticRenameEvaluation {
+  choices: AutomaticRenameChoice[];
+  rejections: AutomaticRenameRejection[];
 }
 
 type CallGraphDirection = "outgoing" | "incoming" | "both";
@@ -581,47 +596,184 @@ interface ApplyRenamesResult {
   let functionRenameSuccess = $state("");
   let renameDraftAddress: string | null = null;
 
-  let automaticRenameCandidates = $derived.by<AutomaticRenameChoice[]>(() => {
+  const automaticFidMinimumScore = 20;
+  const automaticFidMinimumMargin = 3;
+  const automaticBsimMinimumSimilarity = 0.85;
+  const automaticBsimMinimumSignificance = 10;
+  const automaticBsimMinimumMargin = 0.05;
+
+  function isSafeAutomaticSymbolName(name: string): boolean {
+    // The current Ghidra edit contract changes a symbol in its existing
+    // namespace. Keep automatic writes conservative; decorated C++ names and
+    // namespace syntax remain available for manual review instead.
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name.length <= 200;
+  }
+
+  function displayCandidateName(name: string): string {
+    // Display-only decoding for common MSVC constructors/destructors. This is
+    // never written back because correct C++ application also needs namespace
+    // and overload support in the Ghidra edit contract.
+    const deletingDestructor = name.match(/^\?\?_G([^@]+)@([^@]+)@@/);
+    if (deletingDestructor) {
+      return `${deletingDestructor[2]}::${deletingDestructor[1]}::~${deletingDestructor[1]} (destructeur C++ décoré)`;
+    }
+    const special = name.match(/^\?\?([01])([^@]+)@([^@]+)@@/);
+    if (special) {
+      const [, kind, className, namespace] = special;
+      return kind === "0"
+        ? `${namespace}::${className}::${className} (nom C++ décoré)`
+        : `${namespace}::${className}::~${className} (nom C++ décoré)`;
+    }
+    const member = name.match(/^\?([^@]+)@([^@]+)@@/);
+    if (member) return `${member[2]}::${member[1]} (nom C++ décoré)`;
+    return name;
+  }
+
+  function uniqueFidCandidates(candidates: FidCandidate[]): FidCandidate[] {
+    const bestByName = new Map<string, FidCandidate>();
+    for (const candidate of candidates) {
+      if (isGeneratedFunctionName(candidate.name)) continue;
+      const previous = bestByName.get(candidate.name);
+      if (!previous || candidate.overall_score > previous.overall_score) {
+        bestByName.set(candidate.name, candidate);
+      }
+    }
+    return [...bestByName.values()].sort((a, b) => b.overall_score - a.overall_score);
+  }
+
+  function uniqueBsimCandidates(candidates: BsimCandidate[]): BsimCandidate[] {
+    const bestByName = new Map<string, BsimCandidate>();
+    for (const candidate of candidates) {
+      if (isGeneratedFunctionName(candidate.name)) continue;
+      const previous = bestByName.get(candidate.name);
+      if (
+        !previous ||
+        candidate.similarity > previous.similarity ||
+        (candidate.similarity === previous.similarity && candidate.significance > previous.significance)
+      ) {
+        bestByName.set(candidate.name, candidate);
+      }
+    }
+    return [...bestByName.values()].sort(
+      (a, b) => b.similarity - a.similarity || b.significance - a.significance,
+    );
+  }
+
+  let automaticRenameEvaluation = $derived.by<AutomaticRenameEvaluation>(() => {
     const choices: AutomaticRenameChoice[] = [];
+    const rejections: AutomaticRenameRejection[] = [];
+    const reservedNames = new Set(
+      (importedExport?.functions ?? [])
+        .filter((func) => !isGeneratedFunctionName(func.name))
+        .map((func) => func.name),
+    );
+
     for (const func of unidentifiedFunctions) {
-      const fidCandidates = identifications.get(func.entry_address) ?? [];
-      const rankedFidCandidates = [...fidCandidates]
-        .filter((candidate) => !isGeneratedFunctionName(candidate.name))
-        .sort((a, b) => b.overall_score - a.overall_score);
-      if (rankedFidCandidates.length > 0) {
-        const candidate = rankedFidCandidates[0];
-        choices.push({
+      const fidCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? []);
+      const bestFid = fidCandidates[0];
+      let fidRejection: AutomaticRenameRejection | null = null;
+
+      if (bestFid) {
+        const runnerUp = fidCandidates[1];
+        const margin = runnerUp ? bestFid.overall_score - runnerUp.overall_score : null;
+        let reason = "";
+        if (!isSafeAutomaticSymbolName(bestFid.name)) {
+          reason = "Nom C++ décoré ou non compatible avec le renommage automatique.";
+        } else if (bestFid.overall_score < automaticFidMinimumScore) {
+          reason = `Score ${bestFid.overall_score.toFixed(1)} trop faible (minimum automatique : ${automaticFidMinimumScore.toFixed(1)}).`;
+        } else if (margin !== null && margin < automaticFidMinimumMargin) {
+          reason = `Correspondance ambiguë : seulement ${margin.toFixed(1)} point(s) d'écart avec le deuxième nom.`;
+        } else if (reservedNames.has(bestFid.name)) {
+          reason = "Ce nom est déjà utilisé par une autre fonction ; collision refusée.";
+        }
+
+        if (!reason) {
+          choices.push({
+            func,
+            name: bestFid.name,
+            source: "function_id",
+            scoreLabel: `score ${bestFid.overall_score.toFixed(1)}`,
+            evidenceLabel: `${bestFid.library_family} ${bestFid.library_version} · ${bestFid.match_mode}`,
+            alternativeCount: Math.max(0, fidCandidates.length - 1),
+            decisionLabel: margin === null
+              ? "Candidat unique au-dessus du seuil de sécurité"
+              : `Marge de ${margin.toFixed(1)} points sur le deuxième candidat`,
+          });
+          reservedNames.add(bestFid.name);
+          continue;
+        }
+
+        fidRejection = {
           func,
-          name: candidate.name,
+          candidateName: bestFid.name,
+          candidateDisplayName: displayCandidateName(bestFid.name),
           source: "function_id",
-          scoreLabel: `score ${candidate.overall_score.toFixed(1)}`,
-          evidenceLabel: `${candidate.library_family} ${candidate.library_version} · ${candidate.match_mode}`,
-          alternativeCount: rankedFidCandidates.length - 1,
+          evidenceLabel: `score ${bestFid.overall_score.toFixed(1)} · ${bestFid.library_family} ${bestFid.library_version}`,
+          reason,
+        };
+      }
+
+      // A rejected FunctionID result does not hide an independently strong
+      // BSim result. BSim can rescue it, under its own strict rules.
+      const bsim = decompileCache.get(func.entry_address)?.bsim;
+      const bsimCandidates = bsim?.status === "available"
+        ? uniqueBsimCandidates(bsim.matches)
+        : [];
+      const bestBsim = bsimCandidates[0];
+
+      if (bestBsim) {
+        const runnerUp = bsimCandidates[1];
+        const margin = runnerUp ? bestBsim.similarity - runnerUp.similarity : null;
+        let reason = "";
+        if (!isSafeAutomaticSymbolName(bestBsim.name)) {
+          reason = "Nom non compatible avec le renommage automatique.";
+        } else if (bestBsim.similarity < automaticBsimMinimumSimilarity) {
+          reason = `Similarité ${bestBsim.similarity.toFixed(3)} trop faible (minimum : ${automaticBsimMinimumSimilarity.toFixed(2)}).`;
+        } else if (bestBsim.significance < automaticBsimMinimumSignificance) {
+          reason = `Significativité ${bestBsim.significance.toFixed(1)} trop faible (minimum : ${automaticBsimMinimumSignificance.toFixed(1)}).`;
+        } else if (margin !== null && margin < automaticBsimMinimumMargin) {
+          reason = `Correspondance BSim ambiguë : écart de seulement ${margin.toFixed(3)} avec le deuxième nom.`;
+        } else if (reservedNames.has(bestBsim.name)) {
+          reason = "Ce nom est déjà utilisé par une autre fonction ; collision refusée.";
+        }
+
+        if (!reason) {
+          choices.push({
+            func,
+            name: bestBsim.name,
+            source: "bsim",
+            scoreLabel: `similarité ${bestBsim.similarity.toFixed(3)}`,
+            evidenceLabel: `${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
+            alternativeCount: Math.max(0, bsimCandidates.length - 1),
+            decisionLabel: margin === null
+              ? "Candidat unique au-dessus des seuils de sécurité"
+              : `Marge de ${margin.toFixed(3)} sur le deuxième candidat`,
+          });
+          reservedNames.add(bestBsim.name);
+          continue;
+        }
+
+        rejections.push({
+          func,
+          candidateName: bestBsim.name,
+          candidateDisplayName: displayCandidateName(bestBsim.name),
+          source: "bsim",
+          evidenceLabel: `similarité ${bestBsim.similarity.toFixed(3)} · significativité ${bestBsim.significance.toFixed(1)}`,
+          reason,
         });
         continue;
       }
 
-      const bsim = decompileCache.get(func.entry_address)?.bsim;
-      if (bsim?.status !== "available") continue;
-      const rankedBsimCandidates = [...bsim.matches]
-        .filter((candidate) => !isGeneratedFunctionName(candidate.name))
-        .sort(
-          (a, b) =>
-            b.similarity - a.similarity || b.significance - a.significance,
-        );
-      if (rankedBsimCandidates.length === 0) continue;
-      const candidate = rankedBsimCandidates[0];
-      choices.push({
-        func,
-        name: candidate.name,
-        source: "bsim",
-        scoreLabel: `similarité ${candidate.similarity.toFixed(3)}`,
-        evidenceLabel: `${candidate.executable} · significativité ${candidate.significance.toFixed(1)}`,
-        alternativeCount: rankedBsimCandidates.length - 1,
-      });
+      if (fidRejection) rejections.push(fidRejection);
     }
-    return choices;
+
+    return { choices, rejections };
   });
+  let automaticRenameCandidates = $derived(automaticRenameEvaluation.choices);
+  let automaticRenameRejections = $derived(automaticRenameEvaluation.rejections);
+  let automaticRenameWithoutEvidenceCount = $derived(
+    Math.max(0, unidentifiedFunctions.length - automaticRenameCandidates.length - automaticRenameRejections.length),
+  );
   let automaticIdentificationPageCount = $derived(
     Math.max(
       1,
@@ -1747,7 +1899,7 @@ interface ApplyRenamesResult {
     const batch = automaticRenameCandidates.slice(0, 500);
     if (batch.length === 0) return;
     if (!window.confirm(
-      `Appliquer ${batch.length} renommage(s) dans Ghidra ? FunctionID est prioritaire ; lorsqu'il ne trouve rien, la meilleure correspondance BSim déjà disponible est utilisée.`,
+      `Appliquer ${batch.length} renommage(s) vérifié(s) dans Ghidra ? ${automaticRenameRejections.length} proposition(s) ambiguë(s), invalide(s) ou en collision resteront en validation manuelle.`,
     )) return;
 
     automaticRenameError = "";
@@ -3245,17 +3397,17 @@ interface ApplyRenamesResult {
         {#if automaticIdentificationMode}
           <section class="automatic-rename-panel">
             <div>
-              <strong>{automaticRenameCandidates.length} nom(s) peuvent être choisis automatiquement</strong>
+              <strong>{automaticRenameCandidates.length} nom(s) suffisamment fiables peuvent être appliqués</strong>
               <span>
-                FunctionID est prioritaire. S'il ne trouve rien, l'application utilise la meilleure correspondance
-                BSim déjà calculée. Sans preuve, aucun nom n'est inventé.
+                {automaticRenameRejections.length} proposition(s) écartée(s) par sécurité ·
+                {automaticRenameWithoutEvidenceCount} fonction(s) sans preuve. Aucun nom n'est inventé.
               </span>
             </div>
             <button
               type="button"
               disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
               onclick={applyAutomaticFunctionRenames}
-            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les meilleurs noms (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
+            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les noms fiables (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
           </section>
           {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
           {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
@@ -3273,7 +3425,7 @@ interface ApplyRenamesResult {
                     <tr>
                       <td><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></td>
                       <td>{item.name}</td>
-                      <td><span>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small></td>
+                      <td><span>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small><small class="automatic-decision-reason">✓ {item.decisionLabel}</small></td>
                       <td>{item.alternativeCount === 0 ? "Aucun" : `${item.alternativeCount} moins bien classé(s)`}</td>
                     </tr>
                   {/each}
@@ -3288,6 +3440,25 @@ interface ApplyRenamesResult {
               <button type="button" disabled={currentAutomaticIdentificationPage === automaticIdentificationPageCount} onclick={() => (automaticIdentificationPage = Math.min(automaticIdentificationPageCount, currentAutomaticIdentificationPage + 1))}>→</button>
             </nav>
           </section>
+
+          {#if automaticRenameRejections.length > 0}
+            <details class="automatic-rejections">
+              <summary>
+                <span><strong>{automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Scores insuffisants, ambiguïtés, noms décorés ou collisions</small></span>
+                <b>Voir les raisons</b>
+              </summary>
+              <div class="automatic-rejection-list">
+                {#each automaticRenameRejections as item (item.func.entry_address)}
+                  <article>
+                    <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
+                    <div><span>{item.candidateDisplayName}</span>{#if item.candidateDisplayName !== item.candidateName}<code title="Nom brut FunctionID">{item.candidateName}</code>{/if}</div>
+                    <div><small>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.evidenceLabel}</small><b>{item.reason}</b></div>
+                    <button type="button" onclick={() => { automaticIdentificationMode = false; openFunction(item.func.entry_address, false); }}>Vérifier manuellement</button>
+                  </article>
+                {/each}
+              </div>
+            </details>
+          {/if}
         {:else if identificationQueue.length === 0}
           <div class="identification-complete">
             <span aria-hidden="true">✓</span>
@@ -3342,8 +3513,9 @@ interface ApplyRenamesResult {
                       <div class="evidence-source-group">
                         <h5>FunctionID</h5>
                         {#each selectedIdentificationCandidates as candidate}
+                          {@const displayedName = displayCandidateName(candidate.name)}
                           <button type="button" class:selected={functionRenameDraft === candidate.name} onclick={() => selectFunctionRenameSuggestion(candidate.name)}>
-                            <span><strong>{candidate.name}</strong><small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small></span>
+                            <span><strong>{displayedName}</strong>{#if displayedName !== candidate.name}<small>Nom brut : {candidate.name}</small>{/if}<small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small></span>
                             <span><code>score {candidate.overall_score.toFixed(1)}</code><small>{candidate.match_mode}</small></span>
                           </button>
                         {/each}
@@ -3859,6 +4031,7 @@ interface ApplyRenamesResult {
 
                   <ul>
                     {#each selectedIdentificationCandidates as candidate}
+                      {@const displayedName = displayCandidateName(candidate.name)}
                       <li
                         class="rename-suggestion-item"
                         class:selected={functionRenameDraft === candidate.name}
@@ -3870,7 +4043,8 @@ interface ApplyRenamesResult {
                           onclick={() => selectFunctionRenameSuggestion(candidate.name)}
                         >
                           <span>
-                            {candidate.name}
+                            {displayedName}
+                            {#if displayedName !== candidate.name}<small>Nom brut : {candidate.name}</small>{/if}
                             <em>
                               ({candidate.library_family} {candidate.library_version}
                               {candidate.library_variant}, {candidate.match_mode})
@@ -6629,9 +6803,65 @@ interface ApplyRenamesResult {
   .automatic-choice-preview td code { color: #7db7e8; font-size: 0.56rem; }
   .automatic-choice-preview td span { color: #a7f3d0; }
   .automatic-choice-preview td small { color: #8292ad; font-size: 0.55rem; }
+  .automatic-choice-preview td small.automatic-decision-reason { color: #6ee7b7; }
   .no-automatic-choice { display: grid; place-items: center; min-height: 270px; align-content: center; gap: 0.25rem; color: #8292ad; text-align: center; }
   .no-automatic-choice strong { color: #cbd5e1; font-size: 0.78rem; }
   .no-automatic-choice span { font-size: 0.65rem; }
+
+  .automatic-rejections {
+    border: 1px solid #513444;
+    border-radius: 8px;
+    background: #111522;
+    overflow: hidden;
+  }
+
+  .automatic-rejections > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.7rem 0.78rem;
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .automatic-rejections > summary::-webkit-details-marker { display: none; }
+  .automatic-rejections > summary > span { display: grid; gap: 0.15rem; }
+  .automatic-rejections > summary strong { color: #fecdd3; font-size: 0.74rem; }
+  .automatic-rejections > summary small { color: #8f8291; font-size: 0.59rem; }
+  .automatic-rejections > summary b { color: #fda4af; font-size: 0.63rem; }
+  .automatic-rejections[open] > summary { border-bottom: 1px solid #3d2937; }
+  .automatic-rejections[open] > summary b { font-size: 0; }
+  .automatic-rejections[open] > summary b::after { font-size: 0.63rem; content: "Masquer"; }
+
+  .automatic-rejection-list {
+    display: grid;
+    max-height: 390px;
+    overflow: auto;
+  }
+
+  .automatic-rejection-list article {
+    display: grid;
+    grid-template-columns: minmax(150px, 0.75fr) minmax(220px, 1fr) minmax(320px, 1.65fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.65rem 0.78rem;
+    border-bottom: 1px solid #292334;
+  }
+
+  .automatic-rejection-list article:last-child { border-bottom: 0; }
+  .automatic-rejection-list article > div { display: grid; min-width: 0; gap: 0.13rem; }
+  .automatic-rejection-list strong { color: #e7edf6; font-size: 0.68rem; }
+  .automatic-rejection-list span { color: #fbcfe8; font-size: 0.68rem; overflow-wrap: anywhere; }
+  .automatic-rejection-list code,
+  .automatic-rejection-list small { color: #7891af; font-size: 0.56rem; overflow-wrap: anywhere; }
+  .automatic-rejection-list b { color: #fda4af; font-size: 0.62rem; font-weight: 600; line-height: 1.35; }
+  .automatic-rejection-list button { padding: 0.42rem 0.58rem; border: 1px solid #604052; background: #251724; color: #fecdd3; font-size: 0.6rem; white-space: nowrap; }
+  .automatic-rejection-list button:hover:not(:disabled) { background: #392033; }
+
+  @media (max-width: 1180px) {
+    .automatic-rejection-list article { grid-template-columns: 1fr 1fr; }
+  }
 
   .identification-layout {
     display: grid;

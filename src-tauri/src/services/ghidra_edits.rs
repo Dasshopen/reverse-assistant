@@ -93,6 +93,7 @@ fn validate_and_normalize_renames(
     }
 
     let mut addresses = HashSet::new();
+    let mut requested_names = HashSet::new();
     let mut normalized = Vec::with_capacity(renames.len());
     for rename in renames {
         if !crate::models::ghidra_export::is_valid_address(&rename.entry_address) {
@@ -115,6 +116,11 @@ fn validate_and_normalize_renames(
             return Err(format!(
                 "invalid new function name at {}",
                 rename.entry_address
+            ));
+        }
+        if !requested_names.insert(new_name) {
+            return Err(format!(
+                "duplicate target function name in rename batch: {new_name}"
             ));
         }
         normalized.push(FunctionRename {
@@ -284,6 +290,20 @@ mod tests {
             new_name: "one".to_owned(),
         };
         assert!(validate_and_normalize_renames(&[duplicate.clone(), duplicate]).is_err());
+
+        let duplicate_target_name = [
+            FunctionRename {
+                entry_address: "0x401000".to_owned(),
+                new_name: "same_name".to_owned(),
+            },
+            FunctionRename {
+                entry_address: "0x402000".to_owned(),
+                new_name: "same_name".to_owned(),
+            },
+        ];
+        let error = validate_and_normalize_renames(&duplicate_target_name)
+            .expect_err("a batch must not assign one target name twice");
+        assert!(error.contains("duplicate target function name"));
     }
 
     #[test]
