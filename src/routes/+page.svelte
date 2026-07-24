@@ -1,6 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { open, save } from "@tauri-apps/plugin-dialog";
+  import { onMount } from "svelte";
   import SetupAssistant from "$lib/SetupAssistant.svelte";
   import ProgressRing from "$lib/ProgressRing.svelte";
 
@@ -10,6 +12,12 @@
     decompiled_function_count: number;
     call_count: number;
     string_count: number;
+  }
+
+  interface AnalysisProgress {
+    stage: string;
+    message: string;
+    completed_percent: number | null;
   }
 
   type ExternalEntryPointKind = "function" | "data" | "unknown";
@@ -439,6 +447,26 @@ interface ApplyRenamesResult {
   let isConfiguringGhidra = $state(false);
   let analyzeError = $state("");
   let isAnalyzing = $state(false);
+  let analysisProgress = $state<AnalysisProgress | null>(null);
+  let analysisProgressVisible = $state(false);
+  let analysisProgressMinimized = $state(false);
+  let analysisElapsedSeconds = $state(0);
+  let analysisTargetName = $state("");
+  let analysisTimer: ReturnType<typeof setInterval> | null = null;
+
+  onMount(() => {
+    let unlisten: UnlistenFn | undefined;
+    listen<AnalysisProgress>("analysis-progress", (event) => {
+      analysisProgress = event.payload;
+    }).then((stop) => {
+      unlisten = stop;
+    });
+
+    return () => {
+      unlisten?.();
+      if (analysisTimer !== null) clearInterval(analysisTimer);
+    };
+  });
 
   let analysisSource = $state<"none" | "automatic" | "manual">("none");
   let activeProjectId = $state<string | null>(null);
@@ -1994,6 +2022,34 @@ interface ApplyRenamesResult {
     }
   }
 
+  function formatAnalysisElapsed(totalSeconds: number): string {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return minutes > 0 ? `${minutes} min ${seconds.toString().padStart(2, "0")} s` : `${seconds} s`;
+  }
+
+  function startAnalysisProgress() {
+    if (analysisTimer !== null) clearInterval(analysisTimer);
+    analysisElapsedSeconds = 0;
+    analysisProgressMinimized = false;
+    analysisProgressVisible = true;
+    analysisProgress = {
+      stage: "prepare",
+      message: "Préparation de l’analyse locale…",
+      completed_percent: 1,
+    };
+    analysisTimer = setInterval(() => {
+      analysisElapsedSeconds += 1;
+    }, 1000);
+  }
+
+  function stopAnalysisTimer() {
+    if (analysisTimer !== null) {
+      clearInterval(analysisTimer);
+      analysisTimer = null;
+    }
+  }
+
   async function analyzeBinary(binaryPath: string) {
     analyzeError = "";
     importSummary = null;
@@ -2005,8 +2061,10 @@ interface ApplyRenamesResult {
     decompileErrors = new Map();
     identifications = new Map();
     functionIdAnalysisAvailable = false;
+    analysisTargetName = binaryPath.split(/[\\/]/).pop() ?? binaryPath;
 
     isAnalyzing = true;
+    startAnalysisProgress();
 
     try {
       const result = await invoke<AutomaticAnalysisResult>(
@@ -2030,10 +2088,23 @@ interface ApplyRenamesResult {
       // The backend auto-saves every completed analysis as a local
       // project -- refresh the list so it shows up right away.
       requestProjectList();
+      analysisProgress = {
+        stage: "complete",
+        message: "Analyse terminée. Le projet est prêt.",
+        completed_percent: 100,
+      };
+      await new Promise((resolve) => setTimeout(resolve, 850));
+      analysisProgressVisible = false;
     } catch (error) {
       analyzeError = String(error);
+      analysisProgress = {
+        stage: "error",
+        message: "L’analyse n’a pas pu être terminée.",
+        completed_percent: null,
+      };
     } finally {
       isAnalyzing = false;
+      stopAnalysisTimer();
     }
   }
 
@@ -2113,6 +2184,68 @@ interface ApplyRenamesResult {
 
 <main class="app-shell">
   <SetupAssistant onready={refreshEnvironmentConfiguration} />
+  {#if analysisProgressVisible && analysisProgress}
+    {#if analysisProgressMinimized}
+      <button
+        type="button"
+        class="analysis-progress-minimized"
+        onclick={() => (analysisProgressMinimized = false)}
+        aria-label="Afficher la progression de l’analyse"
+      >
+        <span class:complete={analysisProgress.stage === "complete"}></span>
+        <strong>{analysisProgress.stage === "complete" ? "Analyse terminée" : "Analyse en cours"}</strong>
+        <small>{formatAnalysisElapsed(analysisElapsedSeconds)}</small>
+      </button>
+    {:else}
+      <aside class="analysis-progress-panel" aria-live="polite" aria-label="Progression de l’analyse">
+        <header>
+          <div>
+            <p>ANALYSE LOCALE</p>
+            <h2>{analysisTargetName || "Binaire sélectionné"}</h2>
+          </div>
+          {#if isAnalyzing}
+            <button
+              type="button"
+              class="analysis-progress-collapse"
+              onclick={() => (analysisProgressMinimized = true)}
+            >Réduire</button>
+          {:else}
+            <button
+              type="button"
+              class="analysis-progress-collapse"
+              onclick={() => (analysisProgressVisible = false)}
+            >Fermer</button>
+          {/if}
+        </header>
+
+        <div
+          class="analysis-progress-track"
+          class:indeterminate={analysisProgress.completed_percent === null && analysisProgress.stage !== "error"}
+          class:failed={analysisProgress.stage === "error"}
+          role="progressbar"
+          aria-label="Progression de l’analyse"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={analysisProgress.completed_percent ?? undefined}
+        >
+          <span style:width={analysisProgress.completed_percent !== null ? `${analysisProgress.completed_percent}%` : undefined}></span>
+        </div>
+
+        <div class="analysis-progress-copy">
+          <strong>{analysisProgress.message}</strong>
+          <span>{formatAnalysisElapsed(analysisElapsedSeconds)}</span>
+        </div>
+
+        {#if analysisProgress.completed_percent !== null}
+          <small>{analysisProgress.completed_percent}% terminé</small>
+        {:else if analysisProgress.stage === "error"}
+          <small class="analysis-progress-error">{analyzeError}</small>
+        {:else}
+          <small>Ghidra ne fournit pas de pourcentage fiable pour cette étape. L’analyse continue normalement.</small>
+        {/if}
+      </aside>
+    {/if}
+  {/if}
   <aside class="app-sidebar">
     <div class="brand">
       <span class="brand-mark">RA</span>
@@ -6939,6 +7072,178 @@ interface ApplyRenamesResult {
   .settings-advanced-content input,
   .settings-advanced-content button {
     font-size: 0.84rem;
+  }
+
+  .analysis-progress-panel {
+    position: fixed;
+    right: 1.35rem;
+    bottom: 1.35rem;
+    z-index: 80;
+    display: grid;
+    width: min(520px, calc(100vw - 2.7rem));
+    gap: 0.85rem;
+    padding: 1.1rem 1.2rem;
+    border: 1px solid #31415e;
+    border-radius: 12px;
+    background: #0b1628;
+    box-shadow: 0 22px 60px rgb(0 0 0 / 48%);
+  }
+
+  .analysis-progress-panel header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .analysis-progress-panel header p {
+    margin: 0 0 0.22rem;
+    color: #8ea3c1;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+  }
+
+  .analysis-progress-panel header h2 {
+    margin: 0;
+    color: #f4f7fb;
+    font-size: 1.2rem;
+    overflow-wrap: anywhere;
+  }
+
+  .analysis-progress-collapse {
+    flex: 0 0 auto;
+    padding: 0.42rem 0.65rem;
+    border: 1px solid #344866;
+    background: #101d31;
+    color: #b7c6dc;
+    font-size: 0.78rem;
+  }
+
+  .analysis-progress-track {
+    position: relative;
+    height: 12px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #18253b;
+  }
+
+  .analysis-progress-track > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #7c3aed, #22d3ee);
+    transition: width 320ms ease;
+  }
+
+  .analysis-progress-track.indeterminate > span {
+    width: 38% !important;
+    background: linear-gradient(90deg, transparent, #8b5cf6 30%, #22d3ee 70%, transparent);
+    animation: analysis-progress-scan 1.45s ease-in-out infinite;
+  }
+
+  .analysis-progress-track.failed > span {
+    width: 100% !important;
+    background: #ef4444;
+  }
+
+  .analysis-progress-copy {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .analysis-progress-copy strong {
+    color: #e6edf7;
+    font-size: 0.92rem;
+    line-height: 1.4;
+  }
+
+  .analysis-progress-copy span {
+    flex: 0 0 auto;
+    color: #67e8f9;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.8rem;
+  }
+
+  .analysis-progress-panel > small {
+    color: #8496b2;
+    font-size: 0.76rem;
+    line-height: 1.45;
+  }
+
+  .analysis-progress-panel > small.analysis-progress-error {
+    max-height: 5rem;
+    overflow: auto;
+    color: #fda4af;
+  }
+
+  .analysis-progress-minimized {
+    position: fixed;
+    right: 1.35rem;
+    bottom: 1.35rem;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.72rem 0.9rem;
+    border: 1px solid #344866;
+    border-radius: 10px;
+    background: #0b1628;
+    box-shadow: 0 16px 40px rgb(0 0 0 / 42%);
+    color: #e6edf7;
+  }
+
+  .analysis-progress-minimized > span {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #22d3ee;
+    box-shadow: 0 0 10px rgb(34 211 238 / 65%);
+    animation: analysis-progress-pulse 1.25s ease-in-out infinite;
+  }
+
+  .analysis-progress-minimized > span.complete {
+    background: #22c55e;
+    animation: none;
+  }
+
+  .analysis-progress-minimized strong {
+    font-size: 0.82rem;
+  }
+
+  .analysis-progress-minimized small {
+    color: #8fa3bf;
+    font-size: 0.74rem;
+  }
+
+  @keyframes analysis-progress-scan {
+    from { transform: translateX(-110%); }
+    to { transform: translateX(265%); }
+  }
+
+  @keyframes analysis-progress-pulse {
+    0%, 100% { opacity: 0.55; transform: scale(0.88); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+
+  @media (max-width: 700px) {
+    .analysis-progress-panel,
+    .analysis-progress-minimized {
+      right: 0.75rem;
+      bottom: 0.75rem;
+    }
+
+    .analysis-progress-panel {
+      width: calc(100vw - 1.5rem);
+    }
+
+    .analysis-progress-copy {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
   }
 
 

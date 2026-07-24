@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::{AppHandle, Manager};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::models::ghidra_identification::{parse_identifications, FunctionIdentification};
 use crate::models::ghidra_installation::configure_java_environment;
@@ -21,6 +22,31 @@ const STDERR_TAIL_BYTES: usize = 4000;
 // unlike the interactive GUI launcher which sets no default cap. Large or
 // heavily optimized binaries can hit significant GC pressure under 2G.
 pub(crate) const HEADLESS_MAX_HEAP: &str = "8G";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AnalysisProgress {
+    pub stage: &'static str,
+    pub message: String,
+    // None deliberately means that Ghidra does not expose a trustworthy
+    // whole-program percentage for this part of the analysis.
+    pub completed_percent: Option<u8>,
+}
+
+pub fn emit_analysis_progress(
+    app: &AppHandle,
+    stage: &'static str,
+    message: impl Into<String>,
+    completed_percent: Option<u8>,
+) {
+    let _ = app.emit(
+        "analysis-progress",
+        AnalysisProgress {
+            stage,
+            message: message.into(),
+            completed_percent,
+        },
+    );
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadlessAnalysisInvocation {
@@ -154,6 +180,12 @@ pub fn run_headless_analysis(
     app: &AppHandle,
     binary_path: &Path,
 ) -> Result<(PathBuf, PathBuf, AnalysisSession), String> {
+    emit_analysis_progress(
+        app,
+        "prepare",
+        "Préparation du projet d’analyse local…",
+        Some(8),
+    );
     let (run_dir, project_name) = prepare_run_directory(app, binary_path)?;
 
     let destination_json = run_dir.join("export.json");
@@ -173,6 +205,12 @@ pub fn run_headless_analysis(
         .args(&invocation.args)
         .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);
     configure_java_environment(&mut command, installation);
+    emit_analysis_progress(
+        app,
+        "ghidra",
+        "Ghidra analyse le programme, ses fonctions et ses références…",
+        None,
+    );
     let output = command.output().map_err(|error| {
         format!(
             "failed to launch Ghidra headless analyzer '{}': {error}",
@@ -202,6 +240,13 @@ pub fn run_headless_analysis(
         ));
     }
 
+    emit_analysis_progress(
+        app,
+        "export",
+        "Analyse Ghidra terminée. Lecture des résultats exportés…",
+        Some(82),
+    );
+
     let session = AnalysisSession {
         project_dir: run_dir,
         project_name,
@@ -222,6 +267,12 @@ pub fn analyze_binary(
     ),
     String,
 > {
+    emit_analysis_progress(
+        app,
+        "validate",
+        "Vérification de Ghidra et du binaire sélectionné…",
+        Some(3),
+    );
     let install_dir = load_persisted_install_dir(app)?.ok_or_else(|| {
         "No Ghidra installation is configured. Configure one before analyzing a binary.".to_owned()
     })?;
@@ -238,8 +289,20 @@ pub fn analyze_binary(
     let (json_path, identifications_json_path, session) =
         run_headless_analysis(&installation, app, binary_path)?;
 
+    emit_analysis_progress(
+        app,
+        "import",
+        "Import et validation des métadonnées du programme…",
+        Some(87),
+    );
     let imported = import_ghidra_export(&json_path)?;
 
+    emit_analysis_progress(
+        app,
+        "identify",
+        "Chargement des correspondances FunctionID…",
+        Some(92),
+    );
     let identifications_json = fs::read_to_string(&identifications_json_path).map_err(|error| {
         format!(
             "failed to read FunctionID identification results '{}': {error}",

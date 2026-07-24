@@ -185,11 +185,24 @@ fn analyze_binary_with_ghidra(
         .map_err(|_| "the analysis session lock was poisoned".to_owned())? = Some(session.clone());
 
     store_export(&export_state, imported.export.clone())?;
+    ghidra_headless::emit_analysis_progress(
+        &app,
+        "save",
+        "Sauvegarde du projet et de ses résultats en local…",
+        Some(96),
+    );
     let saved_project = auto_save_project(
         &app,
         &imported.export,
         Some(session),
         Some(&identifications),
+    );
+
+    ghidra_headless::emit_analysis_progress(
+        &app,
+        "complete",
+        "Analyse terminée. Le projet est prêt.",
+        Some(100),
     );
 
     Ok(AutomaticAnalysisResult {
