@@ -4721,10 +4721,12 @@ interface ApplyRenamesResult {
                               <p class="arbitration-status">L'agent d'arbitrage réfléchit…</p>
                             {:else if currentResult}
                               {@const chosenName = currentResult.chosen_name}
+                              {@const chosenDisplayName = chosenName ? displayCandidateName(chosenName) : null}
+                              {@const chosenSafeName = chosenName ? (normalizedAutomaticSymbolName(chosenName) ?? chosenName) : null}
                               <div class="arbitration-result">
-                                {#if chosenName}
-                                  <strong>Choix de l'agent : {chosenName}</strong>
-                                  <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(chosenName)}>Utiliser ce nom</button>
+                                {#if chosenDisplayName && chosenSafeName}
+                                  <strong>Choix de l'agent : {chosenDisplayName}</strong>
+                                  <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(chosenSafeName)}>Utiliser ce nom ({chosenSafeName})</button>
                                 {:else}
                                   <strong>L'agent reste incertain</strong>
                                 {/if}
@@ -4742,7 +4744,16 @@ interface ApplyRenamesResult {
                             {/if}
                           </div>
                         {/if}
-                        {#each selectedIdentificationCandidates as candidate}
+                        <details
+                          class="fid-raw-candidates"
+                          open={!(selectedIdentificationTopTieCount > 1 && !!arbitrationResults.get(selectedFunction.entry_address)?.chosen_name)}
+                        >
+                          <summary>
+                            {selectedIdentificationTopTieCount > 1 && arbitrationResults.get(selectedFunction.entry_address)?.chosen_name
+                              ? `Voir les ${selectedIdentificationCandidates.length} candidats FunctionID bruts`
+                              : `${selectedIdentificationCandidates.length} candidat(s) FunctionID`}
+                          </summary>
+                          {#each selectedIdentificationCandidates as candidate}
                           {@const displayedName = displayCandidateName(candidate.name)}
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "function_id")}
                           {@const proposedName = automaticChoice && candidate.name === selectedIdentificationCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
@@ -4756,7 +4767,8 @@ interface ApplyRenamesResult {
                             </span>
                             <span><code>score {candidate.overall_score.toFixed(1)}</code><small>{candidate.match_mode}</small></span>
                           </button>
-                        {/each}
+                          {/each}
+                        </details>
                       </div>
                     {/if}
 
@@ -8973,6 +8985,10 @@ interface ApplyRenamesResult {
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
   .rtti-evidence-group h5 { color: #86efac; }
   .rtti-corroboration-badge { display: inline-block; margin-left: 0.4rem; padding: 0.12rem 0.4rem; border-radius: 4px; background: #123326; color: #86efac; font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+  .fid-raw-candidates > summary { margin-bottom: 0.4rem; color: #8192ad; font-size: 0.66rem; cursor: pointer; list-style: none; }
+  .fid-raw-candidates > summary::-webkit-details-marker { display: none; }
+  .fid-raw-candidates > summary::before { content: "▸ "; }
+  .fid-raw-candidates[open] > summary::before { content: "▾ "; }
   .rtti-shared-note { margin: 0 0 0.5rem; padding: 0.6rem 0.7rem; border: 1px solid #1f4a33; border-radius: 6px; background: #0c1f16; color: #cdeedb; font-size: 0.7rem; line-height: 1.5; }
 
   .arbitration-panel { display: grid; gap: 0.5rem; margin-bottom: 0.65rem; padding: 0.65rem; border: 1px dashed #2a3a54; border-radius: 6px; background: #0c1930; }
