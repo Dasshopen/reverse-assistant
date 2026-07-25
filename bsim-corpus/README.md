@@ -19,7 +19,8 @@ used to validate BSim end to end before deciding whether/how to scale it.
     once, deliberately, as the trust anchor for all future runs — not
     auto-recorded by the script.
 - `scripts/build-sqlite.ps1`, `scripts/build-zlib.ps1`,
-  `scripts/build-lz4.ps1`, `scripts/build-xxhash.ps1` — download the
+  `scripts/build-lz4.ps1`, `scripts/build-xxhash.ps1`,
+  `scripts/build-zstd.ps1`, `scripts/build-brotli.ps1` — download the
   official source (skipped if already present), verify its hash against
   `manifest.json`, and compile it as an x64 DLL **with debugging symbols
   kept, `/MD` (dynamic CRT)** using the locally installed Visual Studio
@@ -61,6 +62,8 @@ working hashes but weak or absent names.
 .\scripts\build-zlib.ps1
 .\scripts\build-lz4.ps1
 .\scripts\build-xxhash.ps1
+.\scripts\build-zstd.ps1
+.\scripts\build-brotli.ps1
 
 # 2. Analyze them and build the BSim database
 .\scripts\build-corpus-database.ps1 -GhidraInstallDir "C:\path\to\ghidra_12.x_PUBLIC"
@@ -74,11 +77,21 @@ This produces `build\reverse-assistant-seed.mv.db`.
 ## Current scope (deliberately narrow)
 
 One architecture (x64) and one compile profile (optimized, `/MD`, symbols
-kept), four high-value libraries (SQLite 3.53.3, zlib 1.3.2, LZ4 1.10.0,
-xxHash 0.8.3). This was validated end to
-end (`VerifyBsimQuery.java` confirmed real function names matching
-correctly) before any decision to expand to more libraries, architectures,
-or compile profiles — expand only after checking the pipeline still holds.
+kept), six high-value libraries (SQLite 3.53.3, zlib 1.3.2, LZ4 1.10.0,
+xxHash 0.8.3, Zstandard 1.5.7, Brotli 1.2.0). The original four were
+validated end to end (`VerifyBsimQuery.java` confirmed real function names
+matching correctly) before any decision to expand to more libraries,
+architectures, or compile profiles; zstd and brotli were added the same way
+and validated the same way — expand further only after checking the
+pipeline still holds.
+
+Brotli's hash-chain implementation is macro-templated into families of a
+dozen-plus near-identical functions per hash size (`HashTypeLengthH2`..
+`H68`, `StoreLookaheadH2`..`H68`, ...), which pushed enough same-executable
+near-duplicates into the ranking that `VerifyBsimQuery.java`'s match window
+(100) started crowding a function's own database record out entirely
+(confirmed: 70/1030 functions affected). Widened to 300 — see the comment
+by `MATCHES_PER_FUNC` in `VerifyBsimQuery.java`.
 
 ### VerifyBsimQuery.java: what it actually checks and known caveats
 

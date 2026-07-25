@@ -43,6 +43,28 @@
                           "license":  "BSD 2-Clause (library)",
                           "license_url":  "https://github.com/Cyan4973/xxHash/blob/v0.8.3/LICENSE",
                           "retrieved_date":  "2026-07-24"
+                      },
+                      {
+                          "name":  "zstd",
+                          "version":  "1.5.7",
+                          "source_url":  "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.zip",
+                          "archive_name":  "zstd-v1.5.7.zip",
+                          "sha256":  "7897bc5d620580d9b7cd3539c44b59d78f3657d33663fe97a145e07b4ebd69a4",
+                          "sha3_256":  null,
+                          "license":  "BSD 3-Clause",
+                          "license_url":  "https://github.com/facebook/zstd/blob/v1.5.7/LICENSE",
+                          "retrieved_date":  "2026-07-25"
+                      },
+                      {
+                          "name":  "brotli",
+                          "version":  "1.2.0",
+                          "source_url":  "https://github.com/google/brotli/archive/refs/tags/v1.2.0.zip",
+                          "archive_name":  "brotli-v1.2.0.zip",
+                          "sha256":  "391cdd24ba8839ca179ddebe860ae0950f72a2e8a38edfc5e8aadbc60b78f2be",
+                          "sha3_256":  null,
+                          "license":  "MIT",
+                          "license_url":  "https://github.com/google/brotli/blob/v1.2.0/LICENSE",
+                          "retrieved_date":  "2026-07-25"
                       }
                   ]
 }

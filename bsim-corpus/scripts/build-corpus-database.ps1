@@ -39,7 +39,9 @@ $libraries = @(
     @{ Name = "sqlite3"; Dll = Join-Path $corpusRoot "build\sqlite3-3.53.3-x64-release-syms\sqlite3.dll" },
     @{ Name = "zlib"; Dll = Join-Path $corpusRoot "build\zlib-1.3.2-x64-release-syms\zlib1.dll" },
     @{ Name = "lz4"; Dll = Join-Path $corpusRoot "build\lz4-1.10.0-x64-release-syms\lz4.dll" },
-    @{ Name = "xxhash"; Dll = Join-Path $corpusRoot "build\xxhash-0.8.3-x64-release-syms\xxhash.dll" }
+    @{ Name = "xxhash"; Dll = Join-Path $corpusRoot "build\xxhash-0.8.3-x64-release-syms\xxhash.dll" },
+    @{ Name = "zstd"; Dll = Join-Path $corpusRoot "build\zstd-1.5.7-x64-release-syms\zstd.dll" },
+    @{ Name = "brotli"; Dll = Join-Path $corpusRoot "build\brotli-1.2.0-x64-release-syms\brotli.dll" }
 )
 
 foreach ($library in $libraries) {

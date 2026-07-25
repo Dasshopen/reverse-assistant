@@ -37,8 +37,13 @@ public class VerifyBsimQuery extends GhidraScript {
 
     // Validation needs a deeper result window than the product UI: dozens of
     // byte-identical CRT/no-op stubs can tie at 1.0 and otherwise displace the
-    // reference executable's own entry from a small top-K.
-    private static final int MATCHES_PER_FUNC = 100;
+    // reference executable's own entry from a small top-K. brotli pushed this
+    // further still: its hash-chain implementation is macro-templated into
+    // families of a dozen-plus near-identical functions per hash size
+    // (HashTypeLengthH2..H68, StoreLookaheadH2..H68, ...), which at 100 could
+    // still crowd a function's own database record out of the window
+    // entirely (confirmed: 70/1030 functions missed their own record at 100).
+    private static final int MATCHES_PER_FUNC = 300;
     private static final int MATCHES_TO_PRINT = 3;
     private static final int FUNCTIONS_PER_BATCH = 25;
     private static final double SIMILARITY_BOUND = 0.5;
