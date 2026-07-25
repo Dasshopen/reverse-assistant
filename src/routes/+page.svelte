@@ -4619,8 +4619,14 @@ interface ApplyRenamesResult {
                           </button>
                         {:else}
                           <p class="rtti-shared-note">
-                            Cette fonction est réellement partagée par {selectedFunction.rtti_class_names.length} classes — le compilateur/l'éditeur de liens a fusionné leurs destructeurs, identiques au niveau machine : <strong>{selectedFunction.rtti_class_names.join(", ")}</strong>. Confirmé par les métadonnées RTTI du binaire, ce n'est pas une ambiguïté à résoudre.
+                            Cette fonction est réellement partagée par {selectedFunction.rtti_class_names.length} classes — le compilateur/l'éditeur de liens a fusionné leurs destructeurs, identiques au niveau machine. Confirmé par les métadonnées RTTI du binaire, ce n'est pas une ambiguïté à résoudre — choisis celle qui te semble la plus pertinente pour ce renommage :
                           </p>
+                          {#each selectedFunction.rtti_class_names as className}
+                            {@const rttiClassSuggestedName = normalizedAutomaticSymbolName(className) ?? className}
+                            <button type="button" class:selected={functionRenameDraft === rttiClassSuggestedName} onclick={() => selectFunctionRenameSuggestion(rttiClassSuggestedName)}>
+                              <span><strong>{className}</strong><small>Une des {selectedFunction.rtti_class_names.length} classes réelles confirmées pour cette fonction partagée</small></span>
+                            </button>
+                          {/each}
                         {/if}
                       </div>
                     {/if}
@@ -8889,8 +8895,7 @@ interface ApplyRenamesResult {
   .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
   .rtti-evidence-group h5 { color: #86efac; }
-  .rtti-shared-note { margin: 0; padding: 0.6rem 0.7rem; border: 1px solid #1f4a33; border-radius: 6px; background: #0c1f16; color: #cdeedb; font-size: 0.7rem; line-height: 1.5; }
-  .rtti-shared-note strong { color: #86efac; }
+  .rtti-shared-note { margin: 0 0 0.5rem; padding: 0.6rem 0.7rem; border: 1px solid #1f4a33; border-radius: 6px; background: #0c1f16; color: #cdeedb; font-size: 0.7rem; line-height: 1.5; }
 
   .arbitration-panel { display: grid; gap: 0.5rem; margin-bottom: 0.65rem; padding: 0.65rem; border: 1px dashed #2a3a54; border-radius: 6px; background: #0c1930; }
   .arbitration-result { display: grid; gap: 0.3rem; }
