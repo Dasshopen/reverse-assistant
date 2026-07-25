@@ -15,8 +15,18 @@
 // project (argument construction is tested; the actual external process
 // is not launched from committed tests).
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+// ureq's default agent has no request timeout at all -- a single stalled
+// call (a local model wedged, a dead connection) would hang forever and,
+// since the background arbitration queue awaits one call at a time, would
+// silently freeze every function still behind it in the queue too. A real
+// case: 6 functions arbitrated, then no further progress for as long as
+// the app stayed open, because call #7 never returned.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChatMessage {
@@ -103,7 +113,8 @@ impl ChatCompletionProvider for OpenAiCompatibleProvider {
         let url = self.endpoint_url();
         let body = build_request_body_json(request);
 
-        let mut call = ureq::post(&url).set("Content-Type", "application/json");
+        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
+        let mut call = agent.post(&url).set("Content-Type", "application/json");
         if let Some(api_key) = &self.api_key {
             call = call.set("Authorization", &format!("Bearer {api_key}"));
         }
