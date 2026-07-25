@@ -183,6 +183,16 @@ interface BsimCandidate {
   significance: number;
 }
 
+interface MergedBsimCandidate extends BsimCandidate {
+  // Every distinct reference executable in the corpus that independently
+  // matched this name at this address -- e.g. the same generic CRT
+  // helper found identically in sqlite3.dll, zlib1.dll, lz4.dll and
+  // xxhash.dll. Several unrelated libraries agreeing is itself
+  // corroborating evidence, distinct from (and stronger than) any single
+  // raw similarity/significance score.
+  matchingExecutables: string[];
+}
+
 interface BsimCorpusSummary {
   id: string;
   name: string;
@@ -822,6 +832,12 @@ interface ApplyRenamesResult {
   // Mirrors identification_corroboration::MINIMUM_CORROBORATING_REPETITIONS
   // (src-tauri/src/services/identification_corroboration.rs).
   const minimumCorroboratingRepetitions = 3;
+  // Several unrelated reference libraries independently agreeing on the
+  // exact same name at this address (e.g. a generic CRT helper found
+  // identically in sqlite3.dll, zlib1.dll, lz4.dll and xxhash.dll) is
+  // corroborating evidence a single raw similarity/significance score
+  // cannot express on its own.
+  const minimumCorroboratingBsimExecutables = 3;
 
   function isSafeAutomaticSymbolName(name: string): boolean {
     // The current Ghidra edit contract changes a symbol in its existing
@@ -918,25 +934,26 @@ interface ApplyRenamesResult {
     return [...bestByName.values()].sort((a, b) => b.overall_score - a.overall_score);
   }
 
-  function uniqueBsimCandidates(candidates: BsimCandidate[]): BsimCandidate[] {
-    const bestByName = new Map<string, BsimCandidate>();
+  function uniqueBsimCandidates(candidates: BsimCandidate[]): MergedBsimCandidate[] {
+    const bestByName = new Map<string, MergedBsimCandidate>();
     for (const candidate of candidates) {
       if (isGeneratedFunctionName(candidate.name)) continue;
       const previous = bestByName.get(candidate.name);
+      const matchingExecutables = previous
+        ? [...new Set([...previous.matchingExecutables, candidate.executable])]
+        : [candidate.executable];
+      const corpora = previous
+        ? [...new Set([...previous.corpus.split(" + "), candidate.corpus])].join(" + ")
+        : candidate.corpus;
+
       if (
         !previous ||
         candidate.similarity > previous.similarity ||
         (candidate.similarity === previous.similarity && candidate.significance > previous.significance)
       ) {
-        const corpora = previous
-          ? [...new Set([...previous.corpus.split(" + "), candidate.corpus])].join(" + ")
-          : candidate.corpus;
-        bestByName.set(candidate.name, { ...candidate, corpus: corpora });
-      } else if (previous && !previous.corpus.split(" + ").includes(candidate.corpus)) {
-        bestByName.set(candidate.name, {
-          ...previous,
-          corpus: `${previous.corpus} + ${candidate.corpus}`,
-        });
+        bestByName.set(candidate.name, { ...candidate, corpus: corpora, matchingExecutables });
+      } else {
+        bestByName.set(candidate.name, { ...previous, corpus: corpora, matchingExecutables });
       }
     }
     return [...bestByName.values()].sort(
@@ -944,7 +961,7 @@ interface ApplyRenamesResult {
     );
   }
 
-  function bsimMatchesForAddress(entryAddress: string): BsimCandidate[] {
+  function bsimMatchesForAddress(entryAddress: string): MergedBsimCandidate[] {
     const result = bsimResultForAddress(entryAddress);
     return result?.status === "available" ? uniqueBsimCandidates(result.matches) : [];
   }
@@ -1062,16 +1079,25 @@ interface ApplyRenamesResult {
         // (which penalises small/generic code) falls under the safety
         // threshold on its own -- see identification_corroboration.rs.
         const repetitionCount = bsimRepetitionCounts.get(bestBsim.name) ?? 0;
-        const rescuedByRepetition =
-          bestBsim.significance < automaticBsimMinimumSignificance &&
-          repetitionCount >= minimumCorroboratingRepetitions;
+        const corroboratedByRepetition = repetitionCount >= minimumCorroboratingRepetitions;
+        // Several unrelated reference libraries independently agreeing on
+        // the exact same name at this one address is a different, equally
+        // real signal -- e.g. a generic CRT helper found identically in
+        // sqlite3.dll, zlib1.dll, lz4.dll and xxhash.dll.
+        const corroboratedByCrossLibraryAgreement =
+          bestBsim.matchingExecutables.length >= minimumCorroboratingBsimExecutables;
+        const isCorroborated = corroboratedByRepetition || corroboratedByCrossLibraryAgreement;
+        const rescuedBySimilarity =
+          bestBsim.similarity < automaticBsimMinimumSimilarity && corroboratedByCrossLibraryAgreement;
+        const rescuedBySignificance =
+          bestBsim.significance < automaticBsimMinimumSignificance && isCorroborated;
         let reason = "";
         if (!normalizedBsimName) {
           reason = "Nom C++ impossible à nettoyer sans perdre son sens.";
-        } else if (bestBsim.similarity < automaticBsimMinimumSimilarity) {
+        } else if (bestBsim.similarity < automaticBsimMinimumSimilarity && !rescuedBySimilarity) {
           reason = `Similarité ${bestBsim.similarity.toFixed(3)} trop faible (minimum : ${automaticBsimMinimumSimilarity.toFixed(2)}).`;
-        } else if (bestBsim.significance < automaticBsimMinimumSignificance && !rescuedByRepetition) {
-          reason = `Significativité ${bestBsim.significance.toFixed(1)} trop faible (minimum : ${automaticBsimMinimumSignificance.toFixed(1)}) et ce nom n'apparaît pas ailleurs dans le binaire pour corroborer la correspondance.`;
+        } else if (bestBsim.significance < automaticBsimMinimumSignificance && !rescuedBySignificance) {
+          reason = `Significativité ${bestBsim.significance.toFixed(1)} trop faible (minimum : ${automaticBsimMinimumSignificance.toFixed(1)}) et ce nom n'apparaît pas ailleurs dans le binaire ni dans plusieurs bibliothèques du corpus pour corroborer la correspondance.`;
         } else if (margin !== null && margin < automaticBsimMinimumMargin) {
           reason = `Plusieurs noms BSim sont trop proches (marge ${margin.toFixed(3)}).`;
         }
@@ -1082,17 +1108,22 @@ interface ApplyRenamesResult {
             func.entry_address,
             reservedNames,
           );
+          const corroborationLabel = corroboratedByCrossLibraryAgreement
+            ? `confirmé par ${bestBsim.matchingExecutables.length} bibliothèques du corpus (${bestBsim.matchingExecutables.join(", ")})`
+            : corroboratedByRepetition
+            ? `même correspondance à ${repetitionCount} autres adresses de ce binaire`
+            : null;
           choices.push({
             func,
             name: safeName,
             source: "bsim",
             scoreLabel: `similarité ${bestBsim.similarity.toFixed(3)}`,
-            evidenceLabel: rescuedByRepetition
-              ? `${bestBsim.corpus} · ${bestBsim.executable} · même correspondance à ${repetitionCount} autres adresses de ce binaire`
+            evidenceLabel: corroborationLabel
+              ? `${bestBsim.corpus} · ${corroborationLabel}`
               : `${bestBsim.corpus} · ${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
             alternativeCount: Math.max(0, bsimCandidates.length - 1),
-            decisionLabel: rescuedByRepetition
-              ? `Corroboré par répétition (${repetitionCount} adresses identiques dans ce binaire)`
+            decisionLabel: corroborationLabel
+              ? `Corroboré : ${corroborationLabel}`
               : margin === null
               ? "Candidat unique au-dessus des seuils de sécurité"
               : `Marge de ${margin.toFixed(3)} sur le deuxième candidat`,
@@ -4579,13 +4610,25 @@ interface ApplyRenamesResult {
                     {/if}
 
                     {#if selectedBsimResult?.status === "available" && selectedBsimResult.matches.length > 0}
+                      {@const mergedBsimCandidates = uniqueBsimCandidates(selectedBsimResult.matches)}
                       <div class="evidence-source-group">
                         <h5>BSim</h5>
-                        {#each selectedBsimResult.matches as candidate}
+                        {#each mergedBsimCandidates as candidate}
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "bsim")}
-                          {@const proposedName = automaticChoice && candidate.name === selectedBsimResult.matches[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
+                          {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
                           <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
-                            <span><strong>{candidate.name}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.corpus} · {candidate.executable}</small></span>
+                            <span>
+                              <strong>{candidate.name}</strong>
+                              <small>Nom propre proposé : {proposedName}</small>
+                              <small>
+                                {candidate.corpus}
+                                {#if candidate.matchingExecutables.length > 1}
+                                  · confirmé par {candidate.matchingExecutables.length} bibliothèques ({candidate.matchingExecutables.join(", ")})
+                                {:else}
+                                  · {candidate.executable}
+                                {/if}
+                              </small>
+                            </span>
                             <span><code>{candidate.similarity.toFixed(3)}</code><small>significativité {candidate.significance.toFixed(1)}</small></span>
                           </button>
                         {/each}
@@ -5425,10 +5468,11 @@ interface ApplyRenamesResult {
                     {#if selectedBsimResult.matches.length === 0}
                       <p>No sufficiently similar function was found in the seed corpus.</p>
                     {:else}
+                      {@const mergedBsimCandidates = uniqueBsimCandidates(selectedBsimResult.matches)}
                       <ul>
-                        {#each selectedBsimResult.matches as candidate}
+                        {#each mergedBsimCandidates as candidate}
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction?.entry_address && choice.source === "bsim")}
-                          {@const proposedName = automaticChoice && candidate.name === selectedBsimResult.matches[0]?.name ? automaticChoice.name : candidate.name}
+                          {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : candidate.name}
                           <li
                             class="rename-suggestion-item"
                             class:selected={functionRenameDraft === proposedName}
@@ -5441,7 +5485,13 @@ interface ApplyRenamesResult {
                             >
                               <span>
                                 {candidate.name}
-                                <em>({candidate.corpus} · {candidate.executable})</em>
+                                <em>
+                                  {#if candidate.matchingExecutables.length > 1}
+                                    ({candidate.corpus} · confirmed by {candidate.matchingExecutables.length} libraries: {candidate.matchingExecutables.join(", ")})
+                                  {:else}
+                                    ({candidate.corpus} · {candidate.executable})
+                                  {/if}
+                                </em>
                               </span>
                               <code>
                                 similarity {candidate.similarity.toFixed(3)} · significance
