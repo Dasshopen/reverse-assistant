@@ -613,6 +613,16 @@ interface ApplyRenamesResult {
       (func) => !func.is_external && isGeneratedFunctionName(func.name),
     ) ?? [],
   );
+  // Every real class name confirmed anywhere in this binary via RTTI
+  // (see rtti_class_names), aggregated once so any function's tied FID/
+  // BSim candidates can be cross-referenced against it.
+  let knownRealClassNames = $derived.by(() => {
+    const names = new Set<string>();
+    for (const func of importedExport?.functions ?? []) {
+      for (const className of func.rtti_class_names) names.add(className);
+    }
+    return names;
+  });
   let arbitrationTiedTotal = $derived.by(() =>
     unidentifiedFunctions.filter((func) => tiedFidCandidatesFor(func.entry_address).length > 0)
       .length,
@@ -928,6 +938,33 @@ interface ApplyRenamesResult {
     return name;
   }
 
+  // Extracts "Namespace::ClassName" from a common MSVC mangled
+  // constructor (??0) or destructor (??1 / ??_G scalar deleting
+  // destructor) name -- the exact same real-name format RTTI
+  // TypeDescriptor data uses (see RttiClassCollector.java's
+  // demangleTypeDescriptorName on the Java side, which this must stay
+  // consistent with). Returns null for shapes not recognized here rather
+  // than guessing.
+  function extractClassNameFromMangledMember(name: string): string | null {
+    const match = name.match(/^\?\?(?:0|1|_G)([^@]+)@(.*?)@@/);
+    if (!match) return null;
+    const [, className, namespaceSegment] = match;
+    if (!namespaceSegment) return className;
+    const segments = namespaceSegment.split("@").filter(Boolean);
+    segments.reverse();
+    return [...segments, className].join("::");
+  }
+
+  // Whether a raw FID/BSim candidate name corresponds to a class
+  // independently confirmed to exist somewhere else in this exact binary
+  // via RTTI -- a real signal a researcher would use to discount FID's
+  // fuzzy-matched candidates from libraries this binary shows no other
+  // trace of using, without fabricating any new evidence.
+  function isCorroboratedByRtti(candidateName: string, knownClassNames: Set<string>): boolean {
+    const realName = extractClassNameFromMangledMember(candidateName) ?? candidateName;
+    return knownClassNames.has(realName);
+  }
+
   function uniqueFidCandidates(candidates: FidCandidate[]): FidCandidate[] {
     const bestByName = new Map<string, FidCandidate>();
     for (const candidate of candidates) {
@@ -1055,13 +1092,27 @@ interface ApplyRenamesResult {
             return fidName !== null && fidName.toLowerCase() === bsimName.toLowerCase();
           })
         : undefined;
-      const selectedFid = corroboratedFid ?? bestFid;
+      // Among candidates tied at the top FID score, narrow to whichever
+      // are independently confirmed elsewhere in this binary via RTTI --
+      // the same reasoning wired into the arbitration agent
+      // (tiedFidCandidatesFor), applied here too so it benefits functions
+      // that never even reach arbitration.
+      const topFidScore = bestFid?.overall_score;
+      const tiedFid = topFidScore === undefined
+        ? []
+        : fidCandidates.filter((candidate) => Math.abs(candidate.overall_score - topFidScore) < 0.0001);
+      const rttiCorroboratedFid = tiedFid.length > 1
+        ? tiedFid.filter((candidate) => isCorroboratedByRtti(candidate.name, knownRealClassNames))
+        : [];
+      const rttiNarrowedFid = rttiCorroboratedFid.length === 1 ? rttiCorroboratedFid[0] : undefined;
+      const selectedFid = corroboratedFid ?? rttiNarrowedFid ?? bestFid;
       let fidRejection: AutomaticRenameRejection | null = null;
 
       if (selectedFid) {
         const runnerUp = fidCandidates.find((candidate) => candidate.name !== selectedFid.name);
         const margin = runnerUp ? selectedFid.overall_score - runnerUp.overall_score : null;
-        const isAmbiguous = corroboratedFid === undefined && margin !== null && margin < automaticFidMinimumMargin;
+        const isAmbiguous = corroboratedFid === undefined && rttiNarrowedFid === undefined &&
+          margin !== null && margin < automaticFidMinimumMargin;
         const normalizedName = normalizedAutomaticSymbolName(selectedFid.name);
         let reason = "";
         if (!normalizedName) {
@@ -1083,10 +1134,14 @@ interface ApplyRenamesResult {
             scoreLabel: `score ${selectedFid.overall_score.toFixed(1)}`,
             evidenceLabel: corroboratedFid && bestBsim
               ? `${selectedFid.library_family} ${selectedFid.library_version} · confirmé par ${bestBsim.corpus} (BSim ${bestBsim.similarity.toFixed(3)})`
+              : rttiNarrowedFid
+              ? `${selectedFid.library_family} ${selectedFid.library_version} · seul candidat parmi ${tiedFid.length} confirmé par RTTI ailleurs dans ce binaire`
               : `${selectedFid.library_family} ${selectedFid.library_version} · ${selectedFid.match_mode}`,
             alternativeCount: Math.max(0, fidCandidates.length - 1),
             decisionLabel: corroboratedFid
               ? "FunctionID et BSim proposent le même nom"
+              : rttiNarrowedFid
+              ? `${tiedFid.length} noms ex æquo, mais un seul confirmé ailleurs dans ce binaire via RTTI`
               : isAmbiguous
               ? `${fidCandidates.length} noms ex æquo : premier choix FunctionID nettoyé, ambiguïté conservée`
               : margin === null
@@ -2622,9 +2677,23 @@ interface ApplyRenamesResult {
     );
     if (tied.length < 2) return [];
 
-    return tied.map((candidate) => ({
+    // A researcher wouldn't weigh all tied candidates equally: narrow to
+    // whichever are independently confirmed to exist somewhere else in
+    // this exact binary via RTTI, discounting FID's fuzzy-matched noise
+    // from libraries this binary shows no other trace of using. Only
+    // narrows when that leaves a strictly smaller, non-empty set --
+    // otherwise the full tied set is used, unchanged.
+    const corroborated = tied.filter((candidate) =>
+      isCorroboratedByRtti(candidate.name, knownRealClassNames),
+    );
+    const isNarrowed = corroborated.length > 0 && corroborated.length < tied.length;
+    const narrowed = isNarrowed ? corroborated : tied;
+
+    return narrowed.map((candidate) => ({
       name: candidate.name,
-      source_label: `FunctionID (${candidate.library_family} ${candidate.library_version})`,
+      source_label: isNarrowed
+        ? `FunctionID (${candidate.library_family} ${candidate.library_version}) — corroboré par RTTI ailleurs dans ce binaire`
+        : `FunctionID (${candidate.library_family} ${candidate.library_version})`,
     }));
   }
 
@@ -4677,8 +4746,14 @@ interface ApplyRenamesResult {
                           {@const displayedName = displayCandidateName(candidate.name)}
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "function_id")}
                           {@const proposedName = automaticChoice && candidate.name === selectedIdentificationCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
+                          {@const corroborated = isCorroboratedByRtti(candidate.name, knownRealClassNames)}
                           <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
-                            <span><strong>{displayedName}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small></span>
+                            <span>
+                              <strong>{displayedName}</strong>
+                              {#if corroborated}<span class="rtti-corroboration-badge">confirmé par RTTI ailleurs</span>{/if}
+                              <small>Nom propre proposé : {proposedName}</small>
+                              <small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small>
+                            </span>
                             <span><code>score {candidate.overall_score.toFixed(1)}</code><small>{candidate.match_mode}</small></span>
                           </button>
                         {/each}
@@ -5510,6 +5585,7 @@ interface ApplyRenamesResult {
                       {@const displayedName = displayCandidateName(candidate.name)}
                       {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction?.entry_address && choice.source === "function_id")}
                       {@const proposedName = automaticChoice && candidate.name === selectedIdentificationCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
+                      {@const corroborated = isCorroboratedByRtti(candidate.name, knownRealClassNames)}
                       <li
                         class="rename-suggestion-item"
                         class:selected={functionRenameDraft === proposedName}
@@ -5522,6 +5598,7 @@ interface ApplyRenamesResult {
                         >
                           <span>
                             {displayedName}
+                            {#if corroborated}<span class="rtti-corroboration-badge">confirmé par RTTI ailleurs</span>{/if}
                             <small>Nom propre proposé : {proposedName}</small>
                             <em>
                               ({candidate.library_family} {candidate.library_version}
@@ -8895,6 +8972,7 @@ interface ApplyRenamesResult {
   .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
   .rtti-evidence-group h5 { color: #86efac; }
+  .rtti-corroboration-badge { display: inline-block; margin-left: 0.4rem; padding: 0.12rem 0.4rem; border-radius: 4px; background: #123326; color: #86efac; font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
   .rtti-shared-note { margin: 0 0 0.5rem; padding: 0.6rem 0.7rem; border: 1px solid #1f4a33; border-radius: 6px; background: #0c1f16; color: #cdeedb; font-size: 0.7rem; line-height: 1.5; }
 
   .arbitration-panel { display: grid; gap: 0.5rem; margin-bottom: 0.65rem; padding: 0.65rem; border: 1px dashed #2a3a54; border-radius: 6px; background: #0c1930; }
