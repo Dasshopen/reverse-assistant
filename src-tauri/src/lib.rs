@@ -572,6 +572,26 @@ fn disassemble_function(
         .run_exclusive(|| ghidra_disassemble::disassemble_function(&app, &session, &entry_address))
 }
 
+#[tauri::command(async)]
+fn disassemble_functions(
+    app: AppHandle,
+    session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
+    decompile_coordinator: tauri::State<'_, DecompileCoordinator>,
+    entry_addresses: Vec<String>,
+) -> Result<FunctionDisassembly, String> {
+    let session = session_state
+        .lock()
+        .map_err(|_| "the analysis session lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| {
+            "No Ghidra analysis session is active. Analyze a binary before requesting a disassembly listing.".to_owned()
+        })?;
+
+    decompile_coordinator.run_exclusive(|| {
+        ghidra_disassemble::disassemble_functions(&app, &session, &entry_addresses)
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -598,6 +618,7 @@ pub fn run() {
             scan_project_with_bsim,
             decompile_function,
             disassemble_function,
+            disassemble_functions,
             get_call_graph,
             get_global_strings,
             get_imports,

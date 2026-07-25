@@ -47,6 +47,9 @@ public final class DisassemblyResultJsonWriter {
                 );
             }
 
+            instructionObject.addProperty("function_address", instruction.functionAddress());
+            instructionObject.addProperty("function_name", instruction.functionName());
+
             instructionsArray.add(instructionObject);
         }
 

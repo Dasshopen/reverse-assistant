@@ -15,7 +15,13 @@ public record DisassembledInstructionMetadata(
     String mnemonic,
     String operands,
     String flowCategory,
-    String fallThroughAddress
+    String fallThroughAddress,
+    // Which function this instruction belongs to -- constant across every
+    // instruction of a single-function request, but what makes a
+    // multi-function (whole-program-page) listing renderable as one
+    // continuous, function-grouped table on the Rust/Svelte side.
+    String functionAddress,
+    String functionName
 ) {
 
     private static final Pattern ADDRESS_PATTERN =
@@ -29,6 +35,8 @@ public record DisassembledInstructionMetadata(
         Objects.requireNonNull(mnemonic, "mnemonic must not be null");
         Objects.requireNonNull(operands, "operands must not be null");
         Objects.requireNonNull(flowCategory, "flowCategory must not be null");
+        Objects.requireNonNull(functionAddress, "functionAddress must not be null");
+        Objects.requireNonNull(functionName, "functionName must not be null");
 
         if (!ADDRESS_PATTERN.matcher(address).matches()) {
             throw new IllegalArgumentException(
@@ -46,6 +54,12 @@ public record DisassembledInstructionMetadata(
             !ADDRESS_PATTERN.matcher(fallThroughAddress).matches()) {
             throw new IllegalArgumentException(
                 "fallThroughAddress must use the format 0x followed by lowercase hexadecimal digits"
+            );
+        }
+
+        if (!ADDRESS_PATTERN.matcher(functionAddress).matches()) {
+            throw new IllegalArgumentException(
+                "functionAddress must use the format 0x followed by lowercase hexadecimal digits"
             );
         }
     }

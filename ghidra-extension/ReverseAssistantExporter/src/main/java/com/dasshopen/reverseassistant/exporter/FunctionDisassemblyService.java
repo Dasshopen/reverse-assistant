@@ -18,11 +18,15 @@ import ghidra.program.model.symbol.FlowType;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
-// On-demand per-instruction disassembly for a single function -- the
-// "Listing" half of a Ghidra-CodeBrowser-style view. Mirrors
-// DecompileFunctionService's shape (same on-demand invocation pattern from
-// the Rust side), but this never touches the decompiler and never queries
-// BSim; it only reads Ghidra's existing Listing.
+// On-demand per-instruction disassembly -- the "Listing" half of a
+// Ghidra-CodeBrowser-style view. Mirrors DecompileFunctionService's shape
+// (same on-demand invocation pattern from the Rust side), but this never
+// touches the decompiler and never queries BSim; it only reads Ghidra's
+// existing Listing. Supports either one function (the Code Browser's
+// per-function view) or an explicit ordered list of functions (a bounded
+// page of a "whole program" listing) -- never the whole program in one
+// call, since that produced 250k+ instructions on a real large DLL in
+// testing and would make for an unusably large single response.
 public final class FunctionDisassemblyService {
 
     private final DisassemblyResultJsonWriter jsonWriter;
@@ -39,26 +43,40 @@ public final class FunctionDisassemblyService {
         Path destination,
         TaskMonitor monitor
     ) throws IOException, CancelledException, MemoryAccessException {
+        disassembleManyAndWrite(program, List.of(entryAddress), destination, monitor);
+    }
+
+    public void disassembleManyAndWrite(
+        Program program,
+        List<Address> entryAddresses,
+        Path destination,
+        TaskMonitor monitor
+    ) throws IOException, CancelledException, MemoryAccessException {
         Objects.requireNonNull(program, "program must not be null");
-        Objects.requireNonNull(entryAddress, "entryAddress must not be null");
+        Objects.requireNonNull(entryAddresses, "entryAddresses must not be null");
         Objects.requireNonNull(destination, "destination must not be null");
         Objects.requireNonNull(monitor, "monitor must not be null");
 
-        Function function =
-            program.getFunctionManager().getFunctionAt(entryAddress);
+        List<DisassembledInstructionMetadata> instructions = new ArrayList<>();
 
-        if (function == null) {
-            throw new IllegalArgumentException(
-                "no function exists at address " + entryAddress
-            );
+        for (Address entryAddress : entryAddresses) {
+            monitor.checkCancelled();
+
+            Function function =
+                program.getFunctionManager().getFunctionAt(entryAddress);
+
+            if (function == null) {
+                throw new IllegalArgumentException(
+                    "no function exists at address " + entryAddress
+                );
+            }
+
+            instructions.addAll(collectInstructions(program, function, monitor));
         }
-
-        List<DisassembledInstructionMetadata> instructions =
-            collectInstructions(program, function, monitor);
 
         fileWriter.write(
             destination,
-            jsonWriter.write(instructions)
+            jsonWriter.write(List.copyOf(instructions))
         );
     }
 
@@ -71,20 +89,26 @@ public final class FunctionDisassemblyService {
         AddressSetView body = function.getBody();
         InstructionIterator iterator = listing.getInstructions(body, true);
 
+        String functionAddress = formatAddress(function.getEntryPoint());
+        String functionName = function.getName();
+
         List<DisassembledInstructionMetadata> instructions = new ArrayList<>();
 
         while (iterator.hasNext()) {
             monitor.checkCancelled();
 
             Instruction instruction = iterator.next();
-            instructions.add(toMetadata(instruction));
+            instructions.add(toMetadata(instruction, functionAddress, functionName));
         }
 
         return List.copyOf(instructions);
     }
 
-    private static DisassembledInstructionMetadata toMetadata(Instruction instruction)
-        throws MemoryAccessException {
+    private static DisassembledInstructionMetadata toMetadata(
+        Instruction instruction,
+        String functionAddress,
+        String functionName
+    ) throws MemoryAccessException {
         return new DisassembledInstructionMetadata(
             formatAddress(instruction.getAddress()),
             instruction.getLength(),
@@ -94,7 +118,9 @@ public final class FunctionDisassemblyService {
             categorizeFlow(instruction.getFlowType()),
             instruction.getFallThrough() == null
                 ? null
-                : formatAddress(instruction.getFallThrough())
+                : formatAddress(instruction.getFallThrough()),
+            functionAddress,
+            functionName
         );
     }
 

@@ -167,6 +167,8 @@ interface DisassembledInstruction {
   operands: string;
   flow_category: InstructionFlowCategory;
   fall_through_address: string | null;
+  function_address: string;
+  function_name: string;
 }
 
 interface FunctionDisassembly {
@@ -462,6 +464,48 @@ interface ApplyRenamesResult {
   let pendingDisassemblies = $state(new Set<string>());
   let disassemblyErrors = $state(new Map<string, string>());
   let browserSymbolsCollapsed = $state(false);
+
+  // "Programme entier" mode: a bounded, paginated, function-grouped listing
+  // of every internal function's disassembly, as an alternative to viewing
+  // one function at a time. Deliberately paged server-side (one Ghidra
+  // request per page of functions) rather than fetched all at once -- a
+  // real ~3,300-function DLL produced 250k+ instructions in testing, far
+  // too much for one response or one renderable table.
+  type CodeBrowserListingMode = "function" | "program";
+  let codeBrowserListingMode = $state<CodeBrowserListingMode>("function");
+  let programListingPage = $state(1);
+  const programListingPageSize = 20;
+  let programListingCache = $state(new Map<number, DisassembledInstruction[]>());
+  let isLoadingProgramListingPage = $state(false);
+  let programListingError = $state("");
+  let programListingProgramSha: string | null = null;
+
+  // Only internal functions have a disassemblable body; external imports
+  // have none. Already sorted by ascending entry address per the export
+  // contract, so paging through this in order reads like Ghidra's own
+  // address-ordered Listing.
+  let programListingFunctions = $derived(
+    importedExport?.functions.filter((func) => !func.is_external) ?? [],
+  );
+
+  let programListingPageCount = $derived(
+    Math.max(1, Math.ceil(programListingFunctions.length / programListingPageSize)),
+  );
+
+  let currentProgramListingPage = $derived(
+    Math.min(programListingPage, programListingPageCount),
+  );
+
+  let paginatedProgramListingFunctions = $derived(
+    programListingFunctions.slice(
+      (currentProgramListingPage - 1) * programListingPageSize,
+      currentProgramListingPage * programListingPageSize,
+    ),
+  );
+
+  let currentProgramListingInstructions = $derived(
+    programListingCache.get(currentProgramListingPage) ?? null,
+  );
 
   // Ghidra has no single dedicated "program entry point" API -- confirmed by
   // checking a real ELF's bookmarks, external-entry-point order, and
@@ -2133,6 +2177,33 @@ interface ApplyRenamesResult {
   });
 
   $effect(() => {
+    const currentProgramSha = importedExport?.program.sha256 ?? null;
+    if (currentProgramSha !== programListingProgramSha) {
+      programListingProgramSha = currentProgramSha;
+      programListingPage = 1;
+      programListingCache = new Map();
+      programListingError = "";
+    }
+  });
+
+  $effect(() => {
+    if (
+      activeWorkspaceView !== "browser" ||
+      codeBrowserListingMode !== "program" ||
+      analysisSource !== "automatic"
+    )
+      return;
+
+    const page = currentProgramListingPage;
+    if (programListingCache.has(page) || isLoadingProgramListingPage) return;
+
+    const addresses = paginatedProgramListingFunctions.map((func) => func.entry_address);
+    if (addresses.length === 0) return;
+
+    requestProgramListingPage(page, addresses);
+  });
+
+  $effect(() => {
     const address = selectedFunctionAddress;
     const direction = callGraphDirection;
     const depth = callGraphDepth;
@@ -2228,6 +2299,26 @@ interface ApplyRenamesResult {
       const remainingDisassemblies = new Set(pendingDisassemblies);
       remainingDisassemblies.delete(entryAddress);
       pendingDisassemblies = remainingDisassemblies;
+    }
+  }
+
+  async function requestProgramListingPage(page: number, entryAddresses: string[]) {
+    isLoadingProgramListingPage = true;
+    programListingError = "";
+
+    try {
+      const disassembly = await invoke<FunctionDisassembly>("disassemble_functions", {
+        entryAddresses,
+      });
+
+      programListingCache = new Map(programListingCache).set(
+        page,
+        disassembly.instructions,
+      );
+    } catch (error) {
+      programListingError = String(error);
+    } finally {
+      isLoadingProgramListingPage = false;
     }
   }
 
@@ -4328,49 +4419,137 @@ interface ApplyRenamesResult {
           {/if}
 
           <div class="code-browser-listing">
-            <p class="detail-label">
-              Désassemblage{#if selectedFunction} — {selectedFunction.name}{/if}
-            </p>
-
-            {#if !selectedFunction}
-              <p>Sélectionne une fonction dans la liste.</p>
-            {:else if selectedFunction.is_external}
-              <p>Fonction externe — pas de désassemblage local disponible.</p>
-            {:else if isDisassemblingSelected}
-              <p>Désassemblage en cours…</p>
-            {:else if selectedDisassemblyError}
-              <p class="error" role="alert">{selectedDisassemblyError}</p>
-            {:else if selectedDisassembly}
-              <div class="code-browser-listing-scroll">
-                <table class="disasm-table">
-                  <tbody>
-                    {#each selectedDisassembly.instructions as instruction (instruction.address)}
-                      {@const target = disasmTarget(instruction)}
-                      <tr class={`flow-${instruction.flow_category}`}>
-                        <td><code>{instruction.address}</code></td>
-                        <td><code class="disasm-bytes">{instruction.bytes}</code></td>
-                        <td class="disasm-mnemonic">{instruction.mnemonic}</td>
-                        <td class="disasm-operands">
-                          {#if target}
-                            <button
-                              type="button"
-                              class="disasm-jump-target"
-                              title={`Ouvrir ${target.name} (${target.address}) et afficher son pseudocode`}
-                              onclick={() => openInBrowser(target.address)}
-                            >
-                              {target.name}
-                            </button>
-                          {:else}
-                            {instruction.operands}
-                          {/if}
-                        </td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
+            <div class="code-browser-listing-heading">
+              <p class="detail-label">
+                Désassemblage{#if codeBrowserListingMode === "function" && selectedFunction} — {selectedFunction.name}{/if}
+              </p>
+              <div class="code-browser-listing-mode">
+                <button
+                  type="button"
+                  class:active={codeBrowserListingMode === "function"}
+                  onclick={() => (codeBrowserListingMode = "function")}
+                >
+                  Fonction sélectionnée
+                </button>
+                <button
+                  type="button"
+                  class:active={codeBrowserListingMode === "program"}
+                  onclick={() => (codeBrowserListingMode = "program")}
+                >
+                  Programme entier
+                </button>
               </div>
+            </div>
+
+            {#if codeBrowserListingMode === "function"}
+              {#if !selectedFunction}
+                <p>Sélectionne une fonction dans la liste.</p>
+              {:else if selectedFunction.is_external}
+                <p>Fonction externe — pas de désassemblage local disponible.</p>
+              {:else if isDisassemblingSelected}
+                <p>Désassemblage en cours…</p>
+              {:else if selectedDisassemblyError}
+                <p class="error" role="alert">{selectedDisassemblyError}</p>
+              {:else if selectedDisassembly}
+                <div class="code-browser-listing-scroll">
+                  <table class="disasm-table">
+                    <tbody>
+                      {#each selectedDisassembly.instructions as instruction (instruction.address)}
+                        {@const target = disasmTarget(instruction)}
+                        <tr class={`flow-${instruction.flow_category}`}>
+                          <td><code>{instruction.address}</code></td>
+                          <td><code class="disasm-bytes">{instruction.bytes}</code></td>
+                          <td class="disasm-mnemonic">{instruction.mnemonic}</td>
+                          <td class="disasm-operands">
+                            {#if target}
+                              <button
+                                type="button"
+                                class="disasm-jump-target"
+                                title={`Ouvrir ${target.name} (${target.address}) et afficher son pseudocode`}
+                                onclick={() => openInBrowser(target.address)}
+                              >
+                                {target.name}
+                              </button>
+                            {:else}
+                              {instruction.operands}
+                            {/if}
+                          </td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {:else}
+                <p>Aucun désassemblage disponible pour cette fonction.</p>
+              {/if}
             {:else}
-              <p>Aucun désassemblage disponible pour cette fonction.</p>
+              <div class="code-browser-pagination">
+                <button
+                  type="button"
+                  disabled={currentProgramListingPage <= 1}
+                  onclick={() => (programListingPage = currentProgramListingPage - 1)}
+                >‹</button>
+                <span>
+                  Page {currentProgramListingPage} / {programListingPageCount}
+                  ({programListingFunctions.length} fonctions internes)
+                </span>
+                <button
+                  type="button"
+                  disabled={currentProgramListingPage >= programListingPageCount}
+                  onclick={() => (programListingPage = currentProgramListingPage + 1)}
+                >›</button>
+              </div>
+
+              {#if isLoadingProgramListingPage}
+                <p>Désassemblage de la page en cours…</p>
+              {:else if programListingError}
+                <p class="error" role="alert">{programListingError}</p>
+              {:else if currentProgramListingInstructions}
+                <div class="code-browser-listing-scroll">
+                  <table class="disasm-table">
+                    <tbody>
+                      {#each currentProgramListingInstructions as instruction, index (instruction.function_address + instruction.address)}
+                        {@const target = disasmTarget(instruction)}
+                        {@const previous = currentProgramListingInstructions[index - 1]}
+                        {#if !previous || previous.function_address !== instruction.function_address}
+                          <tr class="disasm-function-header">
+                            <td colspan="4">
+                              <button
+                                type="button"
+                                onclick={() => openInBrowser(instruction.function_address)}
+                              >
+                                {instruction.function_name}
+                              </button>
+                              <code>{instruction.function_address}</code>
+                            </td>
+                          </tr>
+                        {/if}
+                        <tr class={`flow-${instruction.flow_category}`}>
+                          <td><code>{instruction.address}</code></td>
+                          <td><code class="disasm-bytes">{instruction.bytes}</code></td>
+                          <td class="disasm-mnemonic">{instruction.mnemonic}</td>
+                          <td class="disasm-operands">
+                            {#if target}
+                              <button
+                                type="button"
+                                class="disasm-jump-target"
+                                title={`Ouvrir ${target.name} (${target.address}) et afficher son pseudocode`}
+                                onclick={() => openInBrowser(target.address)}
+                              >
+                                {target.name}
+                              </button>
+                            {:else}
+                              {instruction.operands}
+                            {/if}
+                          </td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {:else}
+                <p>Aucun désassemblage disponible.</p>
+              {/if}
             {/if}
           </div>
 
@@ -6583,16 +6762,67 @@ interface ApplyRenamesResult {
 
   .code-browser-listing {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
     min-width: 0;
     min-height: 0;
     padding: 0.7rem;
     border-right: 1px solid #1e2c42;
   }
 
+  .code-browser-listing-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .code-browser-listing-mode {
+    display: flex;
+    gap: 0.2rem;
+  }
+
+  .code-browser-listing-mode button {
+    padding: 0.3rem 0.55rem;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: #8292ad;
+    font-size: 0.66rem;
+    font-weight: 600;
+  }
+
+  .code-browser-listing-mode button:hover:not(.active),
+  .code-browser-listing-mode button.active {
+    background: rgb(124 58 237 / 12%);
+    color: #e9e3ff;
+  }
+
   .code-browser-listing-scroll {
     min-width: 0;
     overflow: auto;
+  }
+
+  .disasm-function-header td {
+    padding-top: 0.5rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid #263349;
+    background: #0e192a;
+  }
+
+  .disasm-function-header button {
+    padding: 0;
+    background: transparent;
+    color: #a78bfa;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  .disasm-function-header code {
+    margin-left: 0.5rem;
+    color: #6c7793;
+    font-size: 0.66rem;
   }
 
   .disasm-table {
