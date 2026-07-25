@@ -196,6 +196,15 @@ interface BsimCorpusSummary {
   removable: boolean;
 }
 
+interface AiProviderSummary {
+  id: string;
+  label: string;
+  base_url: string;
+  model: string;
+  has_api_key: boolean;
+  enabled: boolean;
+}
+
 interface BsimQueryResult {
   status: "available" | "unavailable" | "error";
   matches: BsimCandidate[];
@@ -633,6 +642,13 @@ interface ApplyRenamesResult {
   let bsimCorpora = $state<BsimCorpusSummary[]>([]);
   let bsimCorporaError = $state("");
   let isManagingBsimCorpus = $state(false);
+  let aiProviders = $state<AiProviderSummary[]>([]);
+  let aiProvidersError = $state("");
+  let isManagingAiProvider = $state(false);
+  let newAiProviderLabel = $state("");
+  let newAiProviderBaseUrl = $state("");
+  let newAiProviderApiKey = $state("");
+  let newAiProviderModel = $state("");
   let ghidraConfigError = $state("");
   let isConfiguringGhidra = $state(false);
   let analyzeError = $state("");
@@ -2814,6 +2830,68 @@ interface ApplyRenamesResult {
     }
   }
 
+  async function loadAiProviders() {
+    aiProvidersError = "";
+    try {
+      aiProviders = await invoke<AiProviderSummary[]>("list_ai_providers");
+    } catch (error) {
+      aiProviders = [];
+      aiProvidersError = String(error);
+    }
+  }
+
+  async function addAiProvider() {
+    if (isManagingAiProvider) return;
+    aiProvidersError = "";
+    isManagingAiProvider = true;
+    try {
+      await invoke("add_ai_provider", {
+        label: newAiProviderLabel,
+        baseUrl: newAiProviderBaseUrl,
+        apiKey: newAiProviderApiKey.trim().length > 0 ? newAiProviderApiKey : null,
+        model: newAiProviderModel,
+      });
+      newAiProviderLabel = "";
+      newAiProviderBaseUrl = "";
+      newAiProviderApiKey = "";
+      newAiProviderModel = "";
+      await loadAiProviders();
+    } catch (error) {
+      aiProvidersError = String(error);
+    } finally {
+      isManagingAiProvider = false;
+    }
+  }
+
+  async function toggleAiProvider(provider: AiProviderSummary) {
+    if (isManagingAiProvider) return;
+    isManagingAiProvider = true;
+    aiProvidersError = "";
+    try {
+      await invoke("set_ai_provider_enabled", { id: provider.id, enabled: !provider.enabled });
+      await loadAiProviders();
+    } catch (error) {
+      aiProvidersError = String(error);
+    } finally {
+      isManagingAiProvider = false;
+    }
+  }
+
+  async function deleteAiProvider(provider: AiProviderSummary) {
+    if (isManagingAiProvider) return;
+    if (!confirm(`Supprimer le fournisseur « ${provider.label} » ? Sa clé, si elle existe, sera effacée localement.`)) return;
+    isManagingAiProvider = true;
+    aiProvidersError = "";
+    try {
+      await invoke("remove_ai_provider", { id: provider.id });
+      await loadAiProviders();
+    } catch (error) {
+      aiProvidersError = String(error);
+    } finally {
+      isManagingAiProvider = false;
+    }
+  }
+
   function formatFileSize(size: number | null) {
     if (size === null) return "taille inconnue";
     if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} Ko`;
@@ -2821,7 +2899,12 @@ interface ApplyRenamesResult {
   }
 
   async function refreshEnvironmentConfiguration() {
-    await Promise.all([loadGhidraInstallationStatus(), loadSetupOverview(), loadBsimCorpora()]);
+    await Promise.all([
+      loadGhidraInstallationStatus(),
+      loadSetupOverview(),
+      loadBsimCorpora(),
+      loadAiProviders(),
+    ]);
   }
 
   async function selectGhidraInstallDir() {
@@ -3560,6 +3643,45 @@ interface ApplyRenamesResult {
           <p><strong>Bibliothèque personnelle :</strong> choisis directement une DLL, un ELF ou un autre binaire. Ghidra l’analyse localement et construit sa base de signatures. L’import <code>.mv.db</code> reste disponible pour les corpus BSim déjà préparés.</p>
         </footer>
         {#if bsimCorporaError}<p class="settings-inline-error" role="alert">{bsimCorporaError}</p>{/if}
+      </section>
+
+      <section class="settings-section ai-providers-card">
+        <header>
+          <div>
+            <h3>Fournisseurs IA</h3>
+            <p>Un ou plusieurs fournisseurs peuvent être configurés en même temps — local (ex. Ollama), API distante (OpenAI, Mistral…), ou tout autre serveur compatible.</p>
+          </div>
+        </header>
+        <div class="ai-provider-list">
+          {#each aiProviders as provider (provider.id)}
+            <article class:disabled={!provider.enabled}>
+              <div class="ai-provider-state" class:active={provider.enabled}></div>
+              <div class="ai-provider-copy">
+                <div class="ai-provider-heading">
+                  <strong>{provider.label}</strong>
+                  <small>{provider.model}</small>
+                </div>
+                <code>{provider.base_url}</code>
+                <span class="ai-provider-key-state">{provider.has_api_key ? "Clé API configurée" : "Sans clé (local)"}</span>
+              </div>
+              <div class="ai-provider-actions">
+                <b class:ready={provider.enabled}>{provider.enabled ? "Actif" : "Désactivé"}</b>
+                <button type="button" class="secondary-button" disabled={isManagingAiProvider} onclick={() => toggleAiProvider(provider)}>{provider.enabled ? "Désactiver" : "Activer"}</button>
+                <button type="button" class="danger-button" disabled={isManagingAiProvider} onclick={() => deleteAiProvider(provider)}>Supprimer</button>
+              </div>
+            </article>
+          {:else}
+            <p class="ai-provider-empty">Aucun fournisseur IA n’est configuré — les agents IA resteront inactifs tant qu’aucun n’est ajouté.</p>
+          {/each}
+        </div>
+        <form class="ai-provider-form" onsubmit={(event) => { event.preventDefault(); addAiProvider(); }}>
+          <input type="text" placeholder="Nom (ex. OpenAI, Ollama local)" bind:value={newAiProviderLabel} required />
+          <input type="text" placeholder="Adresse (ex. https://api.openai.com/v1 ou http://localhost:11434/v1)" bind:value={newAiProviderBaseUrl} required />
+          <input type="text" placeholder="Modèle (ex. gpt-4o-mini, llama3.1)" bind:value={newAiProviderModel} required />
+          <input type="password" placeholder="Clé API (laisser vide pour un modèle local)" bind:value={newAiProviderApiKey} />
+          <button type="submit" disabled={isManagingAiProvider}>{isManagingAiProvider ? "Ajout…" : "+ Ajouter"}</button>
+        </form>
+        {#if aiProvidersError}<p class="settings-inline-error" role="alert">{aiProvidersError}</p>{/if}
       </section>
 
       <details class="settings-section settings-advanced">
@@ -5709,6 +5831,26 @@ interface ApplyRenamesResult {
   .bsim-corpus-empty { margin: 0; color: #71829d; font-size: 0.68rem; line-height: 1.45; }
   .bsim-corpus-empty { padding: 1rem; }
 
+  .ai-provider-list { display: grid; }
+  .ai-provider-list article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 0.85rem; padding: 0.9rem 0.95rem; border-bottom: 1px solid #1e2d43; }
+  .ai-provider-list article:last-child { border-bottom: 0; }
+  .ai-provider-list article.disabled { opacity: 0.68; }
+  .ai-provider-state { width: 11px; height: 11px; margin-top: 0.25rem; border-radius: 50%; background: #64748b; }
+  .ai-provider-state.active { background: #22c55e; box-shadow: 0 0 9px rgb(34 197 94 / 45%); }
+  .ai-provider-copy { display: grid; min-width: 0; gap: 0.35rem; }
+  .ai-provider-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+  .ai-provider-heading strong { color: #e5edf8; font-size: 0.86rem; }
+  .ai-provider-heading small { color: #71829d; font-size: 0.65rem; }
+  .ai-provider-copy code { overflow: hidden; color: #7596b8; font-size: 0.64rem; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-provider-key-state { color: #8192ad; font-size: 0.7rem; }
+  .ai-provider-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 0.4rem; max-width: 260px; }
+  .ai-provider-actions b { padding: 0.25rem 0.45rem; border-radius: 4px; background: #312033; color: #fda4af; font-size: 0.62rem; }
+  .ai-provider-actions b.ready { background: #123326; color: #86efac; }
+  .ai-provider-actions button { padding: 0.4rem 0.58rem; font-size: 0.65rem; }
+  .ai-provider-empty { margin: 0; padding: 1rem; color: #71829d; font-size: 0.68rem; line-height: 1.45; }
+  .ai-provider-form { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr auto; gap: 0.5rem; padding: 0.9rem 0.95rem; border-top: 1px solid #223149; background: #0a1423; }
+  .ai-provider-form input { min-width: 0; padding: 0.5rem 0.6rem; border: 1px solid #223149; border-radius: 6px; background: #0f1c30; color: #e5edf8; font-size: 0.72rem; }
+
   .settings-advanced > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.82rem 0.95rem; cursor: pointer; list-style: none; }
   .settings-advanced > summary::-webkit-details-marker { display: none; }
   .settings-advanced > summary h3 { margin: 0; font-size: 0.92rem; }
@@ -5740,6 +5882,9 @@ interface ApplyRenamesResult {
     .settings-advanced-content > article { border-right: 0; border-bottom: 1px solid #1e2d43; }
     .bsim-corpus-list article { grid-template-columns: auto minmax(0, 1fr); }
     .bsim-corpus-actions { grid-column: 2; justify-content: flex-start; max-width: none; }
+    .ai-provider-list article { grid-template-columns: auto minmax(0, 1fr); }
+    .ai-provider-actions { grid-column: 2; justify-content: flex-start; max-width: none; }
+    .ai-provider-form { grid-template-columns: 1fr; }
   }
 
   @media (min-width: 981px) and (max-width: 1400px) {

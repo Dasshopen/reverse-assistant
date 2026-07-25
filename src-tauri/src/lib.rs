@@ -10,6 +10,7 @@ use models::ghidra_identification::FunctionIdentification;
 use models::ghidra_installation::GhidraInstallation;
 use models::ghidra_session::AnalysisSession;
 use models::project::ProjectMetadata;
+use services::ai_providers::{self, AiProviderSummary};
 use services::bsim_corpus::{self, BsimCorpusSummary};
 use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
 use services::comparison::{self, ProjectComparison};
@@ -178,6 +179,32 @@ fn set_bsim_corpus_enabled(app: AppHandle, id: String, enabled: bool) -> Result<
 #[tauri::command]
 fn remove_bsim_corpus(app: AppHandle, id: String) -> Result<(), String> {
     bsim_corpus::remove_custom_corpus(&app, &id)
+}
+
+#[tauri::command]
+fn list_ai_providers(app: AppHandle) -> Result<Vec<AiProviderSummary>, String> {
+    ai_providers::list_providers_for_app(&app)
+}
+
+#[tauri::command]
+fn add_ai_provider(
+    app: AppHandle,
+    label: String,
+    base_url: String,
+    api_key: Option<String>,
+    model: String,
+) -> Result<AiProviderSummary, String> {
+    ai_providers::add_provider_for_app(&app, &label, &base_url, api_key, &model)
+}
+
+#[tauri::command]
+fn set_ai_provider_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
+    ai_providers::set_provider_enabled_for_app(&app, &id, enabled)
+}
+
+#[tauri::command]
+fn remove_ai_provider(app: AppHandle, id: String) -> Result<(), String> {
+    ai_providers::remove_provider_for_app(&app, &id)
 }
 
 #[tauri::command]
@@ -619,6 +646,10 @@ pub fn run() {
             add_bsim_reference_library,
             set_bsim_corpus_enabled,
             remove_bsim_corpus,
+            list_ai_providers,
+            add_ai_provider,
+            set_ai_provider_enabled,
+            remove_ai_provider,
             get_managed_setup_plan,
             install_managed_setup,
             adopt_existing_ghidra,

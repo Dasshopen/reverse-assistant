@@ -1,4 +1,5 @@
 pub mod ai_provider;
+pub mod ai_providers;
 pub mod bsim_corpus;
 pub mod call_graph;
 pub mod comparison;
