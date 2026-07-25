@@ -215,7 +215,7 @@ struct ArbitrationCandidateInput {
     source_label: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct ArbitrationOutcome {
     chosen_name: Option<String>,
     reasoning: String,
@@ -281,6 +281,42 @@ fn arbitrate_identification_tie(
         reasoning: result.reasoning,
         provider_label: provider_secrets.label,
     })
+}
+
+// Persisted alongside the project (see StoredArbitrationOutcome) so a real
+// AI answer is never re-spent on a reopen: without this, every restart
+// would re-run every pending tied function through the arbitration agent
+// again from scratch.
+#[tauri::command]
+fn save_arbitration_result(
+    app: AppHandle,
+    project_id: String,
+    entry_address: String,
+    outcome: ArbitrationOutcome,
+) -> Result<(), String> {
+    let mut results = project_storage::load_project_arbitration(&app, &project_id)?;
+    let stored = naming_arbitration::StoredArbitrationOutcome {
+        entry_address: entry_address.clone(),
+        chosen_name: outcome.chosen_name,
+        reasoning: outcome.reasoning,
+        provider_label: outcome.provider_label,
+    };
+    match results
+        .iter_mut()
+        .find(|existing| existing.entry_address == entry_address)
+    {
+        Some(existing) => *existing = stored,
+        None => results.push(stored),
+    }
+    project_storage::replace_project_arbitration(&app, &project_id, &results)
+}
+
+#[tauri::command]
+fn get_arbitration_results(
+    app: AppHandle,
+    project_id: String,
+) -> Result<Vec<naming_arbitration::StoredArbitrationOutcome>, String> {
+    project_storage::load_project_arbitration(&app, &project_id)
 }
 
 #[tauri::command]
@@ -727,6 +763,8 @@ pub fn run() {
             set_ai_provider_enabled,
             remove_ai_provider,
             arbitrate_identification_tie,
+            save_arbitration_result,
+            get_arbitration_results,
             get_managed_setup_plan,
             install_managed_setup,
             adopt_existing_ghidra,

@@ -213,6 +213,10 @@ interface ArbitrationOutcome {
   provider_label: string;
 }
 
+interface StoredArbitrationOutcome extends ArbitrationOutcome {
+  entry_address: string;
+}
+
 interface AiProviderSummary {
   id: string;
   label: string;
@@ -2059,6 +2063,29 @@ interface ApplyRenamesResult {
 
       importedExport = loaded.export;
       selectedFunctionAddress = initialFunctionAddress(loaded.export);
+      // Restore any arbitration answers already spent in a previous
+      // session *before* installing evidence -- runBackgroundArbitration
+      // (triggered from within installIdentificationEvidence) skips any
+      // address already present here, so a real AI call is never re-spent
+      // on a tie that was already resolved.
+      try {
+        const storedArbitration = await invoke<StoredArbitrationOutcome[]>(
+          "get_arbitration_results",
+          { projectId: id },
+        );
+        arbitrationResults = new Map(
+          storedArbitration.map((stored) => [
+            stored.entry_address,
+            {
+              chosen_name: stored.chosen_name,
+              reasoning: stored.reasoning,
+              provider_label: stored.provider_label,
+            },
+          ]),
+        );
+      } catch (error) {
+        console.error("Failed to load stored arbitration results", error);
+      }
       installIdentificationEvidence(loaded.identifications ?? []);
       functionIdAnalysisAvailable = loaded.identifications !== null;
       // A currently-available session (Ghidra project files genuinely
@@ -2800,6 +2827,15 @@ interface ApplyRenamesResult {
         candidates,
       });
       arbitrationResults = new Map(arbitrationResults).set(entryAddress, result);
+      // Best-effort: a real AI answer must never be re-spent on a reopen.
+      // A failure to persist it doesn't affect this session (it's already
+      // in arbitrationResults above), only whether it survives a restart.
+      if (activeProjectId) {
+        const projectId = activeProjectId;
+        void invoke("save_arbitration_result", { projectId, entryAddress, outcome: result }).catch(
+          (error) => console.error("Failed to persist the arbitration result", error),
+        );
+      }
     } catch (error) {
       arbitrationErrors = new Map(arbitrationErrors).set(entryAddress, String(error));
     } finally {

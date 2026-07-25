@@ -10,11 +10,24 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::models::ghidra_export::{GhidraExport, GhidraFunction};
 use crate::services::ai_provider::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
 use crate::services::call_graph;
+
+/// A confident (or explicitly "incertain") arbitration answer, persisted
+/// alongside the project so it survives an app restart. Without this, every
+/// reopen would re-run every pending tied function through a real AI call
+/// again -- wasted cost, and a worse experience than just picking up where
+/// arbitration left off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredArbitrationOutcome {
+    pub entry_address: String,
+    pub chosen_name: Option<String>,
+    pub reasoning: String,
+    pub provider_label: String,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArbitrationCandidate {
