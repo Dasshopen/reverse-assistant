@@ -380,6 +380,7 @@ mod tests {
             library: None,
             thunk_target_address: None,
             namespace: namespace.map(str::to_owned),
+            rtti_class_names: Vec::new(),
         }
     }
 

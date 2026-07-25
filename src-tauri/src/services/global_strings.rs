@@ -88,6 +88,7 @@ mod tests {
             library: None,
             thunk_target_address: None,
             namespace: None,
+            rtti_class_names: Vec::new(),
         }
     }
 

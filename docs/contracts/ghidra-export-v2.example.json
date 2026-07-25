@@ -44,7 +44,8 @@
             ],
             "library": null,
             "thunk_target_address": null,
-            "namespace": null
+            "namespace": null,
+            "rtti_class_names": []
         },
         {
             "entry_address": "0x140002000",
@@ -57,7 +58,8 @@
             "calls": [],
             "library": "MSVCRT.DLL",
             "thunk_target_address": null,
-            "namespace": "MSVCRT.DLL"
+            "namespace": "MSVCRT.DLL",
+            "rtti_class_names": []
         }
     ],
     "strings": [

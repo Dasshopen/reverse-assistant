@@ -199,6 +199,12 @@ public final class GhidraExportJsonWriter {
             function.addProperty("namespace", metadata.namespace());
         }
 
+        JsonArray rttiClassNames = new JsonArray();
+        for (String className : metadata.rttiClassNames()) {
+            rttiClassNames.add(className);
+        }
+        function.add("rtti_class_names", rttiClassNames);
+
         return function;
     }
 

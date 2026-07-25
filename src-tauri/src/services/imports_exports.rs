@@ -82,6 +82,7 @@ mod tests {
             library: library.map(str::to_owned),
             thunk_target_address: None,
             namespace: None,
+            rtti_class_names: Vec::new(),
         }
     }
 

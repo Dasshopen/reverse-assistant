@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -49,6 +50,9 @@ public final class FunctionMetadataCollector {
 
         functions.sort(createFunctionComparator());
 
+        Map<String, List<String>> rttiClassNamesByAddress =
+            RttiClassCollector.collectClassNamesByFunctionAddress(program, monitor);
+
         monitor.initialize(
             functions.size(),
             "Exporting function metadata"
@@ -67,7 +71,7 @@ public final class FunctionMetadataCollector {
             );
 
             FunctionMetadata metadata =
-                collectFunction(function);
+                collectFunction(function, rttiClassNamesByAddress);
 
             if (!entryAddresses.add(metadata.entryAddress())) {
                 throw new IllegalStateException(
@@ -125,7 +129,8 @@ public final class FunctionMetadataCollector {
     }
 
     private static FunctionMetadata collectFunction(
-        Function function
+        Function function,
+        Map<String, List<String>> rttiClassNamesByAddress
     ) {
         // Decompiling every function during bulk export was the dominant cost of
         // headless analysis. Pseudocode is decompiled on demand instead, via
@@ -141,7 +146,8 @@ public final class FunctionMetadataCollector {
             collectCalls(function),
             collectLibraryName(function),
             collectThunkTargetAddress(function),
-            collectNamespace(function)
+            collectNamespace(function),
+            rttiClassNamesByAddress.getOrDefault(formatAddress(function), List.of())
         );
     }
 

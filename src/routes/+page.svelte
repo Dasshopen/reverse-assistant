@@ -62,6 +62,7 @@ interface GhidraFunction {
   library: string | null;
   thunk_target_address: string | null;
   namespace: string | null;
+  rtti_class_names: string[];
 }
 
 interface GhidraExport {
@@ -247,7 +248,7 @@ interface FunctionIdentification {
 interface AutomaticRenameChoice {
   func: GhidraFunction;
   name: string;
-  source: "function_id" | "bsim";
+  source: "rtti" | "function_id" | "bsim";
   scoreLabel: string;
   evidenceLabel: string;
   alternativeCount: number;
@@ -259,7 +260,7 @@ interface AutomaticRenameRejection {
   func: GhidraFunction;
   candidateName: string;
   candidateDisplayName: string;
-  source: "function_id" | "bsim";
+  source: "rtti" | "function_id" | "bsim";
   evidenceLabel: string;
   reason: string;
 }
@@ -900,6 +901,11 @@ interface ApplyRenamesResult {
     return chosenName;
   }
 
+  function identificationSourceLabel(source: "rtti" | "function_id" | "bsim"): string {
+    if (source === "rtti") return "RTTI";
+    return source === "function_id" ? "FunctionID" : "BSim";
+  }
+
   function displayCandidateName(name: string): string {
     // Display-only decoding for common MSVC constructors/destructors. This is
     // never written back because correct C++ application also needs namespace
@@ -999,6 +1005,39 @@ interface ApplyRenamesResult {
     );
 
     for (const func of unidentifiedFunctions) {
+      // Ground truth from the binary's own MSVC RTTI metadata (vtable ->
+      // RTTICompleteObjectLocator -> TypeDescriptor) takes priority over
+      // FID/BSim's fuzzy signature matching -- it is a verified fact about
+      // this exact binary, never a guess.
+      if (func.rtti_class_names.length === 1) {
+        const normalizedName = normalizedAutomaticSymbolName(func.rtti_class_names[0]);
+        if (normalizedName) {
+          const safeName = reserveUniqueAutomaticName(normalizedName, func.entry_address, reservedNames);
+          choices.push({
+            func,
+            name: safeName,
+            source: "rtti",
+            scoreLabel: "RTTI",
+            evidenceLabel: `Classe confirmée par les métadonnées RTTI du binaire : ${func.rtti_class_names[0]}`,
+            alternativeCount: 0,
+            decisionLabel: "Confirmé par RTTI — donnée réelle du binaire, pas une estimation",
+            ambiguous: false,
+          });
+          continue;
+        }
+      }
+      if (func.rtti_class_names.length > 1) {
+        rejections.push({
+          func,
+          candidateName: func.rtti_class_names.join(" / "),
+          candidateDisplayName: func.rtti_class_names.join(" / "),
+          source: "rtti",
+          evidenceLabel: `${func.rtti_class_names.length} classes confirmées par RTTI : ${func.rtti_class_names.join(", ")}`,
+          reason: "Cette fonction est réellement partagée par plusieurs classes (le compilateur/l'éditeur de liens a fusionné leurs destructeurs, identiques au niveau machine) — confirmé par les métadonnées RTTI du binaire, ce n'est pas une ambiguïté à résoudre.",
+        });
+        continue;
+      }
+
       const fidCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? []);
       const bestFid = fidCandidates[0];
       const bsim = bsimResultForAddress(func.entry_address);
@@ -2564,6 +2603,16 @@ interface ApplyRenamesResult {
   }
 
   function tiedFidCandidatesFor(entryAddress: string): { name: string; source_label: string }[] {
+    // RTTI already gives the real, verified answer for this function --
+    // either one confirmed class name (auto-resolved directly) or the
+    // real set of classes the compiler/linker folded together (a fact,
+    // not an ambiguity to resolve). Either way, arbitration has nothing to
+    // add and would just spend a real API call on an already-known answer.
+    const rttiClassNames = importedExport?.functions.find(
+      (candidate) => candidate.entry_address === entryAddress,
+    )?.rtti_class_names;
+    if (rttiClassNames && rttiClassNames.length > 0) return [];
+
     const candidates = uniqueFidCandidates(identifications.get(entryAddress) ?? []);
     const topScore = candidates[0]?.overall_score;
     if (topScore === undefined) return [];
@@ -4444,7 +4493,7 @@ interface ApplyRenamesResult {
                     <tr>
                       <td><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></td>
                       <td>{item.name}</td>
-                      <td><span>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small><small class="automatic-decision-reason">✓ {item.decisionLabel}</small></td>
+                      <td><span>{identificationSourceLabel(item.source)} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small><small class="automatic-decision-reason">✓ {item.decisionLabel}</small></td>
                       <td>{item.alternativeCount === 0 ? "Aucun" : `${item.alternativeCount} moins bien classé(s)`}</td>
                     </tr>
                   {/each}
@@ -4472,7 +4521,7 @@ interface ApplyRenamesResult {
                   <article>
                     <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
                     <div><span>{item.candidateDisplayName}</span>{#if item.candidateName && item.candidateDisplayName !== item.candidateName}<code title="Nom brut FunctionID">{item.candidateName}</code>{/if}</div>
-                    <div><small>{item.source === "function_id" ? "FunctionID" : "BSim"} · {item.evidenceLabel}</small><b>{item.reason}</b></div>
+                    <div><small>{identificationSourceLabel(item.source)} · {item.evidenceLabel}</small><b>{item.reason}</b></div>
                     <button type="button" onclick={() => reviewIdentificationFunction(item.func.entry_address)}>Vérifier manuellement</button>
                   </article>
                 {/each}
@@ -4559,6 +4608,22 @@ interface ApplyRenamesResult {
                 <div class="identification-review-grid">
                   <section class="identification-evidence">
                     <div class="review-section-heading"><h4>Propositions et preuves</h4><span>Clique sur une proposition pour la choisir</span></div>
+
+                    {#if selectedFunction.rtti_class_names.length > 0}
+                      {@const rttiSuggestedName = normalizedAutomaticSymbolName(selectedFunction.rtti_class_names[0]) ?? selectedFunction.rtti_class_names[0]}
+                      <div class="evidence-source-group rtti-evidence-group">
+                        <h5>RTTI (confirmé par le binaire)</h5>
+                        {#if selectedFunction.rtti_class_names.length === 1}
+                          <button type="button" class:selected={functionRenameDraft === rttiSuggestedName} onclick={() => selectFunctionRenameSuggestion(rttiSuggestedName)}>
+                            <span><strong>{selectedFunction.rtti_class_names[0]}</strong><small>Classe réelle confirmée par les métadonnées RTTI du binaire (vtable → TypeDescriptor)</small></span>
+                          </button>
+                        {:else}
+                          <p class="rtti-shared-note">
+                            Cette fonction est réellement partagée par {selectedFunction.rtti_class_names.length} classes — le compilateur/l'éditeur de liens a fusionné leurs destructeurs, identiques au niveau machine : <strong>{selectedFunction.rtti_class_names.join(", ")}</strong>. Confirmé par les métadonnées RTTI du binaire, ce n'est pas une ambiguïté à résoudre.
+                          </p>
+                        {/if}
+                      </div>
+                    {/if}
 
                     {#if selectedIdentificationCandidates.length > 0}
                       <div class="evidence-source-group">
@@ -8818,6 +8883,9 @@ interface ApplyRenamesResult {
   .evidence-source-group button > span { display: grid; min-width: 0; gap: 0.12rem; }
   .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+  .rtti-evidence-group h5 { color: #86efac; }
+  .rtti-shared-note { margin: 0; padding: 0.6rem 0.7rem; border: 1px solid #1f4a33; border-radius: 6px; background: #0c1f16; color: #cdeedb; font-size: 0.7rem; line-height: 1.5; }
+  .rtti-shared-note strong { color: #86efac; }
 
   .arbitration-panel { display: grid; gap: 0.5rem; margin-bottom: 0.65rem; padding: 0.65rem; border: 1px dashed #2a3a54; border-radius: 6px; background: #0c1930; }
   .arbitration-result { display: grid; gap: 0.3rem; }

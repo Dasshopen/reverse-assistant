@@ -583,6 +583,59 @@ fn older_v2_export_without_namespace_remains_compatible() {
 }
 
 #[test]
+fn older_v2_export_without_rtti_class_names_remains_compatible() {
+    let mut json_value: serde_json::Value =
+        serde_json::from_str(V2_EXAMPLE_JSON).expect("the example JSON should be valid");
+
+    for function in json_value["functions"]
+        .as_array_mut()
+        .expect("functions should be an array")
+    {
+        function
+            .as_object_mut()
+            .expect("each function should be an object")
+            .remove("rtti_class_names");
+    }
+
+    let older_v2_json =
+        serde_json::to_string(&json_value).expect("the modified JSON should serialize");
+    let export = GhidraExport::parse_and_validate(&older_v2_json)
+        .expect("a pre-RTTI v2 export should remain readable");
+
+    assert!(export
+        .functions
+        .iter()
+        .all(|function| function.rtti_class_names.is_empty()));
+}
+
+#[test]
+fn a_function_with_multiple_folded_rtti_classes_keeps_every_real_name() {
+    let mut json_value: serde_json::Value =
+        serde_json::from_str(V2_EXAMPLE_JSON).expect("the example JSON should be valid");
+
+    json_value["functions"][0]["rtti_class_names"] = serde_json::json!([
+        "std::exception",
+        "std::bad_alloc",
+        "std::bad_array_new_length",
+        "std::bad_exception"
+    ]);
+
+    let json = serde_json::to_string(&json_value).expect("the modified JSON should serialize");
+    let export = GhidraExport::parse_and_validate(&json)
+        .expect("multiple real RTTI class names should be accepted");
+
+    assert_eq!(
+        export.functions[0].rtti_class_names,
+        vec![
+            "std::exception",
+            "std::bad_alloc",
+            "std::bad_array_new_length",
+            "std::bad_exception",
+        ]
+    );
+}
+
+#[test]
 fn missing_target_address_is_rejected() {
     let mut json_value: serde_json::Value =
         serde_json::from_str(V2_EXAMPLE_JSON).expect("the example JSON should be valid");

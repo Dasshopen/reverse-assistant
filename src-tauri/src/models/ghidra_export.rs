@@ -386,6 +386,8 @@ impl From<RawExportV1> for GhidraExport {
                     thunk_target_address: None,
                     // v1 never captured a function's parent namespace.
                     namespace: None,
+                    // v1 never captured RTTI class references.
+                    rtti_class_names: Vec::new(),
                 })
                 .collect(),
             strings: Vec::new(),
@@ -502,6 +504,10 @@ struct RawFunctionV2 {
     // remain reopenable after upgrading the application.
     #[serde(default)]
     namespace: Option<String>,
+    // Added after schema v2 was already used for local snapshots -- see
+    // the `namespace` field above for why `#[serde(default)]` matters here.
+    #[serde(default)]
+    rtti_class_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -566,6 +572,7 @@ impl From<RawExportV2> for GhidraExport {
                     library: raw_function.library,
                     thunk_target_address: raw_function.thunk_target_address,
                     namespace: raw_function.namespace,
+                    rtti_class_names: raw_function.rtti_class_names,
                 }
             })
             .collect();
@@ -735,6 +742,16 @@ pub struct GhidraFunction {
     // matching between two analyses.
     #[serde(default)]
     pub namespace: Option<String>,
+    // Real C++ class name(s) recovered from the binary's own MSVC RTTI
+    // metadata (vtable -> RTTICompleteObjectLocator -> TypeDescriptor),
+    // for functions a class's vtable references -- never guessed. Several
+    // names mean the compiler/linker folded multiple classes' trivial
+    // destructors into one byte-identical function; that is a real,
+    // verified fact about the binary, not an unresolved ambiguity. Empty
+    // when the function has no vtable reference or the binary has no RTTI
+    // (non-MSVC, or RTTI disabled).
+    #[serde(default)]
+    pub rtti_class_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

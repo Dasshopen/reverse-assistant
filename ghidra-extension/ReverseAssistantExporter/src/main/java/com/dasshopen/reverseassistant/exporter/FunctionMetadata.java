@@ -15,7 +15,8 @@ public record FunctionMetadata(
     List<FunctionCallMetadata> calls,
     String libraryName,
     String thunkTargetAddress,
-    String namespace
+    String namespace,
+    List<String> rttiClassNames
 ) {
 
     private static final Pattern ADDRESS_PATTERN =
@@ -42,6 +43,10 @@ public record FunctionMetadata(
             calls,
             "calls must not be null"
         );
+        Objects.requireNonNull(
+            rttiClassNames,
+            "rttiClassNames must not be null"
+        );
 
         if (!ADDRESS_PATTERN.matcher(entryAddress).matches()) {
             throw new IllegalArgumentException(
@@ -60,5 +65,6 @@ public record FunctionMetadata(
 
         parameters = List.copyOf(parameters);
         calls = List.copyOf(calls);
+        rttiClassNames = List.copyOf(rttiClassNames);
     }
 }
