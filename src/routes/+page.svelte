@@ -602,6 +602,19 @@ interface ApplyRenamesResult {
       (func) => !func.is_external && isGeneratedFunctionName(func.name),
     ) ?? [],
   );
+  let arbitrationTiedTotal = $derived.by(() =>
+    unidentifiedFunctions.filter((func) => tiedFidCandidatesFor(func.entry_address).length > 0)
+      .length,
+  );
+  let arbitrationTiedResolved = $derived.by(
+    () =>
+      unidentifiedFunctions.filter(
+        (func) =>
+          tiedFidCandidatesFor(func.entry_address).length > 0 &&
+          (arbitrationResults.has(func.entry_address) ||
+            arbitrationErrors.has(func.entry_address)),
+      ).length,
+  );
   let remainingIdentificationFunctions = $derived(
     unidentifiedFunctions.filter(
       (func) => !ignoredIdentificationAddresses.has(func.entry_address),
@@ -790,9 +803,13 @@ interface ApplyRenamesResult {
   let functionRenameError = $state("");
   let functionRenameSuccess = $state("");
   let renameDraftAddress: string | null = null;
-  let isArbitrating = $state(false);
-  let arbitrationError = $state("");
-  let arbitrationResult = $state<ArbitrationOutcome | null>(null);
+  // Per-address, not per-selection: arbitration runs automatically in the
+  // background across every tied function (see runBackgroundArbitration),
+  // so results must survive switching which function is selected.
+  let arbitrationResults = $state(new Map<string, ArbitrationOutcome>());
+  let arbitrationErrors = $state(new Map<string, string>());
+  let arbitratingAddresses = $state(new Set<string>());
+  let isBackgroundArbitrating = $state(false);
 
   // Ghidra's bundled FunctionID databases already discard matches below
   // 14.6. Keep that native threshold, then add the more important unique-name
@@ -1700,9 +1717,6 @@ interface ApplyRenamesResult {
     functionRenameError = "";
     functionRenameSuccess = "";
     activeDetailTab = "overview";
-    isArbitrating = false;
-    arbitrationError = "";
-    arbitrationResult = null;
   });
 
   $effect(() => {
@@ -1795,6 +1809,7 @@ interface ApplyRenamesResult {
         ]),
     );
     void refreshBsimRepetitionCorroboration(items);
+    void runBackgroundArbitration();
   }
 
   async function refreshBsimRepetitionCorroboration(items: FunctionIdentification[]) {
@@ -2517,31 +2532,78 @@ interface ApplyRenamesResult {
     functionRenameSuccess = "";
   }
 
-  async function requestArbitration() {
-    if (!selectedFunction || isArbitrating) return;
-    const topScore = selectedIdentificationCandidates[0]?.overall_score;
-    if (topScore === undefined) return;
+  function tiedFidCandidatesFor(entryAddress: string): { name: string; source_label: string }[] {
+    const candidates = uniqueFidCandidates(identifications.get(entryAddress) ?? []);
+    const topScore = candidates[0]?.overall_score;
+    if (topScore === undefined) return [];
 
-    const tiedCandidates = selectedIdentificationCandidates
-      .filter((candidate) => Math.abs(candidate.overall_score - topScore) < 0.0001)
-      .map((candidate) => ({
-        name: candidate.name,
-        source_label: `FunctionID (${candidate.library_family} ${candidate.library_version})`,
-      }));
-    if (tiedCandidates.length === 0) return;
+    const tied = candidates.filter(
+      (candidate) => Math.abs(candidate.overall_score - topScore) < 0.0001,
+    );
+    if (tied.length < 2) return [];
 
-    isArbitrating = true;
-    arbitrationError = "";
-    arbitrationResult = null;
+    return tied.map((candidate) => ({
+      name: candidate.name,
+      source_label: `FunctionID (${candidate.library_family} ${candidate.library_version})`,
+    }));
+  }
+
+  async function arbitrateFunction(entryAddress: string): Promise<void> {
+    const candidates = tiedFidCandidatesFor(entryAddress);
+    if (candidates.length === 0) return;
+
+    arbitratingAddresses = new Set(arbitratingAddresses).add(entryAddress);
+    const errorsWithoutThisAddress = new Map(arbitrationErrors);
+    errorsWithoutThisAddress.delete(entryAddress);
+    arbitrationErrors = errorsWithoutThisAddress;
+
     try {
-      arbitrationResult = await invoke<ArbitrationOutcome>("arbitrate_identification_tie", {
-        entryAddress: selectedFunction.entry_address,
-        candidates: tiedCandidates,
+      const result = await invoke<ArbitrationOutcome>("arbitrate_identification_tie", {
+        entryAddress,
+        candidates,
       });
+      arbitrationResults = new Map(arbitrationResults).set(entryAddress, result);
     } catch (error) {
-      arbitrationError = String(error);
+      arbitrationErrors = new Map(arbitrationErrors).set(entryAddress, String(error));
     } finally {
-      isArbitrating = false;
+      const remaining = new Set(arbitratingAddresses);
+      remaining.delete(entryAddress);
+      arbitratingAddresses = remaining;
+    }
+  }
+
+  async function requestArbitration() {
+    if (!selectedFunction) return;
+    await arbitrateFunction(selectedFunction.entry_address);
+  }
+
+  // Runs automatically once an AI provider is enabled -- one call at a
+  // time (never in parallel), both to keep real API cost/rate under
+  // control and because it mirrors every other Ghidra-adjacent queue in
+  // this app. Already-resolved or already-failed functions are skipped,
+  // so reopening a project never re-spends real API calls on the same
+  // tie twice.
+  async function runBackgroundArbitration() {
+    if (isBackgroundArbitrating) return;
+    if (!aiProviders.some((provider) => provider.enabled)) return;
+
+    const pending = unidentifiedFunctions
+      .map((func) => func.entry_address)
+      .filter(
+        (entryAddress) =>
+          !arbitrationResults.has(entryAddress) &&
+          !arbitrationErrors.has(entryAddress) &&
+          tiedFidCandidatesFor(entryAddress).length > 0,
+      );
+    if (pending.length === 0) return;
+
+    isBackgroundArbitrating = true;
+    try {
+      for (const entryAddress of pending) {
+        await arbitrateFunction(entryAddress);
+      }
+    } finally {
+      isBackgroundArbitrating = false;
     }
   }
 
@@ -2896,6 +2958,7 @@ interface ApplyRenamesResult {
       newAiProviderApiKey = "";
       newAiProviderModel = "";
       await loadAiProviders();
+      void runBackgroundArbitration();
     } catch (error) {
       aiProvidersError = String(error);
     } finally {
@@ -2910,6 +2973,7 @@ interface ApplyRenamesResult {
     try {
       await invoke("set_ai_provider_enabled", { id: provider.id, enabled: !provider.enabled });
       await loadAiProviders();
+      void runBackgroundArbitration();
     } catch (error) {
       aiProvidersError = String(error);
     } finally {
@@ -4397,6 +4461,17 @@ interface ApplyRenamesResult {
                 <div><strong>File de renommage</strong><span>{remainingIdentificationFunctions.length} restante(s) · {identificationQueue.length} affichée(s)</span></div>
                 <small>Page {currentIdentificationPage} sur {identificationPageCount}</small>
               </header>
+              {#if arbitrationTiedTotal > 0}
+                <p class="arbitration-queue-status">
+                  {#if isBackgroundArbitrating}
+                    Arbitrage IA en arrière-plan : {arbitrationTiedResolved} / {arbitrationTiedTotal} traité(e)s…
+                  {:else if arbitrationTiedResolved < arbitrationTiedTotal}
+                    {arbitrationTiedTotal - arbitrationTiedResolved} fonction(s) ambiguë(s) en attente d'arbitrage IA.
+                  {:else}
+                    Arbitrage IA terminé : {arbitrationTiedTotal} fonction(s) traitée(s).
+                  {/if}
+                </p>
+              {/if}
               <div class="identification-queue-tools">
                 <div role="group" aria-label="Filtrer la file de renommage">
                   <button type="button" class:active={identificationQueueFilter === "matched"} onclick={() => { identificationQueueFilter = "matched"; identificationPage = 1; }}>Avec proposition <b>{matchedIdentificationCount}</b></button>
@@ -4462,12 +4537,14 @@ interface ApplyRenamesResult {
                           {/if}
                         </h5>
                         {#if selectedIdentificationTopTieCount > 1}
+                          {@const currentResult = arbitrationResults.get(selectedFunction.entry_address)}
+                          {@const currentError = arbitrationErrors.get(selectedFunction.entry_address)}
+                          {@const isRunning = arbitratingAddresses.has(selectedFunction.entry_address)}
                           <div class="arbitration-panel">
-                            <button type="button" class="secondary-button" disabled={isArbitrating} onclick={requestArbitration}>
-                              {isArbitrating ? "L'agent réfléchit…" : "Demander à l'agent d'arbitrage"}
-                            </button>
-                            {#if arbitrationResult}
-                              {@const chosenName = arbitrationResult.chosen_name}
+                            {#if isRunning}
+                              <p class="arbitration-status">L'agent d'arbitrage réfléchit…</p>
+                            {:else if currentResult}
+                              {@const chosenName = currentResult.chosen_name}
                               <div class="arbitration-result">
                                 {#if chosenName}
                                   <strong>Choix de l'agent : {chosenName}</strong>
@@ -4475,11 +4552,18 @@ interface ApplyRenamesResult {
                                 {:else}
                                   <strong>L'agent reste incertain</strong>
                                 {/if}
-                                <p>{arbitrationResult.reasoning}</p>
-                                <small>Fournisseur : {arbitrationResult.provider_label}</small>
+                                <p>{currentResult.reasoning}</p>
+                                <small>Fournisseur : {currentResult.provider_label}</small>
                               </div>
+                            {:else if currentError}
+                              <p class="settings-inline-error" role="alert">{currentError}</p>
+                              <button type="button" class="secondary-button" onclick={requestArbitration}>Réessayer</button>
+                            {:else if aiProviders.some((provider) => provider.enabled)}
+                              <p class="arbitration-status">En attente de son tour dans la file d'arbitrage automatique…</p>
+                            {:else}
+                              <p class="arbitration-status">Aucun fournisseur IA activé — configure-le dans Réglages pour que l'arbitrage se fasse automatiquement, ou lance-le manuellement.</p>
+                              <button type="button" class="secondary-button" onclick={requestArbitration}>Demander à l'agent d'arbitrage</button>
                             {/if}
-                            {#if arbitrationError}<p class="settings-inline-error" role="alert">{arbitrationError}</p>{/if}
                           </div>
                         {/if}
                         {#each selectedIdentificationCandidates as candidate}
@@ -8690,6 +8774,8 @@ interface ApplyRenamesResult {
   .arbitration-result strong { color: #86efac; font-size: 0.72rem; }
   .arbitration-result p { margin: 0; color: #a9b8d2; font-size: 0.68rem; line-height: 1.45; }
   .arbitration-result small { color: #71829d; font-size: 0.62rem; }
+  .arbitration-status { margin: 0; color: #8192ad; font-size: 0.68rem; line-height: 1.45; }
+  .arbitration-queue-status { margin: 0.4rem 0.95rem 0; color: #67e8f9; font-size: 0.66rem; }
   .link-button { padding: 0; border: none; background: none; color: #67e8f9; font-size: 0.66rem; text-align: left; text-decoration: underline; cursor: pointer; width: fit-content; }
   .evidence-source-group small { color: #8292ad; font-size: 0.54rem; }
   .evidence-source-group code { color: #a7f3d0; font-size: 0.58rem; }
