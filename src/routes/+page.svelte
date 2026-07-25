@@ -196,6 +196,12 @@ interface BsimCorpusSummary {
   removable: boolean;
 }
 
+interface ArbitrationOutcome {
+  chosen_name: string | null;
+  reasoning: string;
+  provider_label: string;
+}
+
 interface AiProviderSummary {
   id: string;
   label: string;
@@ -784,6 +790,9 @@ interface ApplyRenamesResult {
   let functionRenameError = $state("");
   let functionRenameSuccess = $state("");
   let renameDraftAddress: string | null = null;
+  let isArbitrating = $state(false);
+  let arbitrationError = $state("");
+  let arbitrationResult = $state<ArbitrationOutcome | null>(null);
 
   // Ghidra's bundled FunctionID databases already discard matches below
   // 14.6. Keep that native threshold, then add the more important unique-name
@@ -1691,6 +1700,9 @@ interface ApplyRenamesResult {
     functionRenameError = "";
     functionRenameSuccess = "";
     activeDetailTab = "overview";
+    isArbitrating = false;
+    arbitrationError = "";
+    arbitrationResult = null;
   });
 
   $effect(() => {
@@ -2503,6 +2515,34 @@ interface ApplyRenamesResult {
     functionRenameDraft = name;
     functionRenameError = "";
     functionRenameSuccess = "";
+  }
+
+  async function requestArbitration() {
+    if (!selectedFunction || isArbitrating) return;
+    const topScore = selectedIdentificationCandidates[0]?.overall_score;
+    if (topScore === undefined) return;
+
+    const tiedCandidates = selectedIdentificationCandidates
+      .filter((candidate) => Math.abs(candidate.overall_score - topScore) < 0.0001)
+      .map((candidate) => ({
+        name: candidate.name,
+        source_label: `FunctionID (${candidate.library_family} ${candidate.library_version})`,
+      }));
+    if (tiedCandidates.length === 0) return;
+
+    isArbitrating = true;
+    arbitrationError = "";
+    arbitrationResult = null;
+    try {
+      arbitrationResult = await invoke<ArbitrationOutcome>("arbitrate_identification_tie", {
+        entryAddress: selectedFunction.entry_address,
+        candidates: tiedCandidates,
+      });
+    } catch (error) {
+      arbitrationError = String(error);
+    } finally {
+      isArbitrating = false;
+    }
   }
 
   function selectIdentificationEvidenceFirst() {
@@ -4421,6 +4461,27 @@ interface ApplyRenamesResult {
                             <span>{selectedIdentificationTopTieCount} noms ex æquo : FunctionID reconnaît la forme, mais ne peut pas choisir le nom exact.</span>
                           {/if}
                         </h5>
+                        {#if selectedIdentificationTopTieCount > 1}
+                          <div class="arbitration-panel">
+                            <button type="button" class="secondary-button" disabled={isArbitrating} onclick={requestArbitration}>
+                              {isArbitrating ? "L'agent réfléchit…" : "Demander à l'agent d'arbitrage"}
+                            </button>
+                            {#if arbitrationResult}
+                              {@const chosenName = arbitrationResult.chosen_name}
+                              <div class="arbitration-result">
+                                {#if chosenName}
+                                  <strong>Choix de l'agent : {chosenName}</strong>
+                                  <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(chosenName)}>Utiliser ce nom</button>
+                                {:else}
+                                  <strong>L'agent reste incertain</strong>
+                                {/if}
+                                <p>{arbitrationResult.reasoning}</p>
+                                <small>Fournisseur : {arbitrationResult.provider_label}</small>
+                              </div>
+                            {/if}
+                            {#if arbitrationError}<p class="settings-inline-error" role="alert">{arbitrationError}</p>{/if}
+                          </div>
+                        {/if}
                         {#each selectedIdentificationCandidates as candidate}
                           {@const displayedName = displayCandidateName(candidate.name)}
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "function_id")}
@@ -8623,6 +8684,13 @@ interface ApplyRenamesResult {
   .evidence-source-group button > span { display: grid; min-width: 0; gap: 0.12rem; }
   .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+
+  .arbitration-panel { display: grid; gap: 0.5rem; margin-bottom: 0.65rem; padding: 0.65rem; border: 1px dashed #2a3a54; border-radius: 6px; background: #0c1930; }
+  .arbitration-result { display: grid; gap: 0.3rem; }
+  .arbitration-result strong { color: #86efac; font-size: 0.72rem; }
+  .arbitration-result p { margin: 0; color: #a9b8d2; font-size: 0.68rem; line-height: 1.45; }
+  .arbitration-result small { color: #71829d; font-size: 0.62rem; }
+  .link-button { padding: 0; border: none; background: none; color: #67e8f9; font-size: 0.66rem; text-align: left; text-decoration: underline; cursor: pointer; width: fit-content; }
   .evidence-source-group small { color: #8292ad; font-size: 0.54rem; }
   .evidence-source-group code { color: #a7f3d0; font-size: 0.58rem; }
 
