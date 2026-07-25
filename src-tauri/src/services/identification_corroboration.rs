@@ -103,13 +103,15 @@ mod tests {
             candidates: Vec::new(),
             bsim_candidates: candidates
                 .into_iter()
-                .map(|(name, executable, similarity, significance)| BsimIdentificationCandidate {
-                    name: name.to_owned(),
-                    executable: executable.to_owned(),
-                    corpus: "Pack essentiel Reverse Assistant".to_owned(),
-                    similarity,
-                    significance,
-                })
+                .map(
+                    |(name, executable, similarity, significance)| BsimIdentificationCandidate {
+                        name: name.to_owned(),
+                        executable: executable.to_owned(),
+                        corpus: "Pack essentiel Reverse Assistant".to_owned(),
+                        similarity,
+                        significance,
+                    },
+                )
                 .collect(),
             bsim_scanned: true,
             bsim_message: None,
@@ -119,9 +121,18 @@ mod tests {
     #[test]
     fn an_unambiguous_name_repeated_at_several_distinct_addresses_is_corroborated() {
         let identifications = vec![
-            identification_with_bsim("0x1", vec![("__real_unique_helper", "sqlite3.dll", 1.0, 8.3)]),
-            identification_with_bsim("0x2", vec![("__real_unique_helper", "sqlite3.dll", 1.0, 8.3)]),
-            identification_with_bsim("0x3", vec![("__real_unique_helper", "sqlite3.dll", 1.0, 8.3)]),
+            identification_with_bsim(
+                "0x1",
+                vec![("__real_unique_helper", "sqlite3.dll", 1.0, 8.3)],
+            ),
+            identification_with_bsim(
+                "0x2",
+                vec![("__real_unique_helper", "sqlite3.dll", 1.0, 8.3)],
+            ),
+            identification_with_bsim(
+                "0x3",
+                vec![("__real_unique_helper", "sqlite3.dll", 1.0, 8.3)],
+            ),
         ];
 
         let repetitions = count_bsim_repetitions(&identifications);
@@ -136,8 +147,14 @@ mod tests {
     #[test]
     fn a_name_seen_at_only_one_or_two_addresses_is_not_corroborated() {
         let identifications = vec![
-            identification_with_bsim("0x140001bfc", vec![("__scrt_initialize_crt", "sqlite3.dll", 1.0, 9.8)]),
-            identification_with_bsim("0x140001ec0", vec![("__scrt_initialize_crt", "sqlite3.dll", 1.0, 9.8)]),
+            identification_with_bsim(
+                "0x140001bfc",
+                vec![("__scrt_initialize_crt", "sqlite3.dll", 1.0, 9.8)],
+            ),
+            identification_with_bsim(
+                "0x140001ec0",
+                vec![("__scrt_initialize_crt", "sqlite3.dll", 1.0, 9.8)],
+            ),
         ];
 
         let repetitions = count_bsim_repetitions(&identifications);
@@ -162,10 +179,30 @@ mod tests {
             "0x1400016b0",
             vec![
                 ("NtCurrentTeb", "sqlite3.dll", 0.9999999999999998, 8.275),
-                ("__local_stdio_printf_options", "sqlite3.dll", 0.9999999999999998, 8.275),
-                ("__local_stdio_scanf_options", "sqlite3.dll", 0.9999999999999998, 8.275),
-                ("__scrt_get_dyn_tls_init_callback", "sqlite3.dll", 0.9999999999999998, 8.275),
-                ("__scrt_initialize_mta", "sqlite3.dll", 0.9999999999999998, 8.275),
+                (
+                    "__local_stdio_printf_options",
+                    "sqlite3.dll",
+                    0.9999999999999998,
+                    8.275,
+                ),
+                (
+                    "__local_stdio_scanf_options",
+                    "sqlite3.dll",
+                    0.9999999999999998,
+                    8.275,
+                ),
+                (
+                    "__scrt_get_dyn_tls_init_callback",
+                    "sqlite3.dll",
+                    0.9999999999999998,
+                    8.275,
+                ),
+                (
+                    "__scrt_initialize_mta",
+                    "sqlite3.dll",
+                    0.9999999999999998,
+                    8.275,
+                ),
             ],
         );
         // Even repeated at 3 identically-tied addresses, still no rescue.
@@ -182,7 +219,10 @@ mod tests {
         let identifications = vec![
             identification_with_bsim(
                 "0x1",
-                vec![("__real_unique_helper", "sqlite3.dll", 1.0, 8.3), ("some_other_name", "sqlite3.dll", 0.6, 30.0)],
+                vec![
+                    ("__real_unique_helper", "sqlite3.dll", 1.0, 8.3),
+                    ("some_other_name", "sqlite3.dll", 0.6, 30.0),
+                ],
             ),
             identification_with_bsim(
                 "0x2",

@@ -96,12 +96,8 @@ fn read_registry(app_data_dir: &Path) -> Result<ProviderRegistry, String> {
             path.display()
         )
     })?;
-    serde_json::from_str(&json).map_err(|error| {
-        format!(
-            "invalid AI provider registry '{}': {error}",
-            path.display()
-        )
-    })
+    serde_json::from_str(&json)
+        .map_err(|error| format!("invalid AI provider registry '{}': {error}", path.display()))
 }
 
 fn write_registry(app_data_dir: &Path, registry: &ProviderRegistry) -> Result<(), String> {
@@ -231,6 +227,10 @@ pub fn list_providers_for_app(app: &AppHandle) -> Result<Vec<AiProviderSummary>,
     list_providers(&app_data_dir(app)?)
 }
 
+pub fn enabled_providers_for_app(app: &AppHandle) -> Result<Vec<AiProviderSecrets>, String> {
+    enabled_providers_with_secrets(&app_data_dir(app)?)
+}
+
 pub fn add_provider_for_app(
     app: &AppHandle,
     label: &str,
@@ -324,8 +324,14 @@ mod tests {
     fn an_empty_api_key_is_treated_as_no_key() {
         let dir = temp_app_data_dir("blank-key");
 
-        let summary = add_provider(&dir, "Local", "http://localhost:1234/v1", Some("   ".to_owned()), "model")
-            .expect("a blank api key should be accepted as absent");
+        let summary = add_provider(
+            &dir,
+            "Local",
+            "http://localhost:1234/v1",
+            Some("   ".to_owned()),
+            "model",
+        )
+        .expect("a blank api key should be accepted as absent");
 
         assert!(!summary.has_api_key);
     }
@@ -343,18 +349,27 @@ mod tests {
     #[test]
     fn disabling_a_provider_removes_it_from_the_enabled_secrets_list() {
         let dir = temp_app_data_dir("disable");
-        let summary = add_provider(&dir, "OpenAI", "https://api.openai.com/v1", Some("key".to_owned()), "gpt-4o-mini")
-            .expect("adding should succeed");
+        let summary = add_provider(
+            &dir,
+            "OpenAI",
+            "https://api.openai.com/v1",
+            Some("key".to_owned()),
+            "gpt-4o-mini",
+        )
+        .expect("adding should succeed");
 
-        let enabled_before = enabled_providers_with_secrets(&dir).expect("listing enabled providers should succeed");
+        let enabled_before =
+            enabled_providers_with_secrets(&dir).expect("listing enabled providers should succeed");
         assert_eq!(enabled_before.len(), 1);
 
         set_provider_enabled(&dir, &summary.id, false).expect("disabling should succeed");
 
-        let enabled_after = enabled_providers_with_secrets(&dir).expect("listing enabled providers should succeed");
+        let enabled_after =
+            enabled_providers_with_secrets(&dir).expect("listing enabled providers should succeed");
         assert!(enabled_after.is_empty());
 
-        let all_providers = list_providers(&dir).expect("listing all providers should still show it");
+        let all_providers =
+            list_providers(&dir).expect("listing all providers should still show it");
         assert_eq!(all_providers.len(), 1);
         assert!(!all_providers[0].enabled);
     }
@@ -362,12 +377,25 @@ mod tests {
     #[test]
     fn several_providers_can_be_configured_and_enabled_at_once() {
         let dir = temp_app_data_dir("multiple");
-        add_provider(&dir, "OpenAI", "https://api.openai.com/v1", Some("key-1".to_owned()), "gpt-4o-mini")
-            .expect("adding the first provider should succeed");
-        add_provider(&dir, "Ollama local", "http://localhost:11434/v1", None, "llama3.1")
-            .expect("adding the second provider should succeed");
+        add_provider(
+            &dir,
+            "OpenAI",
+            "https://api.openai.com/v1",
+            Some("key-1".to_owned()),
+            "gpt-4o-mini",
+        )
+        .expect("adding the first provider should succeed");
+        add_provider(
+            &dir,
+            "Ollama local",
+            "http://localhost:11434/v1",
+            None,
+            "llama3.1",
+        )
+        .expect("adding the second provider should succeed");
 
-        let enabled = enabled_providers_with_secrets(&dir).expect("listing enabled providers should succeed");
+        let enabled =
+            enabled_providers_with_secrets(&dir).expect("listing enabled providers should succeed");
 
         assert_eq!(enabled.len(), 2);
     }
@@ -385,10 +413,22 @@ mod tests {
     #[test]
     fn removing_a_provider_deletes_it_but_keeps_the_others() {
         let dir = temp_app_data_dir("remove");
-        let first = add_provider(&dir, "OpenAI", "https://api.openai.com/v1", Some("key".to_owned()), "gpt-4o-mini")
-            .expect("adding the first provider should succeed");
-        add_provider(&dir, "Ollama local", "http://localhost:11434/v1", None, "llama3.1")
-            .expect("adding the second provider should succeed");
+        let first = add_provider(
+            &dir,
+            "OpenAI",
+            "https://api.openai.com/v1",
+            Some("key".to_owned()),
+            "gpt-4o-mini",
+        )
+        .expect("adding the first provider should succeed");
+        add_provider(
+            &dir,
+            "Ollama local",
+            "http://localhost:11434/v1",
+            None,
+            "llama3.1",
+        )
+        .expect("adding the second provider should succeed");
 
         remove_provider(&dir, &first.id).expect("removing the first provider should succeed");
 
@@ -401,8 +441,14 @@ mod tests {
     fn a_trailing_slash_in_the_base_url_is_normalized_away() {
         let dir = temp_app_data_dir("trailing-slash");
 
-        let summary = add_provider(&dir, "OpenAI", "https://api.openai.com/v1/", None, "gpt-4o-mini")
-            .expect("adding should succeed");
+        let summary = add_provider(
+            &dir,
+            "OpenAI",
+            "https://api.openai.com/v1/",
+            None,
+            "gpt-4o-mini",
+        )
+        .expect("adding should succeed");
 
         assert_eq!(summary.base_url, "https://api.openai.com/v1");
     }

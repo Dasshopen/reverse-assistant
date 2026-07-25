@@ -10,6 +10,7 @@ use models::ghidra_identification::FunctionIdentification;
 use models::ghidra_installation::GhidraInstallation;
 use models::ghidra_session::AnalysisSession;
 use models::project::ProjectMetadata;
+use services::ai_provider::ChatCompletionProvider;
 use services::ai_providers::{self, AiProviderSummary};
 use services::bsim_corpus::{self, BsimCorpusSummary};
 use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
@@ -24,6 +25,7 @@ use services::ghidra_installation::{self, GhidraInstallationStatus};
 use services::global_strings::{self, GlobalStringView};
 use services::identification_corroboration;
 use services::imports_exports::{self, ImportView};
+use services::naming_arbitration;
 use services::program_overview::{self, ProgramOverview};
 use services::project_storage::{self, ProjectSummary};
 use services::report::{self, PdfReportResult};
@@ -205,6 +207,80 @@ fn set_ai_provider_enabled(app: AppHandle, id: String, enabled: bool) -> Result<
 #[tauri::command]
 fn remove_ai_provider(app: AppHandle, id: String) -> Result<(), String> {
     ai_providers::remove_provider_for_app(&app, &id)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ArbitrationCandidateInput {
+    name: String,
+    source_label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ArbitrationOutcome {
+    chosen_name: Option<String>,
+    reasoning: String,
+    provider_label: String,
+}
+
+#[tauri::command(async)]
+fn arbitrate_identification_tie(
+    app: AppHandle,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    entry_address: String,
+    candidates: Vec<ArbitrationCandidateInput>,
+) -> Result<ArbitrationOutcome, String> {
+    if candidates.is_empty() {
+        return Err("no candidates were provided to arbitrate between".to_owned());
+    }
+
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+
+    let arbitration_candidates: Vec<naming_arbitration::ArbitrationCandidate> = candidates
+        .into_iter()
+        .map(|candidate| naming_arbitration::ArbitrationCandidate {
+            name: candidate.name,
+            source_label: candidate.source_label,
+        })
+        .collect();
+
+    let context = naming_arbitration::build_context_for_function(&export, &entry_address)?;
+
+    // If several providers are enabled at once, the first one configured
+    // is used -- letting the caller pick per-call is a future refinement,
+    // not needed for this first working version.
+    let provider_secrets = ai_providers::enabled_providers_for_app(&app)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            "no AI provider is enabled. Configure one under Réglages first.".to_owned()
+        })?;
+
+    let provider = services::ai_provider::OpenAiCompatibleProvider {
+        base_url: provider_secrets.base_url,
+        api_key: provider_secrets.api_key,
+    };
+
+    let request = naming_arbitration::build_arbitration_request(
+        &naming_arbitration::ArbitrationRequest {
+            candidates: arbitration_candidates.clone(),
+            context,
+        },
+        &provider_secrets.model,
+    );
+
+    let response = provider.complete(&request)?;
+    let result =
+        naming_arbitration::parse_arbitration_response(&response, &arbitration_candidates)?;
+
+    Ok(ArbitrationOutcome {
+        chosen_name: result.chosen_name,
+        reasoning: result.reasoning,
+        provider_label: provider_secrets.label,
+    })
 }
 
 #[tauri::command]
@@ -650,6 +726,7 @@ pub fn run() {
             add_ai_provider,
             set_ai_provider_enabled,
             remove_ai_provider,
+            arbitrate_identification_tie,
             get_managed_setup_plan,
             install_managed_setup,
             adopt_existing_ghidra,

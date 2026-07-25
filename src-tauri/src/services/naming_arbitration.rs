@@ -8,9 +8,13 @@
 // keeps this agent cheap (small model, closed set) and safe (no
 // fabricated evidence).
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
+use crate::models::ghidra_export::{GhidraExport, GhidraFunction};
 use crate::services::ai_provider::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::services::call_graph;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArbitrationCandidate {
@@ -33,6 +37,48 @@ pub struct ArbitrationContext {
 pub struct ArbitrationRequest {
     pub candidates: Vec<ArbitrationCandidate>,
     pub context: ArbitrationContext,
+}
+
+/// Assembles the real context already available for a function from the
+/// loaded export -- no new Ghidra query needed: callers/callees/strings
+/// are already part of every analysis, and decompiled code is whatever
+/// has already been fetched on demand (absent is stated explicitly to the
+/// agent rather than silently treated as "nothing to say").
+pub fn build_context_for_function(
+    export: &GhidraExport,
+    entry_address: &str,
+) -> Result<ArbitrationContext, String> {
+    let function_index: HashMap<&str, &GhidraFunction> = export
+        .functions
+        .iter()
+        .map(|function| (function.entry_address.as_str(), function))
+        .collect();
+
+    let function = function_index
+        .get(entry_address)
+        .ok_or_else(|| format!("no function exists at address '{entry_address}'"))?;
+
+    let caller_index = call_graph::build_caller_index(export);
+    let caller_names =
+        call_graph::resolve_calling_functions(&caller_index, &function_index, entry_address)
+            .into_iter()
+            .filter_map(|address| function_index.get(address))
+            .map(|caller| caller.name.clone())
+            .collect();
+
+    let callee_names = function
+        .calls
+        .iter()
+        .map(|call| call.target_name.clone())
+        .collect();
+
+    Ok(ArbitrationContext {
+        current_name: function.name.clone(),
+        decompiled_code: function.decompiled_code.clone(),
+        caller_names,
+        callee_names,
+        referenced_strings: function.strings.clone(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,7 +136,10 @@ fn format_context(context: &ArbitrationContext) -> String {
     sections.join("\n\n")
 }
 
-pub fn build_arbitration_request(request: &ArbitrationRequest, model: &str) -> ChatCompletionRequest {
+pub fn build_arbitration_request(
+    request: &ArbitrationRequest,
+    model: &str,
+) -> ChatCompletionRequest {
     let candidate_list = request
         .candidates
         .iter()
@@ -155,6 +204,104 @@ pub fn parse_arbitration_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ghidra_export::{
+        Endianness, FunctionCall, FunctionParameter, ProgramMetadata,
+    };
+
+    fn function(
+        entry_address: &str,
+        name: &str,
+        calls: &[(&str, &str)],
+        strings: &[&str],
+        decompiled_code: Option<&str>,
+    ) -> GhidraFunction {
+        GhidraFunction {
+            entry_address: entry_address.to_owned(),
+            name: name.to_owned(),
+            return_type: "void".to_owned(),
+            parameters: Vec::<FunctionParameter>::new(),
+            is_external: false,
+            is_thunk: false,
+            decompiled_code: decompiled_code.map(|code| code.to_owned()),
+            calls: calls
+                .iter()
+                .map(|(target_address, target_name)| FunctionCall {
+                    target_address: Some((*target_address).to_owned()),
+                    target_name: (*target_name).to_owned(),
+                })
+                .collect(),
+            strings: strings.iter().map(|value| (*value).to_owned()).collect(),
+            library: None,
+            thunk_target_address: None,
+            namespace: None,
+        }
+    }
+
+    fn export(functions: Vec<GhidraFunction>) -> GhidraExport {
+        GhidraExport {
+            schema_version: 1,
+            program: ProgramMetadata {
+                name: "fixture.exe".to_owned(),
+                sha256: "0".repeat(64),
+                format: "PE".to_owned(),
+                architecture: "x86_64".to_owned(),
+                endianness: Endianness::Little,
+                image_base: "0x140000000".to_owned(),
+                external_entry_points: Vec::new(),
+                required_libraries: Vec::new(),
+            },
+            functions,
+            strings: Vec::new(),
+            types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn context_includes_real_callers_callees_strings_and_decompiled_code() {
+        let data = export(vec![
+            function("0x1", "main", &[("0x2", "FUN_2")], &[], None),
+            function(
+                "0x2",
+                "FUN_2",
+                &[("0x3", "strlen")],
+                &["out of range"],
+                Some("void FUN_2(void) { throw std::out_of_range(\"out of range\"); }"),
+            ),
+        ]);
+
+        let context = build_context_for_function(&data, "0x2")
+            .expect("a function that exists should produce a context");
+
+        assert_eq!(context.current_name, "FUN_2");
+        assert_eq!(context.caller_names, vec!["main".to_owned()]);
+        assert_eq!(context.callee_names, vec!["strlen".to_owned()]);
+        assert_eq!(context.referenced_strings, vec!["out of range".to_owned()]);
+        assert!(context.decompiled_code.unwrap().contains("out_of_range"));
+    }
+
+    #[test]
+    fn a_function_never_decompiled_yet_has_no_code_but_still_has_other_context() {
+        let data = export(vec![
+            function("0x1", "main", &[("0x2", "FUN_2")], &[], None),
+            function("0x2", "FUN_2", &[], &[], None),
+        ]);
+
+        let context = build_context_for_function(&data, "0x2")
+            .expect("a function that exists should produce a context");
+
+        assert_eq!(context.decompiled_code, None);
+        assert_eq!(context.caller_names, vec!["main".to_owned()]);
+    }
+
+    #[test]
+    fn an_unknown_address_is_rejected() {
+        let data = export(vec![function("0x1", "main", &[], &[], None)]);
+
+        let error = build_context_for_function(&data, "0xdeadbeef")
+            .expect_err("an address with no function should be rejected");
+
+        assert!(error.contains("0xdeadbeef"));
+    }
 
     fn sample_candidates() -> Vec<ArbitrationCandidate> {
         vec![
