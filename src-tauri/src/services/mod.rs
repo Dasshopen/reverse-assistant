@@ -1,3 +1,4 @@
+pub mod ai_provider;
 pub mod bsim_corpus;
 pub mod call_graph;
 pub mod comparison;
@@ -11,6 +12,7 @@ pub mod ghidra_installation;
 pub mod global_strings;
 pub mod identification_corroboration;
 pub mod imports_exports;
+pub mod naming_arbitration;
 pub mod program_overview;
 pub mod project_storage;
 pub mod report;

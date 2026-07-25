@@ -1,0 +1,231 @@
+// A provider-agnostic chat-completion abstraction for the AI naming
+// agents (arbitration first, then the fuller analysis/critique/synthesis
+// pipeline). The trait is deliberately shaped around the "chat
+// completions" request/response format, since that same shape is already
+// spoken natively by several real, independent backends without any
+// vendor-specific code: a local Ollama server, OpenAI, Mistral's La
+// Plateforme, and many self-hosted servers. A second, differently-shaped
+// adapter (e.g. Anthropic's native Messages API) can implement the same
+// trait later without touching any agent logic built on top of it.
+//
+// Request/response construction and parsing are kept as pure functions
+// so they can be tested directly against real-shaped JSON, without
+// requiring a live server in the automated test suite -- the same
+// convention already used for Ghidra headless invocations in this
+// project (argument construction is tested; the actual external process
+// is not launched from committed tests).
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    pub temperature: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatCompletionResponse {
+    pub content: String,
+}
+
+pub trait ChatCompletionProvider {
+    fn complete(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse, String>;
+}
+
+/// Speaks the OpenAI-compatible "chat completions" HTTP format. Works
+/// against a local Ollama server, OpenAI itself, Mistral, and any other
+/// server exposing the same endpoint shape -- `base_url` and `api_key`
+/// are the only things that differ between them.
+pub struct OpenAiCompatibleProvider {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+impl OpenAiCompatibleProvider {
+    fn endpoint_url(&self) -> String {
+        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+}
+
+pub(crate) fn build_request_body_json(request: &ChatCompletionRequest) -> Value {
+    let mut body = json!({
+        "model": request.model,
+        "messages": request
+            .messages
+            .iter()
+            .map(|message| json!({ "role": message.role, "content": message.content }))
+            .collect::<Vec<_>>(),
+    });
+    if let Some(temperature) = request.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    body
+}
+
+#[derive(Deserialize)]
+struct ChatCompletionResponseJson {
+    choices: Vec<ChatCompletionChoiceJson>,
+}
+
+#[derive(Deserialize)]
+struct ChatCompletionChoiceJson {
+    message: ChatCompletionResponseMessageJson,
+}
+
+#[derive(Deserialize)]
+struct ChatCompletionResponseMessageJson {
+    content: String,
+}
+
+pub(crate) fn parse_response_body_json(body: &str) -> Result<ChatCompletionResponse, String> {
+    let parsed: ChatCompletionResponseJson = serde_json::from_str(body)
+        .map_err(|error| format!("invalid chat completion response JSON: {error}"))?;
+    let first_choice = parsed
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| "chat completion response contained no choices".to_owned())?;
+    Ok(ChatCompletionResponse {
+        content: first_choice.message.content,
+    })
+}
+
+impl ChatCompletionProvider for OpenAiCompatibleProvider {
+    fn complete(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse, String> {
+        let url = self.endpoint_url();
+        let body = build_request_body_json(request);
+
+        let mut call = ureq::post(&url).set("Content-Type", "application/json");
+        if let Some(api_key) = &self.api_key {
+            call = call.set("Authorization", &format!("Bearer {api_key}"));
+        }
+
+        let response = call
+            .send_string(&body.to_string())
+            .map_err(|error| format!("chat completion request to '{url}' failed: {error}"))?;
+        let body_text = response.into_string().map_err(|error| {
+            format!("failed to read the chat completion response body from '{url}': {error}")
+        })?;
+
+        parse_response_body_json(&body_text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_url_appends_the_chat_completions_path() {
+        let provider = OpenAiCompatibleProvider {
+            base_url: "http://localhost:11434/v1".to_owned(),
+            api_key: None,
+        };
+
+        assert_eq!(
+            provider.endpoint_url(),
+            "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_tolerates_a_trailing_slash() {
+        let provider = OpenAiCompatibleProvider {
+            base_url: "https://api.openai.com/v1/".to_owned(),
+            api_key: Some("test-key".to_owned()),
+        };
+
+        assert_eq!(
+            provider.endpoint_url(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn request_body_includes_model_and_messages() {
+        let request = ChatCompletionRequest {
+            model: "llama3.1".to_owned(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: "You are an arbitration agent.".to_owned(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "Pick the best candidate.".to_owned(),
+                },
+            ],
+            temperature: None,
+        };
+
+        let body = build_request_body_json(&request);
+
+        assert_eq!(body["model"], "llama3.1");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(
+            body["messages"][0]["content"],
+            "You are an arbitration agent."
+        );
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn request_body_includes_temperature_when_set() {
+        let request = ChatCompletionRequest {
+            model: "gpt-4o-mini".to_owned(),
+            messages: vec![],
+            temperature: Some(0.2),
+        };
+
+        let body = build_request_body_json(&request);
+
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn parses_a_real_shaped_openai_compatible_response() {
+        // Real shape returned by both OpenAI and Ollama's compatible
+        // endpoint for a non-streaming chat completion.
+        let body = r#"{
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "sqlite3OsOpen" },
+                    "finish_reason": "stop"
+                }
+            ]
+        }"#;
+
+        let response = parse_response_body_json(body).expect("a valid response should parse");
+
+        assert_eq!(response.content, "sqlite3OsOpen");
+    }
+
+    #[test]
+    fn rejects_a_response_with_no_choices() {
+        let body = r#"{ "id": "chatcmpl-123", "choices": [] }"#;
+
+        let error = parse_response_body_json(body).expect_err("no choices should be rejected");
+
+        assert!(error.contains("no choices"));
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        let error =
+            parse_response_body_json("not json").expect_err("invalid JSON should be rejected");
+
+        assert!(error.contains("invalid chat completion response JSON"));
+    }
+}
