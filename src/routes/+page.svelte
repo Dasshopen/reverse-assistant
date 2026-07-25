@@ -437,6 +437,7 @@ interface ApplyRenamesResult {
   let decompileErrors = $state(new Map<string, string>());
   let identifications = $state(new Map<string, FidCandidate[]>());
   let backgroundBsimResults = $state(new Map<string, BsimQueryResult>());
+  let bsimRepetitionCounts = $state(new Map<string, number>());
   let identificationPage = $state(1);
   const identificationPageSize = 10;
   type IdentificationQueueFilter = "matched" | "unmatched" | "all";
@@ -776,6 +777,9 @@ interface ApplyRenamesResult {
   const automaticBsimMinimumSimilarity = 0.85;
   const automaticBsimMinimumSignificance = 10;
   const automaticBsimMinimumMargin = 0.05;
+  // Mirrors identification_corroboration::MINIMUM_CORROBORATING_REPETITIONS
+  // (src-tauri/src/services/identification_corroboration.rs).
+  const minimumCorroboratingRepetitions = 3;
 
   function isSafeAutomaticSymbolName(name: string): boolean {
     // The current Ghidra edit contract changes a symbol in its existing
@@ -1011,13 +1015,21 @@ interface ApplyRenamesResult {
         const runnerUp = bsimCandidates[1];
         const margin = runnerUp ? bestBsim.similarity - runnerUp.similarity : null;
         const normalizedBsimName = normalizedAutomaticSymbolName(bestBsim.name);
+        // A match repeated at several distinct addresses in this same
+        // binary corroborates it even when BSim's own significance score
+        // (which penalises small/generic code) falls under the safety
+        // threshold on its own -- see identification_corroboration.rs.
+        const repetitionCount = bsimRepetitionCounts.get(bestBsim.name) ?? 0;
+        const rescuedByRepetition =
+          bestBsim.significance < automaticBsimMinimumSignificance &&
+          repetitionCount >= minimumCorroboratingRepetitions;
         let reason = "";
         if (!normalizedBsimName) {
           reason = "Nom C++ impossible à nettoyer sans perdre son sens.";
         } else if (bestBsim.similarity < automaticBsimMinimumSimilarity) {
           reason = `Similarité ${bestBsim.similarity.toFixed(3)} trop faible (minimum : ${automaticBsimMinimumSimilarity.toFixed(2)}).`;
-        } else if (bestBsim.significance < automaticBsimMinimumSignificance) {
-          reason = `Significativité ${bestBsim.significance.toFixed(1)} trop faible (minimum : ${automaticBsimMinimumSignificance.toFixed(1)}).`;
+        } else if (bestBsim.significance < automaticBsimMinimumSignificance && !rescuedByRepetition) {
+          reason = `Significativité ${bestBsim.significance.toFixed(1)} trop faible (minimum : ${automaticBsimMinimumSignificance.toFixed(1)}) et ce nom n'apparaît pas ailleurs dans le binaire pour corroborer la correspondance.`;
         } else if (margin !== null && margin < automaticBsimMinimumMargin) {
           reason = `Plusieurs noms BSim sont trop proches (marge ${margin.toFixed(3)}).`;
         }
@@ -1033,9 +1045,13 @@ interface ApplyRenamesResult {
             name: safeName,
             source: "bsim",
             scoreLabel: `similarité ${bestBsim.similarity.toFixed(3)}`,
-            evidenceLabel: `${bestBsim.corpus} · ${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
+            evidenceLabel: rescuedByRepetition
+              ? `${bestBsim.corpus} · ${bestBsim.executable} · même correspondance à ${repetitionCount} autres adresses de ce binaire`
+              : `${bestBsim.corpus} · ${bestBsim.executable} · significativité ${bestBsim.significance.toFixed(1)}`,
             alternativeCount: Math.max(0, bsimCandidates.length - 1),
-            decisionLabel: margin === null
+            decisionLabel: rescuedByRepetition
+              ? `Corroboré par répétition (${repetitionCount} adresses identiques dans ce binaire)`
+              : margin === null
               ? "Candidat unique au-dessus des seuils de sécurité"
               : `Marge de ${margin.toFixed(3)} sur le deuxième candidat`,
             ambiguous: false,
@@ -1750,6 +1766,22 @@ interface ApplyRenamesResult {
           },
         ]),
     );
+    void refreshBsimRepetitionCorroboration(items);
+  }
+
+  async function refreshBsimRepetitionCorroboration(items: FunctionIdentification[]) {
+    try {
+      const counts = await invoke<Record<string, number>>(
+        "compute_bsim_repetition_corroboration",
+        { identifications: items },
+      );
+      bsimRepetitionCounts = new Map(Object.entries(counts));
+    } catch (error) {
+      // Best-effort enhancement: a failure here just means no repetition
+      // corroboration is available yet -- the existing thresholds still
+      // apply on their own, nothing else breaks.
+      console.error("BSim repetition corroboration failed", error);
+    }
   }
 
   function bsimResultForAddress(entryAddress: string): BsimQueryResult | undefined {

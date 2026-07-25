@@ -9,6 +9,7 @@ pub mod ghidra_headless;
 pub mod ghidra_import;
 pub mod ghidra_installation;
 pub mod global_strings;
+pub mod identification_corroboration;
 pub mod imports_exports;
 pub mod program_overview;
 pub mod project_storage;

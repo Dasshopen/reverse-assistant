@@ -21,6 +21,7 @@ use services::ghidra_headless;
 use services::ghidra_import::{import_ghidra_export, GhidraImportSummary, ImportedGhidraExport};
 use services::ghidra_installation::{self, GhidraInstallationStatus};
 use services::global_strings::{self, GlobalStringView};
+use services::identification_corroboration;
 use services::imports_exports::{self, ImportView};
 use services::program_overview::{self, ProgramOverview};
 use services::project_storage::{self, ProjectSummary};
@@ -282,6 +283,13 @@ fn scan_project_with_bsim(
         Some(100),
     );
     Ok(merged)
+}
+
+#[tauri::command]
+fn compute_bsim_repetition_corroboration(
+    identifications: Vec<FunctionIdentification>,
+) -> std::collections::HashMap<String, usize> {
+    identification_corroboration::count_bsim_repetitions(&identifications)
 }
 
 #[tauri::command]
@@ -616,6 +624,7 @@ pub fn run() {
             adopt_existing_ghidra,
             analyze_binary_with_ghidra,
             scan_project_with_bsim,
+            compute_bsim_repetition_corroboration,
             decompile_function,
             disassemble_function,
             disassemble_functions,
