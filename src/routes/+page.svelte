@@ -4629,10 +4629,15 @@ interface ApplyRenamesResult {
                       <div class="evidence-source-group">
                         <h5>FunctionID
                           {#if selectedIdentificationTopTieCount > 1}
-                            <span>{selectedIdentificationTopTieCount} noms ex æquo : FunctionID reconnaît la forme, mais ne peut pas choisir le nom exact.</span>
+                            <span>
+                              {selectedIdentificationTopTieCount} noms ex æquo : FunctionID reconnaît la forme, mais ne peut pas choisir le nom exact.
+                              {#if selectedFunction.rtti_class_names.length > 0}
+                                RTTI a déjà donné la vraie réponse ci-dessus — cette égalité n'a plus besoin d'être résolue.
+                              {/if}
+                            </span>
                           {/if}
                         </h5>
-                        {#if selectedIdentificationTopTieCount > 1}
+                        {#if selectedIdentificationTopTieCount > 1 && selectedFunction.rtti_class_names.length === 0}
                           {@const currentResult = arbitrationResults.get(selectedFunction.entry_address)}
                           {@const currentError = arbitrationErrors.get(selectedFunction.entry_address)}
                           {@const isRunning = arbitratingAddresses.has(selectedFunction.entry_address)}
