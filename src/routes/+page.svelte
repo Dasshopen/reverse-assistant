@@ -6475,8 +6475,14 @@ interface ApplyRenamesResult {
 
   .code-browser-layout {
     display: grid;
-    grid-template-columns: 260px minmax(0, 1.6fr) minmax(0, 1fr);
-    min-height: 560px;
+    grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr);
+    /* Ghidra's own CodeBrowser gives the Listing and Decompile panes the
+       bulk of the window, with only a narrow tree sidebar -- this mirrors
+       that proportion (roughly equal Listing/Decompile, thin sidebar)
+       rather than the earlier 260px/1.6fr/1fr split, without literally
+       cloning Ghidra's multi-panel docking (Program Trees, Data Type
+       Manager, ...), which we don't need. */
+    height: calc(100vh - 220px);
     margin-top: 0.6rem;
     border: 1px solid #1e2c42;
     border-radius: 10px;
@@ -6485,13 +6491,14 @@ interface ApplyRenamesResult {
   }
 
   .code-browser-layout.symbols-collapsed {
-    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .code-browser-symbols {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
     min-width: 0;
+    min-height: 0;
     padding: 0.7rem;
     border-right: 1px solid #1e2c42;
     background: #0b1423;
@@ -6578,6 +6585,7 @@ interface ApplyRenamesResult {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     min-width: 0;
+    min-height: 0;
     padding: 0.7rem;
     border-right: 1px solid #1e2c42;
   }
@@ -6595,7 +6603,7 @@ interface ApplyRenamesResult {
   }
 
   .disasm-table td {
-    padding: 0.22rem 0.55rem;
+    padding: 0.14rem 0.55rem;
     border-bottom: 1px solid #131c2c;
     white-space: nowrap;
   }
@@ -6660,6 +6668,7 @@ interface ApplyRenamesResult {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     min-width: 0;
+    min-height: 0;
     padding: 0.7rem;
     background: #0b1423;
   }
@@ -6750,6 +6759,7 @@ interface ApplyRenamesResult {
   @media (max-width: 1180px) {
     .code-browser-layout {
       grid-template-columns: 1fr;
+      height: auto;
       min-height: 0;
     }
 
