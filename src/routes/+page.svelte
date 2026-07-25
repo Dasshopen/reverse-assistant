@@ -248,7 +248,7 @@ interface FunctionIdentification {
 interface AutomaticRenameChoice {
   func: GhidraFunction;
   name: string;
-  source: "rtti" | "function_id" | "bsim";
+  source: "rtti" | "function_id" | "bsim" | "arbitration";
   scoreLabel: string;
   evidenceLabel: string;
   alternativeCount: number;
@@ -624,14 +624,14 @@ interface ApplyRenamesResult {
     return names;
   });
   let arbitrationTiedTotal = $derived.by(() =>
-    unidentifiedFunctions.filter((func) => tiedFidCandidatesFor(func.entry_address).length > 0)
+    unidentifiedFunctions.filter((func) => tiedCandidatesFor(func.entry_address).length > 0)
       .length,
   );
   let arbitrationTiedResolved = $derived.by(
     () =>
       unidentifiedFunctions.filter(
         (func) =>
-          tiedFidCandidatesFor(func.entry_address).length > 0 &&
+          tiedCandidatesFor(func.entry_address).length > 0 &&
           (arbitrationResults.has(func.entry_address) ||
             arbitrationErrors.has(func.entry_address)),
       ).length,
@@ -911,8 +911,9 @@ interface ApplyRenamesResult {
     return chosenName;
   }
 
-  function identificationSourceLabel(source: "rtti" | "function_id" | "bsim"): string {
+  function identificationSourceLabel(source: "rtti" | "function_id" | "bsim" | "arbitration"): string {
     if (source === "rtti") return "RTTI";
+    if (source === "arbitration") return "Agent IA";
     return source === "function_id" ? "FunctionID" : "BSim";
   }
 
@@ -963,6 +964,35 @@ interface ApplyRenamesResult {
   function isCorroboratedByRtti(candidateName: string, knownClassNames: Set<string>): boolean {
     const realName = extractClassNameFromMangledMember(candidateName) ?? candidateName;
     return knownClassNames.has(realName);
+  }
+
+  // A confident AI arbitration answer -- chosen only from a real, closed
+  // set of tied candidates, never invented (see naming_arbitration.rs's
+  // "a name outside the candidate list is rejected, not trusted") -- is
+  // itself real evidence, not a suggestion that needs a manual click. Once
+  // the agent commits to a name, it feeds into the same automatic pipeline
+  // as RTTI/FunctionID/BSim instead of leaving the function stuck behind
+  // whichever deterministic rejection triggered arbitration in the first
+  // place.
+  function arbitrationChoiceFor(
+    func: GhidraFunction,
+    reservedNames: Set<string>,
+  ): AutomaticRenameChoice | null {
+    const arbitration = arbitrationResults.get(func.entry_address);
+    if (!arbitration?.chosen_name) return null;
+    const normalizedName = normalizedAutomaticSymbolName(arbitration.chosen_name);
+    if (!normalizedName) return null;
+    const safeName = reserveUniqueAutomaticName(normalizedName, func.entry_address, reservedNames);
+    return {
+      func,
+      name: safeName,
+      source: "arbitration",
+      scoreLabel: "agent IA",
+      evidenceLabel: `${arbitration.provider_label} : ${arbitration.reasoning}`,
+      alternativeCount: Math.max(0, tiedCandidatesFor(func.entry_address).length - 1),
+      decisionLabel: "Choisi par l'agent IA parmi les candidats ex æquo réels, à partir du contexte (appelants, appelés, chaînes)",
+      ambiguous: false,
+    };
   }
 
   function uniqueFidCandidates(candidates: FidCandidate[]): FidCandidate[] {
@@ -1064,15 +1094,28 @@ interface ApplyRenamesResult {
         }
       }
       if (func.rtti_class_names.length > 1) {
-        rejections.push({
-          func,
-          candidateName: func.rtti_class_names.join(" / "),
-          candidateDisplayName: func.rtti_class_names.join(" / "),
-          source: "rtti",
-          evidenceLabel: `${func.rtti_class_names.length} classes confirmées par RTTI : ${func.rtti_class_names.join(", ")}`,
-          reason: "Cette fonction est réellement partagée par plusieurs classes (le compilateur/l'éditeur de liens a fusionné leurs destructeurs, identiques au niveau machine) — confirmé par les métadonnées RTTI du binaire, ce n'est pas une ambiguïté à résoudre.",
-        });
-        continue;
+        // Several real classes genuinely share this exact function (the
+        // compiler/linker folded their destructors together) -- every name
+        // in the list is equally real and RTTI-confirmed, so there is no
+        // more evidence left to gather. Like a researcher who has already
+        // exhausted the evidence, auto mode commits to one (the first,
+        // alphabetically, as RttiClassCollector already sorts them) instead
+        // of blocking on a choice that has no more-correct answer.
+        const normalizedName = normalizedAutomaticSymbolName(func.rtti_class_names[0]);
+        if (normalizedName) {
+          const safeName = reserveUniqueAutomaticName(normalizedName, func.entry_address, reservedNames);
+          choices.push({
+            func,
+            name: safeName,
+            source: "rtti",
+            scoreLabel: "RTTI",
+            evidenceLabel: `${func.rtti_class_names.length} classes confirmées par RTTI, toutes également réelles : ${func.rtti_class_names.join(", ")}`,
+            alternativeCount: func.rtti_class_names.length - 1,
+            decisionLabel: "Fonction réellement partagée par plusieurs classes (destructeurs fusionnés par le compilateur) — première classe retenue, confirmée par RTTI comme les autres",
+            ambiguous: true,
+          });
+          continue;
+        }
       }
 
       const fidCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? []);
@@ -1095,7 +1138,7 @@ interface ApplyRenamesResult {
       // Among candidates tied at the top FID score, narrow to whichever
       // are independently confirmed elsewhere in this binary via RTTI --
       // the same reasoning wired into the arbitration agent
-      // (tiedFidCandidatesFor), applied here too so it benefits functions
+      // (tiedCandidatesFor), applied here too so it benefits functions
       // that never even reach arbitration.
       const topFidScore = bestFid?.overall_score;
       const tiedFid = topFidScore === undefined
@@ -1226,6 +1269,12 @@ interface ApplyRenamesResult {
           continue;
         }
 
+        const bsimArbitrationChoice = arbitrationChoiceFor(func, reservedNames);
+        if (bsimArbitrationChoice) {
+          choices.push(bsimArbitrationChoice);
+          continue;
+        }
+
         rejections.push({
           func,
           candidateName: bestBsim.name,
@@ -1237,7 +1286,14 @@ interface ApplyRenamesResult {
         continue;
       }
 
-      if (fidRejection) rejections.push(fidRejection);
+      if (fidRejection) {
+        const fidArbitrationChoice = arbitrationChoiceFor(func, reservedNames);
+        if (fidArbitrationChoice) {
+          choices.push(fidArbitrationChoice);
+        } else {
+          rejections.push(fidRejection);
+        }
+      }
     }
 
     return { choices, rejections };
@@ -1278,6 +1334,11 @@ interface ApplyRenamesResult {
       (candidate) => Math.abs(candidate.overall_score - topScore) < 0.0001,
     ).length;
   });
+  // Ties from either identification method (FunctionID or BSim) that the
+  // arbitration agent was actually queued for -- see tiedCandidatesFor.
+  let selectedTiedCandidates = $derived(
+    selectedFunction ? tiedCandidatesFor(selectedFunction.entry_address) : [],
+  );
 
   // Real, honest stand-in for "functions identified": how many internal
   // (non-external) functions have at least one FunctionID candidate, out of
@@ -2657,48 +2718,75 @@ interface ApplyRenamesResult {
     functionRenameSuccess = "";
   }
 
-  function tiedFidCandidatesFor(entryAddress: string): { name: string; source_label: string }[] {
+  function tiedCandidatesFor(entryAddress: string): { name: string; source_label: string }[] {
     // RTTI already gives the real, verified answer for this function --
-    // either one confirmed class name (auto-resolved directly) or the
-    // real set of classes the compiler/linker folded together (a fact,
-    // not an ambiguity to resolve). Either way, arbitration has nothing to
+    // either one confirmed class name or the real set of classes the
+    // compiler/linker folded together (both auto-resolved directly, see
+    // automaticRenameEvaluation). Either way, arbitration has nothing to
     // add and would just spend a real API call on an already-known answer.
     const rttiClassNames = importedExport?.functions.find(
       (candidate) => candidate.entry_address === entryAddress,
     )?.rtti_class_names;
     if (rttiClassNames && rttiClassNames.length > 0) return [];
 
-    const candidates = uniqueFidCandidates(identifications.get(entryAddress) ?? []);
-    const topScore = candidates[0]?.overall_score;
-    if (topScore === undefined) return [];
+    const fidCandidates = uniqueFidCandidates(identifications.get(entryAddress) ?? []);
+    const topFidScore = fidCandidates[0]?.overall_score;
+    const tiedFid = topFidScore === undefined
+      ? []
+      : fidCandidates.filter(
+          (candidate) => Math.abs(candidate.overall_score - topFidScore) < 0.0001,
+        );
 
-    const tied = candidates.filter(
-      (candidate) => Math.abs(candidate.overall_score - topScore) < 0.0001,
-    );
-    if (tied.length < 2) return [];
+    if (tiedFid.length >= 2) {
+      // A researcher wouldn't weigh all tied candidates equally: narrow to
+      // whichever are independently confirmed to exist somewhere else in
+      // this exact binary via RTTI, discounting FID's fuzzy-matched noise
+      // from libraries this binary shows no other trace of using. Only
+      // narrows when that leaves a strictly smaller, non-empty set --
+      // otherwise the full tied set is used, unchanged.
+      const corroborated = tiedFid.filter((candidate) =>
+        isCorroboratedByRtti(candidate.name, knownRealClassNames),
+      );
+      const isNarrowed = corroborated.length > 0 && corroborated.length < tiedFid.length;
+      const narrowed = isNarrowed ? corroborated : tiedFid;
+      if (narrowed.length >= 2) {
+        return narrowed.map((candidate) => ({
+          name: candidate.name,
+          source_label: isNarrowed
+            ? `FunctionID (${candidate.library_family} ${candidate.library_version}) — corroboré par RTTI ailleurs dans ce binaire`
+            : `FunctionID (${candidate.library_family} ${candidate.library_version})`,
+        }));
+      }
+    }
 
-    // A researcher wouldn't weigh all tied candidates equally: narrow to
-    // whichever are independently confirmed to exist somewhere else in
-    // this exact binary via RTTI, discounting FID's fuzzy-matched noise
-    // from libraries this binary shows no other trace of using. Only
-    // narrows when that leaves a strictly smaller, non-empty set --
-    // otherwise the full tied set is used, unchanged.
-    const corroborated = tied.filter((candidate) =>
-      isCorroboratedByRtti(candidate.name, knownRealClassNames),
-    );
-    const isNarrowed = corroborated.length > 0 && corroborated.length < tied.length;
-    const narrowed = isNarrowed ? corroborated : tied;
+    // No usable FunctionID tie -- several genuinely different library
+    // functions can still compile to byte-identical code and tie at the
+    // exact same BSim similarity/significance (see
+    // identification_corroboration.rs's clean-winner rule: a tied address
+    // never corroborates any one of the tied names by repetition alone).
+    // Same shape of ambiguity as FunctionID's tied candidates, just from a
+    // different identification method -- just as suited to the same
+    // context-based arbitration.
+    const bsim = bsimResultForAddress(entryAddress);
+    const bsimCandidates = bsim?.status === "available" ? uniqueBsimCandidates(bsim.matches) : [];
+    const topSimilarity = bsimCandidates[0]?.similarity;
+    const tiedBsim = topSimilarity === undefined
+      ? []
+      : bsimCandidates.filter(
+          (candidate) => topSimilarity - candidate.similarity < automaticBsimMinimumMargin,
+        );
+    if (tiedBsim.length >= 2) {
+      return tiedBsim.map((candidate) => ({
+        name: candidate.name,
+        source_label: `BSim (${candidate.executable}, similarité ${candidate.similarity.toFixed(3)})`,
+      }));
+    }
 
-    return narrowed.map((candidate) => ({
-      name: candidate.name,
-      source_label: isNarrowed
-        ? `FunctionID (${candidate.library_family} ${candidate.library_version}) — corroboré par RTTI ailleurs dans ce binaire`
-        : `FunctionID (${candidate.library_family} ${candidate.library_version})`,
-    }));
+    return [];
   }
 
   async function arbitrateFunction(entryAddress: string): Promise<void> {
-    const candidates = tiedFidCandidatesFor(entryAddress);
+    const candidates = tiedCandidatesFor(entryAddress);
     if (candidates.length === 0) return;
 
     arbitratingAddresses = new Set(arbitratingAddresses).add(entryAddress);
@@ -2742,7 +2830,7 @@ interface ApplyRenamesResult {
         (entryAddress) =>
           !arbitrationResults.has(entryAddress) &&
           !arbitrationErrors.has(entryAddress) &&
-          tiedFidCandidatesFor(entryAddress).length > 0,
+          tiedCandidatesFor(entryAddress).length > 0,
       );
     if (pending.length === 0) return;
 
@@ -4700,6 +4788,47 @@ interface ApplyRenamesResult {
                       </div>
                     {/if}
 
+                    {#if selectedTiedCandidates.length > 1}
+                      {@const currentResult = arbitrationResults.get(selectedFunction.entry_address)}
+                      {@const currentError = arbitrationErrors.get(selectedFunction.entry_address)}
+                      {@const isRunning = arbitratingAddresses.has(selectedFunction.entry_address)}
+                      {@const tiedFromBsim = selectedTiedCandidates[0]?.source_label.startsWith("BSim")}
+                      <div class="evidence-source-group arbitration-evidence-group">
+                        <h5>Agent d'arbitrage IA
+                          <span>
+                            {selectedTiedCandidates.length} noms ex æquo ({tiedFromBsim ? "BSim" : "FunctionID"} reconnaît la forme, mais ne peut pas choisir le nom exact) — un agent IA tranche à partir du contexte réel (appelants, appelés, chaînes).
+                          </span>
+                        </h5>
+                        <div class="arbitration-panel">
+                          {#if isRunning}
+                            <p class="arbitration-status">L'agent d'arbitrage réfléchit…</p>
+                          {:else if currentResult}
+                            {@const chosenName = currentResult.chosen_name}
+                            {@const chosenDisplayName = chosenName ? displayCandidateName(chosenName) : null}
+                            {@const chosenSafeName = chosenName ? (normalizedAutomaticSymbolName(chosenName) ?? chosenName) : null}
+                            <div class="arbitration-result">
+                              {#if chosenDisplayName && chosenSafeName}
+                                <strong>Choix de l'agent : {chosenDisplayName}</strong>
+                                <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(chosenSafeName)}>Utiliser ce nom ({chosenSafeName})</button>
+                              {:else}
+                                <strong>L'agent reste incertain</strong>
+                              {/if}
+                              <p>{currentResult.reasoning}</p>
+                              <small>Fournisseur : {currentResult.provider_label}</small>
+                            </div>
+                          {:else if currentError}
+                            <p class="settings-inline-error" role="alert">{currentError}</p>
+                            <button type="button" class="secondary-button" onclick={requestArbitration}>Réessayer</button>
+                          {:else if aiProviders.some((provider) => provider.enabled)}
+                            <p class="arbitration-status">En attente de son tour dans la file d'arbitrage automatique…</p>
+                          {:else}
+                            <p class="arbitration-status">Aucun fournisseur IA activé — configure-le dans Réglages pour que l'arbitrage se fasse automatiquement, ou lance-le manuellement.</p>
+                            <button type="button" class="secondary-button" onclick={requestArbitration}>Demander à l'agent d'arbitrage</button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/if}
+
                     {#if selectedIdentificationCandidates.length > 0}
                       <div class="evidence-source-group">
                         <h5>FunctionID
@@ -4712,38 +4841,6 @@ interface ApplyRenamesResult {
                             </span>
                           {/if}
                         </h5>
-                        {#if selectedIdentificationTopTieCount > 1 && selectedFunction.rtti_class_names.length === 0}
-                          {@const currentResult = arbitrationResults.get(selectedFunction.entry_address)}
-                          {@const currentError = arbitrationErrors.get(selectedFunction.entry_address)}
-                          {@const isRunning = arbitratingAddresses.has(selectedFunction.entry_address)}
-                          <div class="arbitration-panel">
-                            {#if isRunning}
-                              <p class="arbitration-status">L'agent d'arbitrage réfléchit…</p>
-                            {:else if currentResult}
-                              {@const chosenName = currentResult.chosen_name}
-                              {@const chosenDisplayName = chosenName ? displayCandidateName(chosenName) : null}
-                              {@const chosenSafeName = chosenName ? (normalizedAutomaticSymbolName(chosenName) ?? chosenName) : null}
-                              <div class="arbitration-result">
-                                {#if chosenDisplayName && chosenSafeName}
-                                  <strong>Choix de l'agent : {chosenDisplayName}</strong>
-                                  <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(chosenSafeName)}>Utiliser ce nom ({chosenSafeName})</button>
-                                {:else}
-                                  <strong>L'agent reste incertain</strong>
-                                {/if}
-                                <p>{currentResult.reasoning}</p>
-                                <small>Fournisseur : {currentResult.provider_label}</small>
-                              </div>
-                            {:else if currentError}
-                              <p class="settings-inline-error" role="alert">{currentError}</p>
-                              <button type="button" class="secondary-button" onclick={requestArbitration}>Réessayer</button>
-                            {:else if aiProviders.some((provider) => provider.enabled)}
-                              <p class="arbitration-status">En attente de son tour dans la file d'arbitrage automatique…</p>
-                            {:else}
-                              <p class="arbitration-status">Aucun fournisseur IA activé — configure-le dans Réglages pour que l'arbitrage se fasse automatiquement, ou lance-le manuellement.</p>
-                              <button type="button" class="secondary-button" onclick={requestArbitration}>Demander à l'agent d'arbitrage</button>
-                            {/if}
-                          </div>
-                        {/if}
                         <details
                           class="fid-raw-candidates"
                           open={!(selectedIdentificationTopTieCount > 1 && !!arbitrationResults.get(selectedFunction.entry_address)?.chosen_name)}
@@ -8984,6 +9081,7 @@ interface ApplyRenamesResult {
   .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
   .rtti-evidence-group h5 { color: #86efac; }
+  .arbitration-evidence-group h5 { color: #c4b5fd; }
   .rtti-corroboration-badge { display: inline-block; margin-left: 0.4rem; padding: 0.12rem 0.4rem; border-radius: 4px; background: #123326; color: #86efac; font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
   .fid-raw-candidates > summary { margin-bottom: 0.4rem; color: #8192ad; font-size: 0.66rem; cursor: pointer; list-style: none; }
   .fid-raw-candidates > summary::-webkit-details-marker { display: none; }
