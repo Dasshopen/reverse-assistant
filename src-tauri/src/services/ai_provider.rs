@@ -39,6 +39,12 @@ pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f64>,
+    /// Ask compatible providers (including Ollama) to constrain decoding to
+    /// one JSON object instead of relying on prompt wording alone.
+    pub require_json_object: bool,
+    /// Optional strict schema. When present it takes precedence over generic
+    /// JSON mode and is supported by Ollama's OpenAI-compatible endpoint.
+    pub response_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +103,18 @@ pub(crate) fn build_request_body_json(request: &ChatCompletionRequest) -> Value 
     });
     if let Some(temperature) = request.temperature {
         body["temperature"] = json!(temperature);
+    }
+    if let Some(schema) = &request.response_schema {
+        body["response_format"] = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "reverse_assistant_response",
+                "strict": true,
+                "schema": schema
+            }
+        });
+    } else if request.require_json_object {
+        body["response_format"] = json!({ "type": "json_object" });
     }
     body
 }
@@ -196,6 +214,8 @@ mod tests {
                 },
             ],
             temperature: None,
+            require_json_object: false,
+            response_schema: None,
         };
 
         let body = build_request_body_json(&request);
@@ -216,11 +236,35 @@ mod tests {
             model: "gpt-4o-mini".to_owned(),
             messages: vec![],
             temperature: Some(0.2),
+            require_json_object: true,
+            response_schema: None,
         };
 
         let body = build_request_body_json(&request);
 
         assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn a_strict_schema_takes_precedence_over_generic_json_mode() {
+        let request = ChatCompletionRequest {
+            model: "qwen2.5-coder:7b".to_owned(),
+            messages: vec![],
+            temperature: Some(0.0),
+            require_json_object: true,
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            })),
+        };
+        let body = build_request_body_json(&request);
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"]["required"][0],
+            "name"
+        );
     }
 
     #[test]

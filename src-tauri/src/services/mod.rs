@@ -18,4 +18,5 @@ pub mod naming_generation;
 pub mod program_overview;
 pub mod project_storage;
 pub mod report;
+pub mod semantic_memory;
 pub mod setup;

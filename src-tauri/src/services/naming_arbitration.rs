@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::models::ghidra_export::{GhidraExport, GhidraFunction};
 use crate::services::ai_provider::{
@@ -255,15 +256,76 @@ pub fn build_arbitration_request(
             },
         ],
         temperature: Some(0.0),
+        require_json_object: true,
+        response_schema: Some(arbitration_result_schema(None)),
     }
 }
 
 const MAX_BATCH_CODE_CHARS: usize = 4_500;
 
+fn arbitration_result_schema(entry_address: Option<&str>) -> Value {
+    let mut properties = serde_json::Map::from_iter([
+        (
+            "chosen_name".to_owned(),
+            json!({ "anyOf": [{"type":"string"}, {"type":"null"}] }),
+        ),
+        (
+            "confidence".to_owned(),
+            json!({
+                "type":"integer",
+                "enum":[0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100]
+            }),
+        ),
+        (
+            "evidence".to_owned(),
+            json!({ "type":"array", "items":{"type":"string"}, "maxItems":12 }),
+        ),
+        ("reasoning".to_owned(), json!({ "type":"string" })),
+    ]);
+    let mut required = vec!["chosen_name", "confidence", "evidence", "reasoning"];
+    if let Some(entry_address) = entry_address {
+        properties.insert(
+            "entry_address".to_owned(),
+            json!({ "type":"string", "const":entry_address }),
+        );
+        required.insert(0, "entry_address");
+    }
+    json!({
+        "type":"object",
+        "additionalProperties":false,
+        "properties":properties,
+        "required":required
+    })
+}
+
+fn arbitration_batch_schema(addresses: &[String]) -> Value {
+    let items = addresses
+        .iter()
+        .map(|address| arbitration_result_schema(Some(address)))
+        .collect::<Vec<_>>();
+    json!({
+        "type":"object",
+        "additionalProperties":false,
+        "properties":{
+            "results":{
+                "type":"array",
+                "minItems":addresses.len(),
+                "maxItems":addresses.len(),
+                "prefixItems":items
+            }
+        },
+        "required":["results"]
+    })
+}
+
 pub fn build_arbitration_batch_request(
     requests: &[(String, ArbitrationRequest)],
     model: &str,
 ) -> ChatCompletionRequest {
+    let addresses = requests
+        .iter()
+        .map(|(address, _)| address.clone())
+        .collect::<Vec<_>>();
     let items = requests
         .iter()
         .map(|(address, request)| {
@@ -305,6 +367,8 @@ Il doit y avoir exactement une entree par adresse, dans le meme ordre."
             },
         ],
         temperature: Some(0.0),
+        require_json_object: true,
+        response_schema: Some(arbitration_batch_schema(&addresses)),
     }
 }
 

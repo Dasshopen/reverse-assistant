@@ -2232,7 +2232,7 @@ interface ApplyRenamesResult {
         );
         generationResults = new Map(
           storedGeneration
-            .filter((stored) => stored.context_complete && stored.agent_version >= 2)
+            .filter((stored) => stored.context_complete && stored.agent_version >= 3)
             .map((stored) => [
             stored.entry_address,
             {
@@ -3158,6 +3158,13 @@ interface ApplyRenamesResult {
     if (isBackgroundGenerating) return;
     if (!aiProviders.some((provider) => provider.enabled)) return;
 
+    let semanticOrder: string[] = [];
+    try {
+      semanticOrder = await invoke<string[]>("get_semantic_analysis_order");
+    } catch (error) {
+      console.warn("Semantic agent ordering unavailable; using the local fallback", error);
+    }
+    const semanticRank = new Map(semanticOrder.map((address, index) => [address, index]));
     const pending = unidentifiedFunctions
       .filter(
         (func) =>
@@ -3166,6 +3173,13 @@ interface ApplyRenamesResult {
           !generationErrors.has(func.entry_address),
       )
       .sort((left, right) => {
+        const leftRank = semanticRank.get(left.entry_address);
+        const rightRank = semanticRank.get(right.entry_address);
+        if (leftRank !== undefined || rightRank !== undefined) {
+          if (leftRank === undefined) return 1;
+          if (rightRank === undefined) return -1;
+          if (leftRank !== rightRank) return leftRank - rightRank;
+        }
         const score = (func: GhidraFunction) =>
           func.strings.length * 6 +
           func.calls.filter((call) => !isGeneratedFunctionName(call.target_name)).length * 4 +
@@ -3178,14 +3192,43 @@ interface ApplyRenamesResult {
 
     isBackgroundGenerating = true;
     try {
-      const batchSize = 6;
-      for (let start = 0; start < pending.length; start += batchSize) {
+      // Real qwen2.5-coder:7b probes showed cross-function contamination when
+      // three large decompilations share one prompt. Keep simple functions in
+      // efficient groups, but isolate complex ones so evidence cannot leak.
+      const functionsByAddress = new Map(
+        unidentifiedFunctions.map((func) => [func.entry_address, func]),
+      );
+      const batches: string[][] = [];
+      let compactBatch: string[] = [];
+      const flushCompactBatch = () => {
+        if (compactBatch.length > 0) batches.push(compactBatch);
+        compactBatch = [];
+      };
+      for (const address of pending) {
+        const func = functionsByAddress.get(address);
+        const code = decompileCache.get(address)?.decompiled_code ?? func?.decompiled_code ?? "";
+        const isComplex =
+          code.length > 3_000 ||
+          (func?.calls.length ?? 0) > 7 ||
+          (func?.parameters.length ?? 0) > 6;
+        if (isComplex) {
+          flushCompactBatch();
+          batches.push([address]);
+        } else {
+          compactBatch.push(address);
+          if (compactBatch.length === 3) flushCompactBatch();
+        }
+      }
+      flushCompactBatch();
+
+      let completed = 0;
+      for (const addresses of batches) {
+        completed += addresses.length;
         analysisProgress = {
           stage: "ai-naming",
-          message: `Suggestions IA groupées : ${Math.min(start + batchSize, pending.length)} / ${pending.length} fonctions…`,
-          completed_percent: 70 + Math.round(29 * Math.min(start + batchSize, pending.length) / pending.length),
+          message: `Suggestions IA groupées : ${completed} / ${pending.length} fonctions…`,
+          completed_percent: 70 + Math.round(29 * completed / pending.length),
         };
-        const addresses = pending.slice(start, start + batchSize);
         for (const address of addresses) {
           generatingAddresses = new Set(generatingAddresses).add(address);
         }

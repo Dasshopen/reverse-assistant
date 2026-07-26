@@ -1582,7 +1582,7 @@ mod tests {
             confidence: 75,
             evidence: vec!["appel CreateFileA".to_owned()],
             context_complete: true,
-            agent_version: crate::services::naming_arbitration::NAMING_PIPELINE_VERSION,
+            agent_version: crate::services::naming_generation::NAMING_GENERATION_VERSION,
         }
     }
 

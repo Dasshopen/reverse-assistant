@@ -669,7 +669,70 @@ fn generate_identification_suggestions(
         match provider.complete(&request).and_then(|response| {
             naming_generation::parse_generation_batch_response(&response, &expected)
         }) {
-            Ok(results) => {
+            Ok(mut results) => {
+                let followup_contexts = results
+                    .iter()
+                    .filter(|item| {
+                        item.result.suggested_name.is_none()
+                            && !item.result.requested_tools.is_empty()
+                    })
+                    .filter_map(|item| {
+                        let context = contexts
+                            .iter()
+                            .find(|(address, _)| address == &item.entry_address)?
+                            .1
+                            .clone();
+                        match services::semantic_memory::execute_investigation_tools(
+                            &export,
+                            &item.entry_address,
+                            &item.result.requested_tools,
+                        ) {
+                            Ok(findings) => {
+                                Some(Ok((item.entry_address.clone(), context, findings)))
+                            }
+                            Err(error) => Some(Err(error)),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, String>>();
+
+                match followup_contexts {
+                    Ok(followup_contexts) if !followup_contexts.is_empty() => {
+                        let followup_expected = followup_contexts
+                            .iter()
+                            .map(|(address, _, _)| address.clone())
+                            .collect::<Vec<_>>();
+                        let followup_request =
+                            naming_generation::build_generation_followup_batch_request(
+                                &followup_contexts,
+                                &secrets.model,
+                            );
+                        match provider.complete(&followup_request).and_then(|response| {
+                            naming_generation::parse_generation_batch_response(
+                                &response,
+                                &followup_expected,
+                            )
+                        }) {
+                            Ok(followups) => {
+                                for followup in followups {
+                                    if let Some(initial) = results
+                                        .iter_mut()
+                                        .find(|item| item.entry_address == followup.entry_address)
+                                    {
+                                        initial.result = followup.result;
+                                    }
+                                }
+                            }
+                            Err(error) => errors.push(format!(
+                                "{} (investigation follow-up): {error}",
+                                secrets.label
+                            )),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        errors.push(format!("{} (investigation tools): {error}", secrets.label))
+                    }
+                }
                 for item in results {
                     by_address
                         .entry(item.entry_address)
@@ -734,7 +797,45 @@ fn generate_identification_suggestion(
             .complete(&request)
             .and_then(|response| naming_generation::parse_generation_response(&response))
         {
-            Ok(result) => answers.push((secrets.label, result)),
+            Ok(mut result) => {
+                if result.suggested_name.is_none() && !result.requested_tools.is_empty() {
+                    match services::semantic_memory::execute_investigation_tools(
+                        &export,
+                        &entry_address,
+                        &result.requested_tools,
+                    ) {
+                        Ok(findings) => {
+                            let followup_contexts =
+                                vec![(entry_address.clone(), context.clone(), findings)];
+                            let followup_request =
+                                naming_generation::build_generation_followup_batch_request(
+                                    &followup_contexts,
+                                    &secrets.model,
+                                );
+                            match provider.complete(&followup_request).and_then(|response| {
+                                naming_generation::parse_generation_batch_response(
+                                    &response,
+                                    std::slice::from_ref(&entry_address),
+                                )
+                            }) {
+                                Ok(mut followups) => {
+                                    if let Some(followup) = followups.pop() {
+                                        result = followup.result;
+                                    }
+                                }
+                                Err(error) => errors.push(format!(
+                                    "{} (investigation follow-up): {error}",
+                                    secrets.label
+                                )),
+                            }
+                        }
+                        Err(error) => {
+                            errors.push(format!("{} (investigation tools): {error}", secrets.label))
+                        }
+                    }
+                }
+                answers.push((secrets.label, result));
+            }
             Err(error) => errors.push(format!("{}: {error}", secrets.label)),
         }
     }
@@ -753,6 +854,24 @@ fn generate_identification_suggestion(
         confidence: synthesized.confidence,
         evidence: synthesized.evidence,
     })
+}
+
+/// Returns a deterministic, evidence-first queue for the local agent.  The
+/// frontend used to rank functions with a small UI-only heuristic; keeping
+/// the scheduler in Rust lets it use the real thunk-aware graph, entry points,
+/// imports and RTTI facts shared with the prompt builder.
+#[tauri::command]
+fn get_semantic_analysis_order(
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+) -> Result<Vec<String>, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    Ok(services::semantic_memory::rank_for_semantic_analysis(
+        &export,
+    ))
 }
 
 // Persisted alongside the project (see StoredGenerationOutcome), same
@@ -774,7 +893,7 @@ fn save_generation_result(
         confidence: outcome.confidence,
         evidence: outcome.evidence,
         context_complete: true,
-        agent_version: naming_arbitration::NAMING_PIPELINE_VERSION,
+        agent_version: naming_generation::NAMING_GENERATION_VERSION,
     };
     match results
         .iter_mut()
@@ -1294,6 +1413,7 @@ pub fn run() {
             get_arbitration_results,
             generate_identification_suggestion,
             generate_identification_suggestions,
+            get_semantic_analysis_order,
             save_generation_result,
             get_generation_results,
             get_managed_setup_plan,
@@ -1339,6 +1459,7 @@ mod tests {
             reasoning: "raison observable".to_owned(),
             confidence,
             evidence: vec!["preuve".to_owned()],
+            requested_tools: Vec::new(),
         }
     }
 
