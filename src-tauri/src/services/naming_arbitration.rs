@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::models::ghidra_export::{GhidraExport, GhidraFunction};
-use crate::services::ai_provider::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::services::ai_provider::{
+    strip_markdown_json_fence, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
+};
 use crate::services::call_graph;
 
 /// A confident (or explicitly "incertain") arbitration answer, persisted
@@ -195,8 +197,9 @@ pub fn parse_arbitration_response(
     response: &ChatCompletionResponse,
     candidates: &[ArbitrationCandidate],
 ) -> Result<ArbitrationResult, String> {
-    let parsed: ArbitrationResponseJson = serde_json::from_str(&response.content)
-        .map_err(|error| format!("invalid arbitration response JSON: {error}"))?;
+    let parsed: ArbitrationResponseJson =
+        serde_json::from_str(strip_markdown_json_fence(&response.content))
+            .map_err(|error| format!("invalid arbitration response JSON: {error}"))?;
 
     let chosen_name = match parsed.chosen_name {
         Some(name) if candidates.iter().any(|candidate| candidate.name == name) => Some(name),
@@ -428,5 +431,23 @@ mod tests {
             .expect_err("malformed JSON should be rejected");
 
         assert!(error.contains("invalid arbitration response JSON"));
+    }
+
+    #[test]
+    fn a_response_wrapped_in_a_markdown_json_fence_is_still_parsed() {
+        // Real content observed from qwen2.5-coder:7b: it wraps its JSON
+        // answer in a fence even when told to respond with nothing else.
+        let candidates = sample_candidates();
+        let response = ChatCompletionResponse {
+            content: "```json\n{\"chosen_name\": \"std::out_of_range::out_of_range\", \"reasoning\": \"...\"}\n```".to_owned(),
+        };
+
+        let result = parse_arbitration_response(&response, &candidates)
+            .expect("a fenced JSON response should still parse");
+
+        assert_eq!(
+            result.chosen_name,
+            Some("std::out_of_range::out_of_range".to_owned())
+        );
     }
 }

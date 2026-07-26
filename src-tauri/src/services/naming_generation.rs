@@ -12,7 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::services::ai_provider::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::services::ai_provider::{
+    strip_markdown_json_fence, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
+};
 
 pub use crate::services::naming_arbitration::{build_context_for_function, ArbitrationContext};
 
@@ -134,8 +136,9 @@ struct GenerationResponseJson {
 pub fn parse_generation_response(
     response: &ChatCompletionResponse,
 ) -> Result<GenerationResult, String> {
-    let parsed: GenerationResponseJson = serde_json::from_str(&response.content)
-        .map_err(|error| format!("invalid generation response JSON: {error}"))?;
+    let parsed: GenerationResponseJson =
+        serde_json::from_str(strip_markdown_json_fence(&response.content))
+            .map_err(|error| format!("invalid generation response JSON: {error}"))?;
 
     let suggested_name = match parsed.suggested_name {
         Some(name) if is_plausible_identifier(&name) => Some(name),
@@ -271,5 +274,21 @@ mod tests {
             .expect_err("malformed JSON should be rejected");
 
         assert!(error.contains("invalid generation response JSON"));
+    }
+
+    #[test]
+    fn a_response_wrapped_in_a_markdown_json_fence_is_still_parsed() {
+        // Real content returned by qwen2.5-coder:7b for this exact prompt --
+        // every real generation call failed with "expected value at line 1
+        // column 1" (the fence's leading backtick) until this was fixed.
+        let response = ChatCompletionResponse {
+            content: "```json\n{\n  \"suggested_name\": null,\n  \"reasoning\": \"Le contexte est trop générique et ne fournit pas d'informations suffisantes pour déterminer le rôle précis de cette fonction.\"\n}\n```".to_owned(),
+        };
+
+        let result = parse_generation_response(&response)
+            .expect("a fenced JSON response should still parse");
+
+        assert_eq!(result.suggested_name, None);
+        assert!(result.reasoning.contains("générique"));
     }
 }

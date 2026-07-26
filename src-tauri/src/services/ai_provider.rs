@@ -46,6 +46,27 @@ pub struct ChatCompletionResponse {
     pub content: String,
 }
 
+/// Code-specialized models (confirmed: qwen2.5-coder, unlike llama3.1)
+/// wrap a JSON answer in a markdown code fence even when told to respond
+/// with nothing else -- real output observed: "```json\n{...}\n```".
+/// `serde_json::from_str` rejects that outright (fails on the leading
+/// backtick), so every caller expecting a raw JSON object in `content`
+/// strips an optional fence first rather than trusting the model's
+/// formatting instincts over its actual behavior.
+pub fn strip_markdown_json_fence(content: &str) -> &str {
+    let trimmed = content.trim();
+    let without_open = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    without_open
+        .strip_suffix("```")
+        .map(str::trim_end)
+        .unwrap_or(without_open)
+}
+
 pub trait ChatCompletionProvider {
     fn complete(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse, String>;
 }
@@ -238,5 +259,34 @@ mod tests {
             parse_response_body_json("not json").expect_err("invalid JSON should be rejected");
 
         assert!(error.contains("invalid chat completion response JSON"));
+    }
+
+    #[test]
+    fn a_json_fenced_response_has_its_fence_stripped() {
+        // Real content observed from qwen2.5-coder:7b for a prompt that
+        // explicitly asked for a bare JSON object and nothing else.
+        let content = "```json\n{\n  \"suggested_name\": null,\n  \"reasoning\": \"...\"\n}\n```";
+
+        assert_eq!(
+            strip_markdown_json_fence(content),
+            "{\n  \"suggested_name\": null,\n  \"reasoning\": \"...\"\n}"
+        );
+    }
+
+    #[test]
+    fn a_response_with_no_fence_is_returned_unchanged() {
+        let content = r#"{"chosen_name": "memcpy", "reasoning": "..."}"#;
+
+        assert_eq!(strip_markdown_json_fence(content), content);
+    }
+
+    #[test]
+    fn a_fence_without_the_json_language_tag_is_also_stripped() {
+        let content = "```\n{\"chosen_name\": null, \"reasoning\": \"...\"}\n```";
+
+        assert_eq!(
+            strip_markdown_json_fence(content),
+            "{\"chosen_name\": null, \"reasoning\": \"...\"}"
+        );
     }
 }
