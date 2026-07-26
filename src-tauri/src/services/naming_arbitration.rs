@@ -258,6 +258,56 @@ pub fn build_arbitration_request(
     }
 }
 
+const MAX_BATCH_CODE_CHARS: usize = 4_500;
+
+pub fn build_arbitration_batch_request(
+    requests: &[(String, ArbitrationRequest)],
+    model: &str,
+) -> ChatCompletionRequest {
+    let items = requests
+        .iter()
+        .map(|(address, request)| {
+            let candidates = request
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    format!("- {} (source : {})", candidate.name, candidate.source_label)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut context = request.context.clone();
+            context.decompiled_code = context
+                .decompiled_code
+                .as_deref()
+                .map(|code| bounded_text(code, MAX_BATCH_CODE_CHARS));
+            format!(
+                "ADRESSE {address}\nCANDIDATS :\n{candidates}\n\nCONTEXTE :\n{}",
+                format_context(&context)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n==========\n\n");
+
+    ChatCompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "{SYSTEM_PROMPT} Tu arbitres plusieurs fonctions independantes. Retourne uniquement un objet JSON \
+{{\"results\":[{{\"entry_address\":\"0x...\",\"chosen_name\":\"nom de la liste\" ou null,\"confidence\":0,\"evidence\":[],\"reasoning\":\"...\"}}]}}. \
+Il doit y avoir exactement une entree par adresse, dans le meme ordre."
+                ),
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: items,
+            },
+        ],
+        temperature: Some(0.0),
+    }
+}
+
 #[derive(Deserialize)]
 struct ArbitrationResponseJson {
     chosen_name: Option<String>,
@@ -266,6 +316,68 @@ struct ArbitrationResponseJson {
     confidence: u8,
     #[serde(default)]
     evidence: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ArbitrationBatchResponseJson {
+    results: Vec<ArbitrationBatchItemJson>,
+}
+
+#[derive(Deserialize)]
+struct ArbitrationBatchItemJson {
+    entry_address: String,
+    chosen_name: Option<String>,
+    reasoning: String,
+    #[serde(default)]
+    confidence: u8,
+    #[serde(default)]
+    evidence: Vec<String>,
+}
+
+pub fn parse_arbitration_batch_response(
+    response: &ChatCompletionResponse,
+    requests: &[(String, ArbitrationRequest)],
+) -> Result<Vec<(String, ArbitrationResult)>, String> {
+    let parsed: ArbitrationBatchResponseJson =
+        serde_json::from_str(strip_markdown_json_fence(&response.content))
+            .map_err(|error| format!("invalid arbitration batch response JSON: {error}"))?;
+    requests
+        .iter()
+        .map(|(address, request)| {
+            let item = parsed
+                .results
+                .iter()
+                .find(|item| &item.entry_address == address)
+                .ok_or_else(|| {
+                    format!("the model omitted function '{address}' from arbitration")
+                })?;
+            let chosen_name = match &item.chosen_name {
+                Some(name)
+                    if request
+                        .candidates
+                        .iter()
+                        .any(|candidate| &candidate.name == name) =>
+                {
+                    Some(name.clone())
+                }
+                Some(name) => {
+                    return Err(format!(
+                        "the model chose '{name}' outside the candidate list for '{address}'"
+                    ))
+                }
+                None => None,
+            };
+            Ok((
+                address.clone(),
+                ArbitrationResult {
+                    chosen_name,
+                    reasoning: item.reasoning.clone(),
+                    confidence: item.confidence.min(100),
+                    evidence: item.evidence.clone(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Parses the model's response and enforces the closed-set guarantee: a
@@ -571,5 +683,45 @@ mod tests {
             result.chosen_name,
             Some("std::out_of_range::out_of_range".to_owned())
         );
+    }
+
+    #[test]
+    fn batch_arbitration_enforces_each_functions_own_candidate_list() {
+        let requests = vec![
+            (
+                "0x1".to_owned(),
+                ArbitrationRequest {
+                    candidates: vec![ArbitrationCandidate {
+                        name: "open_file".to_owned(),
+                        source_label: "BSim".to_owned(),
+                    }],
+                    context: ArbitrationContext::default(),
+                },
+            ),
+            (
+                "0x2".to_owned(),
+                ArbitrationRequest {
+                    candidates: vec![ArbitrationCandidate {
+                        name: "close_file".to_owned(),
+                        source_label: "BSim".to_owned(),
+                    }],
+                    context: ArbitrationContext::default(),
+                },
+            ),
+        ];
+        let response = ChatCompletionResponse {
+            content: r#"{"results":[
+                {"entry_address":"0x1","chosen_name":"open_file","confidence":80,"evidence":[],"reasoning":"appel CreateFile"},
+                {"entry_address":"0x2","chosen_name":"close_file","confidence":79,"evidence":[],"reasoning":"appel CloseHandle"}
+            ]}"#
+                .to_owned(),
+        };
+
+        let parsed = parse_arbitration_batch_response(&response, &requests)
+            .expect("a complete closed-set batch should parse");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].1.chosen_name.as_deref(), Some("open_file"));
+        assert_eq!(parsed[1].1.chosen_name.as_deref(), Some("close_file"));
     }
 }

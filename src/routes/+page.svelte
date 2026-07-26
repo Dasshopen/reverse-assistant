@@ -224,6 +224,10 @@ interface ArbitrationOutcome {
   evidence: string[];
 }
 
+interface ArbitrationBatchOutcome extends ArbitrationOutcome {
+  entry_address: string;
+}
+
 interface StoredArbitrationOutcome extends ArbitrationOutcome {
   entry_address: string;
   context_complete: boolean;
@@ -3041,12 +3045,9 @@ interface ApplyRenamesResult {
     await arbitrateFunction(selectedFunction.entry_address);
   }
 
-  // Runs automatically once an AI provider is enabled -- one call at a
-  // time (never in parallel), both to keep real API cost/rate under
-  // control and because it mirrors every other Ghidra-adjacent queue in
-  // this app. Already-resolved or already-failed functions are skipped,
-  // so reopening a project never re-spends real API calls on the same
-  // tie twice.
+  // Runs automatically once an AI provider is enabled. Several independent
+  // ties share one model request, while every returned choice retains its
+  // own candidates, evidence and persisted outcome.
   async function runBackgroundArbitration() {
     if (isBackgroundArbitrating) return;
     if (!aiProviders.some((provider) => provider.enabled)) return;
@@ -3063,8 +3064,42 @@ interface ApplyRenamesResult {
 
     isBackgroundArbitrating = true;
     try {
-      for (const entryAddress of pending) {
-        await arbitrateFunction(entryAddress);
+      const batchSize = 6;
+      for (let start = 0; start < pending.length; start += batchSize) {
+        const addresses = pending.slice(start, start + batchSize);
+        for (const address of addresses) {
+          arbitratingAddresses = new Set(arbitratingAddresses).add(address);
+        }
+        try {
+          const items = addresses.map((entry_address) => ({
+            entry_address,
+            candidates: tiedCandidatesFor(entry_address),
+          }));
+          const results = await invoke<ArbitrationBatchOutcome[]>(
+            "arbitrate_identification_ties",
+            { items },
+          );
+          const nextResults = new Map(arbitrationResults);
+          for (const result of results) {
+            nextResults.set(result.entry_address, result);
+            if (activeProjectId) {
+              const projectId = activeProjectId;
+              void invoke("save_arbitration_result", {
+                projectId,
+                entryAddress: result.entry_address,
+                outcome: result,
+              }).catch((error) => console.error("Failed to persist arbitration result", error));
+            }
+          }
+          arbitrationResults = nextResults;
+        } catch (batchError) {
+          console.warn("AI arbitration batch failed; retrying individually", batchError);
+          for (const address of addresses) await arbitrateFunction(address);
+        } finally {
+          const remaining = new Set(arbitratingAddresses);
+          for (const address of addresses) remaining.delete(address);
+          arbitratingAddresses = remaining;
+        }
       }
     } finally {
       isBackgroundArbitrating = false;

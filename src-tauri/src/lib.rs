@@ -225,6 +225,66 @@ struct ArbitrationOutcome {
     evidence: Vec<String>,
 }
 
+fn synthesize_arbitration_answers(
+    answers: &[(String, naming_arbitration::ArbitrationResult)],
+) -> ArbitrationOutcome {
+    let mut votes = std::collections::HashMap::<String, u32>::new();
+    for (_, answer) in answers {
+        if let Some(name) = &answer.chosen_name {
+            *votes.entry(name.clone()).or_default() += u32::from(answer.confidence.max(1));
+        }
+    }
+    let chosen_name = votes
+        .into_iter()
+        .max_by_key(|(_, weighted_confidence)| *weighted_confidence)
+        .map(|(name, _)| name);
+    let agreeing: Vec<_> = answers
+        .iter()
+        .filter(|(_, answer)| answer.chosen_name == chosen_name)
+        .collect();
+    let confidence = if chosen_name.is_some() && !agreeing.is_empty() {
+        let average = (agreeing
+            .iter()
+            .map(|(_, answer)| u16::from(answer.confidence))
+            .sum::<u16>()
+            / agreeing.len() as u16) as f64;
+        (average * (0.75 + 0.25 * agreeing.len() as f64 / answers.len() as f64)).round() as u8
+    } else {
+        0
+    };
+    let evidence = agreeing
+        .iter()
+        .flat_map(|(_, answer)| answer.evidence.clone())
+        .take(12)
+        .collect();
+    let reasoning = if chosen_name.is_some() {
+        let consensus = agreeing
+            .iter()
+            .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if agreeing.len() == answers.len() {
+            consensus
+        } else {
+            format!("{consensus} | D'autres agents ont divergé; la confiance a été réduite.")
+        }
+    } else {
+        "Les agents activés manquent de contexte exploitable; validation manuelle requise."
+            .to_owned()
+    };
+    ArbitrationOutcome {
+        chosen_name,
+        reasoning,
+        provider_label: answers
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join(" + "),
+        confidence,
+        evidence,
+    }
+}
+
 #[tauri::command(async)]
 fn arbitrate_identification_tie(
     app: AppHandle,
@@ -285,61 +345,120 @@ fn arbitrate_identification_tie(
         ));
     }
 
-    let mut votes = std::collections::HashMap::<String, u32>::new();
-    for (_, answer) in &answers {
-        if let Some(name) = &answer.chosen_name {
-            *votes.entry(name.clone()).or_default() += u32::from(answer.confidence.max(1));
+    Ok(synthesize_arbitration_answers(&answers))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ArbitrationBatchInput {
+    entry_address: String,
+    candidates: Vec<ArbitrationCandidateInput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ArbitrationBatchOutcome {
+    entry_address: String,
+    chosen_name: Option<String>,
+    reasoning: String,
+    provider_label: String,
+    confidence: u8,
+    evidence: Vec<String>,
+}
+
+#[tauri::command(async)]
+fn arbitrate_identification_ties(
+    app: AppHandle,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    items: Vec<ArbitrationBatchInput>,
+) -> Result<Vec<ArbitrationBatchOutcome>, String> {
+    if items.is_empty() || items.len() > 6 {
+        return Err("an arbitration batch must contain between 1 and 6 functions".to_owned());
+    }
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    let requests = items
+        .iter()
+        .map(|item| {
+            if item.candidates.is_empty() {
+                return Err(format!(
+                    "no candidates were provided for '{}'",
+                    item.entry_address
+                ));
+            }
+            let candidates = item
+                .candidates
+                .iter()
+                .map(|candidate| naming_arbitration::ArbitrationCandidate {
+                    name: candidate.name.clone(),
+                    source_label: candidate.source_label.clone(),
+                })
+                .collect();
+            let context =
+                naming_arbitration::build_context_for_function(&export, &item.entry_address)?;
+            Ok((
+                item.entry_address.clone(),
+                naming_arbitration::ArbitrationRequest {
+                    candidates,
+                    context,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let enabled = ai_providers::enabled_providers_for_app(&app)?;
+    if enabled.is_empty() {
+        return Err("no AI provider is enabled. Configure one under Réglages first.".to_owned());
+    }
+    let mut by_address = std::collections::HashMap::<
+        String,
+        Vec<(String, naming_arbitration::ArbitrationResult)>,
+    >::new();
+    let mut errors = Vec::new();
+    for secrets in enabled {
+        let provider = services::ai_provider::OpenAiCompatibleProvider {
+            base_url: secrets.base_url,
+            api_key: secrets.api_key,
+        };
+        let request =
+            naming_arbitration::build_arbitration_batch_request(&requests, &secrets.model);
+        match provider.complete(&request).and_then(|response| {
+            naming_arbitration::parse_arbitration_batch_response(&response, &requests)
+        }) {
+            Ok(results) => {
+                for (address, result) in results {
+                    by_address
+                        .entry(address)
+                        .or_default()
+                        .push((secrets.label.clone(), result));
+                }
+            }
+            Err(error) => errors.push(format!("{}: {error}", secrets.label)),
         }
     }
-    let chosen_name = votes
-        .into_iter()
-        .max_by_key(|(_, weighted_confidence)| *weighted_confidence)
-        .map(|(name, _)| name);
-    let agreeing: Vec<_> = answers
+    if by_address.is_empty() {
+        return Err(format!(
+            "all enabled AI providers failed: {}",
+            errors.join("; ")
+        ));
+    }
+    requests
         .iter()
-        .filter(|(_, answer)| answer.chosen_name == chosen_name)
-        .collect();
-    let confidence = if chosen_name.is_some() && !agreeing.is_empty() {
-        let average = (agreeing
-            .iter()
-            .map(|(_, answer)| u16::from(answer.confidence))
-            .sum::<u16>()
-            / agreeing.len() as u16) as f64;
-        (average * (0.75 + 0.25 * agreeing.len() as f64 / answers.len() as f64)).round() as u8
-    } else {
-        0
-    };
-    let evidence = agreeing
-        .iter()
-        .flat_map(|(_, answer)| answer.evidence.clone())
-        .take(12)
-        .collect();
-    let reasoning = if chosen_name.is_some() {
-        let consensus = agreeing
-            .iter()
-            .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        if agreeing.len() == answers.len() {
-            consensus
-        } else {
-            format!("{consensus} | D'autres agents ont divergé; la confiance a été réduite.")
-        }
-    } else {
-        "Les agents activés ne convergent pas vers un nom unique; validation manuelle requise."
-            .to_owned()
-    };
-    Ok(ArbitrationOutcome {
-        chosen_name,
-        reasoning,
-        provider_label: answers
-            .iter()
-            .map(|(label, _)| label.as_str())
-            .collect::<Vec<_>>()
-            .join(" + "),
-        confidence,
-        evidence,
-    })
+        .map(|(address, _)| {
+            let answers = by_address
+                .get(address)
+                .ok_or_else(|| format!("no provider returned an arbitration for '{address}'"))?;
+            let result = synthesize_arbitration_answers(answers);
+            Ok(ArbitrationBatchOutcome {
+                entry_address: address.clone(),
+                chosen_name: result.chosen_name,
+                reasoning: result.reasoning,
+                provider_label: result.provider_label,
+                confidence: result.confidence,
+                evidence: result.evidence,
+            })
+        })
+        .collect()
 }
 
 // Persisted alongside the project (see StoredArbitrationOutcome) so a real
@@ -1170,6 +1289,7 @@ pub fn run() {
             set_ai_provider_enabled,
             remove_ai_provider,
             arbitrate_identification_tie,
+            arbitrate_identification_ties,
             save_arbitration_result,
             get_arbitration_results,
             generate_identification_suggestion,
