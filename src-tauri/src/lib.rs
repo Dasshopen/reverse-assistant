@@ -16,7 +16,7 @@ use services::bsim_corpus::{self, BsimCorpusSummary};
 use services::call_graph::{self, CallGraphDirection, CallGraphNeighborhood};
 use services::comparison::{self, ProjectComparison};
 use services::ghidra_bsim_scan;
-use services::ghidra_decompile::{self, DecompiledFunctionDetails};
+use services::ghidra_decompile::{self, DecompiledFunctionDetails, PreparedFunctionContext};
 use services::ghidra_disassemble::{self, FunctionDisassembly};
 use services::ghidra_edits::{self, ApplyRenamesResult, FunctionRename};
 use services::ghidra_headless;
@@ -285,26 +285,27 @@ fn arbitrate_identification_tie(
         ));
     }
 
-    let mut votes = std::collections::HashMap::<String, usize>::new();
+    let mut votes = std::collections::HashMap::<String, u32>::new();
     for (_, answer) in &answers {
         if let Some(name) = &answer.chosen_name {
-            *votes.entry(name.clone()).or_default() += 1;
+            *votes.entry(name.clone()).or_default() += u32::from(answer.confidence.max(1));
         }
     }
-    let winner = votes.into_iter().max_by_key(|(_, count)| *count);
-    let chosen_name = winner
-        .filter(|(_, count)| answers.len() == 1 || *count * 2 > answers.len())
+    let chosen_name = votes
+        .into_iter()
+        .max_by_key(|(_, weighted_confidence)| *weighted_confidence)
         .map(|(name, _)| name);
     let agreeing: Vec<_> = answers
         .iter()
         .filter(|(_, answer)| answer.chosen_name == chosen_name)
         .collect();
     let confidence = if chosen_name.is_some() && !agreeing.is_empty() {
-        (agreeing
+        let average = (agreeing
             .iter()
             .map(|(_, answer)| u16::from(answer.confidence))
             .sum::<u16>()
-            / agreeing.len() as u16) as u8
+            / agreeing.len() as u16) as f64;
+        (average * (0.75 + 0.25 * agreeing.len() as f64 / answers.len() as f64)).round() as u8
     } else {
         0
     };
@@ -314,11 +315,16 @@ fn arbitrate_identification_tie(
         .take(12)
         .collect();
     let reasoning = if chosen_name.is_some() {
-        agreeing
+        let consensus = agreeing
             .iter()
             .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
             .collect::<Vec<_>>()
-            .join(" | ")
+            .join(" | ");
+        if agreeing.len() == answers.len() {
+            consensus
+        } else {
+            format!("{consensus} | D'autres agents ont divergé; la confiance a été réduite.")
+        }
     } else {
         "Les agents activés ne convergent pas vers un nom unique; validation manuelle requise."
             .to_owned()
@@ -356,6 +362,7 @@ fn save_arbitration_result(
         confidence: outcome.confidence,
         evidence: outcome.evidence,
         context_complete: true,
+        agent_version: naming_arbitration::NAMING_PIPELINE_VERSION,
     };
     match results
         .iter_mut()
@@ -382,6 +389,193 @@ struct GenerationOutcome {
     provider_label: String,
     confidence: u8,
     evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GenerationBatchOutcome {
+    entry_address: String,
+    suggested_name: Option<String>,
+    reasoning: String,
+    provider_label: String,
+    confidence: u8,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ProvisionalFunctionName {
+    entry_address: String,
+    name: String,
+}
+
+fn synthesize_generation_answers(
+    entry_address: &str,
+    answers: &[(String, naming_generation::GenerationResult)],
+) -> GenerationBatchOutcome {
+    let named: Vec<_> = answers
+        .iter()
+        .filter(|(_, answer)| answer.suggested_name.is_some())
+        .collect();
+    let best = named.iter().max_by(|(_, left), (_, right)| {
+        let left_name = left.suggested_name.as_deref().unwrap_or_default();
+        let right_name = right.suggested_name.as_deref().unwrap_or_default();
+        let left_support: f64 = named
+            .iter()
+            .map(|(_, other)| {
+                naming_generation::semantic_name_similarity(
+                    left_name,
+                    other.suggested_name.as_deref().unwrap_or_default(),
+                ) * f64::from(other.confidence.max(1))
+            })
+            .sum();
+        let right_support: f64 = named
+            .iter()
+            .map(|(_, other)| {
+                naming_generation::semantic_name_similarity(
+                    right_name,
+                    other.suggested_name.as_deref().unwrap_or_default(),
+                ) * f64::from(other.confidence.max(1))
+            })
+            .sum();
+        left_support.total_cmp(&right_support)
+    });
+
+    let (suggested_name, confidence, evidence, reasoning) = if let Some((_, winner)) = best {
+        let winner_name = winner.suggested_name.as_deref().unwrap_or_default();
+        let agreeing: Vec<_> = named
+            .iter()
+            .filter(|(_, answer)| {
+                naming_generation::semantic_name_similarity(
+                    winner_name,
+                    answer.suggested_name.as_deref().unwrap_or_default(),
+                ) >= 0.34
+            })
+            .collect();
+        let base_confidence = agreeing
+            .iter()
+            .map(|(_, answer)| u16::from(answer.confidence))
+            .sum::<u16>()
+            / agreeing.len().max(1) as u16;
+        let agreement_factor = 0.75 + 0.25 * agreeing.len() as f64 / named.len().max(1) as f64;
+        let confidence = (f64::from(base_confidence) * agreement_factor).round() as u8;
+        let evidence = agreeing
+            .iter()
+            .flat_map(|(_, answer)| answer.evidence.clone())
+            .take(12)
+            .collect();
+        let reasoning = agreeing
+            .iter()
+            .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        (
+            winner.suggested_name.clone(),
+            confidence,
+            evidence,
+            reasoning,
+        )
+    } else {
+        (
+            None,
+            0,
+            Vec::new(),
+            answers
+                .iter()
+                .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        )
+    };
+    GenerationBatchOutcome {
+        entry_address: entry_address.to_owned(),
+        suggested_name,
+        reasoning,
+        provider_label: answers
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join(" + "),
+        confidence,
+        evidence,
+    }
+}
+
+#[tauri::command(async)]
+fn generate_identification_suggestions(
+    app: AppHandle,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    entry_addresses: Vec<String>,
+    provisional_names: Vec<ProvisionalFunctionName>,
+) -> Result<Vec<GenerationBatchOutcome>, String> {
+    if entry_addresses.is_empty() || entry_addresses.len() > 6 {
+        return Err("a generation batch must contain between 1 and 6 functions".to_owned());
+    }
+    let mut export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    for provisional in provisional_names {
+        if let Some(function) = export
+            .functions
+            .iter_mut()
+            .find(|function| function.entry_address == provisional.entry_address)
+        {
+            function.name = provisional.name;
+        }
+    }
+    let contexts = entry_addresses
+        .iter()
+        .map(|address| {
+            naming_generation::build_context_for_function(&export, address)
+                .map(|context| (address.clone(), context))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let enabled = ai_providers::enabled_providers_for_app(&app)?;
+    if enabled.is_empty() {
+        return Err("no AI provider is enabled. Configure one under Réglages first.".to_owned());
+    }
+
+    let mut by_address = std::collections::HashMap::<
+        String,
+        Vec<(String, naming_generation::GenerationResult)>,
+    >::new();
+    let mut errors = Vec::new();
+    for secrets in enabled {
+        let provider = services::ai_provider::OpenAiCompatibleProvider {
+            base_url: secrets.base_url,
+            api_key: secrets.api_key,
+        };
+        let request = naming_generation::build_generation_batch_request(&contexts, &secrets.model);
+        let expected = entry_addresses.clone();
+        match provider.complete(&request).and_then(|response| {
+            naming_generation::parse_generation_batch_response(&response, &expected)
+        }) {
+            Ok(results) => {
+                for item in results {
+                    by_address
+                        .entry(item.entry_address)
+                        .or_default()
+                        .push((secrets.label.clone(), item.result));
+                }
+            }
+            Err(error) => errors.push(format!("{}: {error}", secrets.label)),
+        }
+    }
+    if by_address.is_empty() {
+        return Err(format!(
+            "all enabled AI providers failed: {}",
+            errors.join("; ")
+        ));
+    }
+    entry_addresses
+        .iter()
+        .map(|address| {
+            by_address
+                .get(address)
+                .map(|answers| synthesize_generation_answers(address, answers))
+                .ok_or_else(|| format!("no provider returned a result for '{address}'"))
+        })
+        .collect()
 }
 
 // Unlike arbitrate_identification_tie, this function has *no* FunctionID/
@@ -432,53 +626,13 @@ fn generate_identification_suggestion(
         ));
     }
 
-    let mut votes = std::collections::HashMap::<String, usize>::new();
-    for (_, answer) in &answers {
-        if let Some(name) = &answer.suggested_name {
-            *votes.entry(name.clone()).or_default() += 1;
-        }
-    }
-    let winner = votes.into_iter().max_by_key(|(_, count)| *count);
-    let suggested_name = winner
-        .filter(|(_, count)| answers.len() == 1 || *count * 2 > answers.len())
-        .map(|(name, _)| name);
-    let agreeing: Vec<_> = answers
-        .iter()
-        .filter(|(_, answer)| answer.suggested_name == suggested_name)
-        .collect();
-    let confidence = if suggested_name.is_some() && !agreeing.is_empty() {
-        (agreeing
-            .iter()
-            .map(|(_, answer)| u16::from(answer.confidence))
-            .sum::<u16>()
-            / agreeing.len() as u16) as u8
-    } else {
-        0
-    };
-    let evidence = agreeing
-        .iter()
-        .flat_map(|(_, answer)| answer.evidence.clone())
-        .take(12)
-        .collect();
-    let reasoning = if suggested_name.is_some() {
-        agreeing
-            .iter()
-            .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    } else {
-        "Les agents activés ne convergent pas vers un nom unique ou manquent de preuves.".to_owned()
-    };
+    let synthesized = synthesize_generation_answers(&entry_address, &answers);
     Ok(GenerationOutcome {
-        suggested_name,
-        reasoning,
-        provider_label: answers
-            .iter()
-            .map(|(label, _)| label.as_str())
-            .collect::<Vec<_>>()
-            .join(" + "),
-        confidence,
-        evidence,
+        suggested_name: synthesized.suggested_name,
+        reasoning: synthesized.reasoning,
+        provider_label: synthesized.provider_label,
+        confidence: synthesized.confidence,
+        evidence: synthesized.evidence,
     })
 }
 
@@ -501,6 +655,7 @@ fn save_generation_result(
         confidence: outcome.confidence,
         evidence: outcome.evidence,
         context_complete: true,
+        agent_version: naming_arbitration::NAMING_PIPELINE_VERSION,
     };
     match results
         .iter_mut()
@@ -900,6 +1055,57 @@ fn decompile_function(
 }
 
 #[tauri::command(async)]
+fn prepare_ai_function_contexts(
+    app: AppHandle,
+    session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    decompile_coordinator: tauri::State<'_, DecompileCoordinator>,
+    project_id: String,
+    entry_addresses: Vec<String>,
+) -> Result<Vec<PreparedFunctionContext>, String> {
+    let session = session_state
+        .lock()
+        .map_err(|_| "the analysis session lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "No Ghidra analysis session is active.".to_owned())?;
+    project_storage::require_managed_session(&app, &session)?;
+    let (_, saved_project) = project_storage::load_project(&app, &project_id)?;
+    if !saved_project.session_available || saved_project.metadata.session.as_ref() != Some(&session)
+    {
+        return Err("The selected project does not match the active Ghidra session.".to_owned());
+    }
+
+    let prepared = decompile_coordinator.run_exclusive(|| {
+        ghidra_decompile::prepare_function_contexts(&app, &session, &entry_addresses)
+    })?;
+
+    let updated_export = {
+        let mut state = export_state
+            .lock()
+            .map_err(|_| "the analysis export lock was poisoned".to_owned())?;
+        let export = state
+            .as_mut()
+            .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+        for item in &prepared {
+            if let Some(code) = &item.decompiled_code {
+                if let Some(function) = export
+                    .functions
+                    .iter_mut()
+                    .find(|function| function.entry_address == item.entry_address)
+                {
+                    function.decompiled_code = Some(code.clone());
+                    function.return_type = item.return_type.clone();
+                    function.parameters = item.parameters.clone();
+                }
+            }
+        }
+        export.clone()
+    };
+    project_storage::replace_project_export(&app, &project_id, &updated_export)?;
+    Ok(prepared)
+}
+
+#[tauri::command(async)]
 fn disassemble_function(
     app: AppHandle,
     session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
@@ -967,6 +1173,7 @@ pub fn run() {
             save_arbitration_result,
             get_arbitration_results,
             generate_identification_suggestion,
+            generate_identification_suggestions,
             save_generation_result,
             get_generation_results,
             get_managed_setup_plan,
@@ -976,6 +1183,7 @@ pub fn run() {
             scan_project_with_bsim,
             compute_bsim_repetition_corroboration,
             decompile_function,
+            prepare_ai_function_contexts,
             disassemble_function,
             disassemble_functions,
             get_call_graph,
@@ -1002,7 +1210,54 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::DecompileCoordinator;
+    use super::{synthesize_generation_answers, DecompileCoordinator};
+    use crate::services::naming_generation::GenerationResult;
+
+    fn generated(name: Option<&str>, confidence: u8) -> GenerationResult {
+        GenerationResult {
+            suggested_name: name.map(str::to_owned),
+            reasoning: "raison observable".to_owned(),
+            confidence,
+            evidence: vec!["preuve".to_owned()],
+        }
+    }
+
+    #[test]
+    fn generation_synthesis_groups_semantically_equivalent_names() {
+        let answers = vec![
+            (
+                "agent A".to_owned(),
+                generated(Some("open_config_file"), 74),
+            ),
+            ("agent B".to_owned(), generated(Some("loadConfigFile"), 70)),
+            ("agent C".to_owned(), generated(Some("encrypt_buffer"), 82)),
+        ];
+
+        let result = synthesize_generation_answers("0x1", &answers);
+
+        assert!(matches!(
+            result.suggested_name.as_deref(),
+            Some("open_config_file" | "loadConfigFile")
+        ));
+        assert!(
+            result.confidence < 74,
+            "agent disagreement must reduce confidence"
+        );
+        assert_eq!(result.provider_label, "agent A + agent B + agent C");
+    }
+
+    #[test]
+    fn generation_synthesis_preserves_an_explicit_no_name_result() {
+        let answers = vec![
+            ("agent A".to_owned(), generated(None, 0)),
+            ("agent B".to_owned(), generated(None, 0)),
+        ];
+
+        let result = synthesize_generation_answers("0x2", &answers);
+
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
+    }
 
     #[test]
     fn decompile_coordinator_serializes_operations() {

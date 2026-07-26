@@ -74,6 +74,11 @@ fn install_extension(setup: &FakeGhidraSetup, version_label: &str) {
     );
 
     write_file(
+        &extensions_dir.join("ghidra_scripts/DecompileFunctionsJson.java"),
+        "// fake script\n",
+    );
+
+    write_file(
         &extensions_dir.join("ghidra_scripts/ApplyFunctionRenamesJson.java"),
         "// fake script\n",
     );
@@ -266,6 +271,11 @@ fn missing_disable_slow_analyzers_script_is_rejected() {
         "// fake script\n",
     );
 
+    write_file(
+        &extensions_dir.join("ghidra_scripts/DecompileFunctionsJson.java"),
+        "// fake script\n",
+    );
+
     let error = validate_ghidra_installation(&setup.install_dir, &setup.config_root)
         .expect_err("a missing analyzer-tuning script should be rejected");
 
@@ -297,6 +307,11 @@ fn missing_identify_functions_script_is_rejected() {
 
     write_file(
         &extensions_dir.join("ghidra_scripts/DecompileFunctionJson.java"),
+        "// fake script\n",
+    );
+
+    write_file(
+        &extensions_dir.join("ghidra_scripts/DecompileFunctionsJson.java"),
         "// fake script\n",
     );
 

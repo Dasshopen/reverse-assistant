@@ -151,6 +151,15 @@ interface DecompiledFunctionDetails {
   bsim: BsimQueryResult;
 }
 
+interface PreparedFunctionContext {
+  entry_address: string;
+  decompiled_code: string | null;
+  return_type: string;
+  parameters: FunctionParameter[];
+  calling_convention: string;
+  error: string | null;
+}
+
 type InstructionFlowCategory =
   | "fall_through"
   | "unconditional_jump"
@@ -218,6 +227,7 @@ interface ArbitrationOutcome {
 interface StoredArbitrationOutcome extends ArbitrationOutcome {
   entry_address: string;
   context_complete: boolean;
+  agent_version: number;
 }
 
 interface GenerationOutcome {
@@ -228,9 +238,14 @@ interface GenerationOutcome {
   evidence: string[];
 }
 
+interface GenerationBatchOutcome extends GenerationOutcome {
+  entry_address: string;
+}
+
 interface StoredGenerationOutcome extends GenerationOutcome {
   entry_address: string;
   context_complete: boolean;
+  agent_version: number;
 }
 
 interface AiProviderSummary {
@@ -899,7 +914,9 @@ interface ApplyRenamesResult {
   let automaticBsimMinimumSimilarity = $derived(0.67 + automaticPrudenceLevel * 0.02);
   let automaticBsimMinimumSignificance = $derived(4 + automaticPrudenceLevel * 2 / 3);
   let automaticBsimMinimumMargin = $derived(0.005 + automaticPrudenceLevel * 0.005);
-  let automaticConfidenceThreshold = $derived(45 + automaticPrudenceLevel * 5);
+  let automaticConfidenceThreshold = $derived(
+    [0, 35, 40, 45, 50, 55, 62, 70, 78, 86, 92][automaticPrudenceLevel] ?? 86,
+  );
   // Mirrors identification_corroboration::MINIMUM_CORROBORATING_REPETITIONS
   // (src-tauri/src/services/identification_corroboration.rs).
   const minimumCorroboratingRepetitions = 3;
@@ -2110,7 +2127,6 @@ interface ApplyRenamesResult {
         ]),
     );
     void refreshBsimRepetitionCorroboration(items);
-    void runBackgroundAiAnalysis();
   }
 
   async function refreshBsimRepetitionCorroboration(items: FunctionIdentification[]) {
@@ -2138,6 +2154,7 @@ interface ApplyRenamesResult {
         projectId,
       });
       installIdentificationEvidence(evidence);
+      await runBackgroundAiAnalysis();
       return true;
     } catch (error) {
       console.error("Background BSim scan failed", error);
@@ -2167,6 +2184,10 @@ interface ApplyRenamesResult {
     decompileErrors = new Map();
     identifications = new Map();
     backgroundBsimResults = new Map();
+    arbitrationResults = new Map();
+    arbitrationErrors = new Map();
+    generationResults = new Map();
+    generationErrors = new Map();
     functionIdAnalysisAvailable = false;
 
     try {
@@ -2185,7 +2206,7 @@ interface ApplyRenamesResult {
           { projectId: id },
         );
         arbitrationResults = new Map(
-          storedArbitration.filter((stored) => stored.context_complete).map((stored) => [
+          storedArbitration.filter((stored) => stored.context_complete && stored.agent_version >= 2).map((stored) => [
             stored.entry_address,
             {
               chosen_name: stored.chosen_name,
@@ -2207,7 +2228,7 @@ interface ApplyRenamesResult {
         );
         generationResults = new Map(
           storedGeneration
-            .filter((stored) => stored.context_complete)
+            .filter((stored) => stored.context_complete && stored.agent_version >= 2)
             .map((stored) => [
             stored.entry_address,
             {
@@ -2251,6 +2272,8 @@ interface ApplyRenamesResult {
             }, 1200);
           }
         });
+      } else if (loaded.project.session_available) {
+        void runBackgroundAiAnalysis();
       }
     } catch (error) {
       projectActionError = String(error);
@@ -3107,16 +3130,110 @@ interface ApplyRenamesResult {
           !generationResults.has(func.entry_address) &&
           !generationErrors.has(func.entry_address),
       )
+      .sort((left, right) => {
+        const score = (func: GhidraFunction) =>
+          func.strings.length * 6 +
+          func.calls.filter((call) => !isGeneratedFunctionName(call.target_name)).length * 4 +
+          func.calls.length +
+          (func.parameters.length > 0 ? 2 : 0);
+        return score(right) - score(left);
+      })
       .map((func) => func.entry_address);
     if (pending.length === 0) return;
 
     isBackgroundGenerating = true;
     try {
-      for (const entryAddress of pending) {
-        await generateSuggestionFor(entryAddress);
+      const batchSize = 6;
+      for (let start = 0; start < pending.length; start += batchSize) {
+        analysisProgress = {
+          stage: "ai-naming",
+          message: `Suggestions IA groupées : ${Math.min(start + batchSize, pending.length)} / ${pending.length} fonctions…`,
+          completed_percent: 70 + Math.round(29 * Math.min(start + batchSize, pending.length) / pending.length),
+        };
+        const addresses = pending.slice(start, start + batchSize);
+        for (const address of addresses) {
+          generatingAddresses = new Set(generatingAddresses).add(address);
+        }
+        try {
+          const provisionalNames = [...generationResults.entries()]
+            .filter(([, result]) => result.suggested_name !== null)
+            .map(([entry_address, result]) => ({
+              entry_address,
+              name: result.suggested_name as string,
+            }));
+          const results = await invoke<GenerationBatchOutcome[]>(
+            "generate_identification_suggestions",
+            { entryAddresses: addresses, provisionalNames },
+          );
+          const nextResults = new Map(generationResults);
+          for (const result of results) {
+            nextResults.set(result.entry_address, result);
+            if (activeProjectId) {
+              const projectId = activeProjectId;
+              void invoke("save_generation_result", {
+                projectId,
+                entryAddress: result.entry_address,
+                outcome: result,
+              }).catch((error) => console.error("Failed to persist generation result", error));
+            }
+          }
+          generationResults = nextResults;
+        } catch (batchError) {
+          // Small local models occasionally return malformed JSON for a
+          // multi-function answer. Preserve coverage by retrying only that
+          // failed batch with the proven single-function path.
+          console.warn("AI naming batch failed; retrying individually", batchError);
+          for (const address of addresses) {
+            await generateSuggestionFor(address);
+          }
+        } finally {
+          const remaining = new Set(generatingAddresses);
+          for (const address of addresses) remaining.delete(address);
+          generatingAddresses = remaining;
+        }
       }
     } finally {
       isBackgroundGenerating = false;
+    }
+  }
+
+  async function prepareBackgroundAiContexts(): Promise<void> {
+    if (!activeProjectId || analysisSource !== "automatic") return;
+    const addresses = unidentifiedFunctions
+      .filter((func) => {
+        if (func.is_external) return false;
+        if (func.decompiled_code?.trim()) return false;
+        if (decompileCache.get(func.entry_address)?.decompiled_code?.trim()) return false;
+        return tiedCandidatesFor(func.entry_address).length > 0 || hasNoEvidenceAtAll(func);
+      })
+      .map((func) => func.entry_address);
+    for (let start = 0; start < addresses.length; start += 500) {
+      const batch = addresses.slice(start, start + 500);
+      const prepared = await invoke<PreparedFunctionContext[]>("prepare_ai_function_contexts", {
+        projectId: activeProjectId,
+        entryAddresses: batch,
+      });
+      const nextCache = new Map(decompileCache);
+      const nextErrors = new Map(decompileErrors);
+      for (const item of prepared) {
+        if (item.error) {
+          nextErrors.set(item.entry_address, item.error);
+          continue;
+        }
+        nextCache.set(item.entry_address, {
+          decompiled_code: item.decompiled_code,
+          return_type: item.return_type,
+          parameters: item.parameters,
+          calling_convention: item.calling_convention,
+          bsim: bsimResultForAddress(item.entry_address) ?? {
+            status: "unavailable",
+            matches: [],
+            message: "BSim est traité par le balayage global.",
+          },
+        });
+      }
+      decompileCache = nextCache;
+      decompileErrors = nextErrors;
     }
   }
 
@@ -3124,12 +3241,43 @@ interface ApplyRenamesResult {
     if (isBackgroundAiRunning) return;
     if (!aiProviders.some((provider) => provider.enabled)) return;
     isBackgroundAiRunning = true;
+    analysisProgressVisible = true;
+    analysisProgressMinimized = true;
     try {
-      // One bounded pipeline: closed-set arbitration first, then open-ended
-      // generation. This prevents two providers/Ghidra decompilations from
-      // racing and makes the progress counters truthful.
+      // FID and the global BSim pass are already complete when this starts.
+      // Open Ghidra once to prepare every required pseudocode, then let the
+      // closed-set and generative agents consume that shared context.
+      analysisProgress = {
+        stage: "ai-context",
+        message: "Préparation groupée du pseudocode et du contexte IA…",
+        completed_percent: 62,
+      };
+      await prepareBackgroundAiContexts();
+      analysisProgress = {
+        stage: "ai-arbitration",
+        message: "Arbitrage des correspondances FunctionID et BSim…",
+        completed_percent: 68,
+      };
       await runBackgroundArbitration();
       await runBackgroundGeneration();
+      analysisProgress = {
+        stage: "complete",
+        message: "Reconnaissance et suggestions IA terminées.",
+        completed_percent: 100,
+      };
+      setTimeout(() => {
+        if (!isBackgroundAiRunning) analysisProgressVisible = false;
+      }, 1400);
+    } catch (error) {
+      console.error("Background AI analysis failed", error);
+      analyzeError = `L'analyse IA en arrière-plan a échoué : ${String(error)}`;
+      analysisProgress = {
+        stage: "error",
+        message: "L'analyse Ghidra reste disponible, mais les suggestions IA n'ont pas toutes été produites.",
+        completed_percent: null,
+      };
+      analysisProgressVisible = true;
+      analysisProgressMinimized = false;
     } finally {
       isBackgroundAiRunning = false;
     }
@@ -3627,6 +3775,11 @@ interface ApplyRenamesResult {
     pendingDecompiles = new Set();
     decompileErrors = new Map();
     identifications = new Map();
+    backgroundBsimResults = new Map();
+    arbitrationResults = new Map();
+    arbitrationErrors = new Map();
+    generationResults = new Map();
+    generationErrors = new Map();
     functionIdAnalysisAvailable = false;
     analysisTargetName = binaryPath.split(/[\\/]/).pop() ?? binaryPath;
 

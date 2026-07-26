@@ -13,6 +13,8 @@ use crate::services::ghidra_headless::{tail, HEADLESS_MAX_HEAP};
 use crate::services::ghidra_installation::{load_persisted_install_dir, validate_installation};
 
 const DECOMPILE_SCRIPT_NAME: &str = "DecompileFunctionJson.java";
+const BATCH_DECOMPILE_SCRIPT_NAME: &str = "DecompileFunctionsJson.java";
+const MAX_BATCH_FUNCTIONS: usize = 500;
 const STDERR_TAIL_BYTES: usize = 4000;
 // Bump this value whenever the Java result semantics change. Keeping the
 // version in the file name makes persistent cached results safe across app
@@ -73,6 +75,17 @@ pub struct DecompiledFunctionDetails {
     pub parameters: Vec<FunctionParameter>,
     pub calling_convention: String,
     pub bsim: BsimQueryResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparedFunctionContext {
+    pub entry_address: String,
+    pub decompiled_code: Option<String>,
+    pub return_type: String,
+    pub parameters: Vec<FunctionParameter>,
+    pub calling_convention: String,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -277,6 +290,85 @@ pub fn decompile_function(
     let bsim_corpora = active_corpora(app).unwrap_or_default();
 
     run_decompile_function(&installation, session, entry_address, &bsim_corpora)
+}
+
+pub fn prepare_function_contexts(
+    app: &AppHandle,
+    session: &AnalysisSession,
+    entry_addresses: &[String],
+) -> Result<Vec<PreparedFunctionContext>, String> {
+    if entry_addresses.is_empty() || entry_addresses.len() > MAX_BATCH_FUNCTIONS {
+        return Err(format!(
+            "the AI context batch must contain between 1 and {MAX_BATCH_FUNCTIONS} functions"
+        ));
+    }
+    for address in entry_addresses {
+        validate_entry_address(address)?;
+    }
+
+    let install_dir = load_persisted_install_dir(app)?
+        .ok_or_else(|| "No Ghidra installation is configured.".to_owned())?;
+    let installation = validate_installation(app, &install_dir)?;
+    let work_dir = session.project_dir.join("ai-context");
+    fs::create_dir_all(&work_dir).map_err(|error| {
+        format!(
+            "failed to create AI context directory '{}': {error}",
+            work_dir.display()
+        )
+    })?;
+    let request_path = work_dir.join("addresses.json");
+    let destination = work_dir.join("decompiled-functions.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec(entry_addresses)
+            .map_err(|error| format!("failed to serialize AI context request: {error}"))?,
+    )
+    .map_err(|error| format!("failed to write AI context request: {error}"))?;
+    if destination.is_file() {
+        fs::remove_file(&destination)
+            .map_err(|error| format!("failed to clear stale AI context result: {error}"))?;
+    }
+
+    let scripts_dir = installation.extensions_dir.join("ghidra_scripts");
+    let mut command = Command::new(
+        installation
+            .install_dir
+            .join("support")
+            .join("analyzeHeadless.bat"),
+    );
+    command
+        .arg(&session.project_dir)
+        .arg(&session.project_name)
+        .arg("-process")
+        .arg(&session.program_path_in_project)
+        .arg("-noanalysis")
+        .arg("-readOnly")
+        .arg("-scriptPath")
+        .arg(scripts_dir)
+        .arg("-postScript")
+        .arg(BATCH_DECOMPILE_SCRIPT_NAME)
+        .arg(&request_path)
+        .arg(&destination)
+        .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);
+    configure_java_environment(&mut command, &installation);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to launch Ghidra batch decompilation: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Ghidra batch decompilation failed (exit code {:?}): {}",
+            output.status.code(),
+            tail(&output.stderr, STDERR_TAIL_BYTES)
+        ));
+    }
+    let json = fs::read_to_string(&destination).map_err(|error| {
+        format!(
+            "failed to read AI context result '{}': {error}",
+            destination.display()
+        )
+    })?;
+    serde_json::from_str(&json)
+        .map_err(|error| format!("invalid AI context JSON from Ghidra: {error}"))
 }
 
 #[cfg(test)]
