@@ -26,6 +26,7 @@ use services::global_strings::{self, GlobalStringView};
 use services::identification_corroboration;
 use services::imports_exports::{self, ImportView};
 use services::naming_arbitration;
+use services::naming_generation;
 use services::program_overview::{self, ProgramOverview};
 use services::project_storage::{self, ProjectSummary};
 use services::report::{self, PdfReportResult};
@@ -317,6 +318,92 @@ fn get_arbitration_results(
     project_id: String,
 ) -> Result<Vec<naming_arbitration::StoredArbitrationOutcome>, String> {
     project_storage::load_project_arbitration(&app, &project_id)
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct GenerationOutcome {
+    suggested_name: Option<String>,
+    reasoning: String,
+    provider_label: String,
+}
+
+// Unlike arbitrate_identification_tie, this function has *no* FunctionID/
+// BSim candidates at all -- there is nothing to select between, only real
+// context to reason from. See naming_generation.rs for why this makes the
+// answer inherently less safe than a closed-set arbitration choice, and
+// why the frontend never auto-applies it in bulk the way it does RTTI/
+// FunctionID/BSim/arbitration choices.
+#[tauri::command(async)]
+fn generate_identification_suggestion(
+    app: AppHandle,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    entry_address: String,
+) -> Result<GenerationOutcome, String> {
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+
+    let context = naming_generation::build_context_for_function(&export, &entry_address)?;
+
+    let provider_secrets = ai_providers::enabled_providers_for_app(&app)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            "no AI provider is enabled. Configure one under Réglages first.".to_owned()
+        })?;
+
+    let provider = services::ai_provider::OpenAiCompatibleProvider {
+        base_url: provider_secrets.base_url,
+        api_key: provider_secrets.api_key,
+    };
+
+    let request = naming_generation::build_generation_request(&context, &provider_secrets.model);
+
+    let response = provider.complete(&request)?;
+    let result = naming_generation::parse_generation_response(&response)?;
+
+    Ok(GenerationOutcome {
+        suggested_name: result.suggested_name,
+        reasoning: result.reasoning,
+        provider_label: provider_secrets.label,
+    })
+}
+
+// Persisted alongside the project (see StoredGenerationOutcome), same
+// rationale as save_arbitration_result: a real AI answer must never be
+// re-spent on a reopen.
+#[tauri::command]
+fn save_generation_result(
+    app: AppHandle,
+    project_id: String,
+    entry_address: String,
+    outcome: GenerationOutcome,
+) -> Result<(), String> {
+    let mut results = project_storage::load_project_generation(&app, &project_id)?;
+    let stored = naming_generation::StoredGenerationOutcome {
+        entry_address: entry_address.clone(),
+        suggested_name: outcome.suggested_name,
+        reasoning: outcome.reasoning,
+        provider_label: outcome.provider_label,
+    };
+    match results
+        .iter_mut()
+        .find(|existing| existing.entry_address == entry_address)
+    {
+        Some(existing) => *existing = stored,
+        None => results.push(stored),
+    }
+    project_storage::replace_project_generation(&app, &project_id, &results)
+}
+
+#[tauri::command]
+fn get_generation_results(
+    app: AppHandle,
+    project_id: String,
+) -> Result<Vec<naming_generation::StoredGenerationOutcome>, String> {
+    project_storage::load_project_generation(&app, &project_id)
 }
 
 #[tauri::command]
@@ -765,6 +852,9 @@ pub fn run() {
             arbitrate_identification_tie,
             save_arbitration_result,
             get_arbitration_results,
+            generate_identification_suggestion,
+            save_generation_result,
+            get_generation_results,
             get_managed_setup_plan,
             install_managed_setup,
             adopt_existing_ghidra,

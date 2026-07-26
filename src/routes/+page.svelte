@@ -217,6 +217,16 @@ interface StoredArbitrationOutcome extends ArbitrationOutcome {
   entry_address: string;
 }
 
+interface GenerationOutcome {
+  suggested_name: string | null;
+  reasoning: string;
+  provider_label: string;
+}
+
+interface StoredGenerationOutcome extends GenerationOutcome {
+  entry_address: string;
+}
+
 interface AiProviderSummary {
   id: string;
   label: string;
@@ -640,6 +650,29 @@ interface ApplyRenamesResult {
             arbitrationErrors.has(func.entry_address)),
       ).length,
   );
+  // True only once BSim has actually finished scanning this function (not
+  // merely "not scanned yet") and found nothing, together with FunctionID
+  // and RTTI also finding nothing -- the generative agent is only worth
+  // spending a real API call on once every cheaper/faster signal has
+  // genuinely come up empty, not while a scan is still pending.
+  function hasNoEvidenceAtAll(func: GhidraFunction): boolean {
+    if (func.rtti_class_names.length > 0) return false;
+    if (uniqueFidCandidates(identifications.get(func.entry_address) ?? []).length > 0) return false;
+    const bsim = bsimResultForAddress(func.entry_address);
+    if (bsim?.status !== "available") return false;
+    return bsim.matches.length === 0;
+  }
+  let generationTotal = $derived.by(
+    () => unidentifiedFunctions.filter((func) => hasNoEvidenceAtAll(func)).length,
+  );
+  let generationResolved = $derived.by(
+    () =>
+      unidentifiedFunctions.filter(
+        (func) =>
+          hasNoEvidenceAtAll(func) &&
+          (generationResults.has(func.entry_address) || generationErrors.has(func.entry_address)),
+      ).length,
+  );
   let remainingIdentificationFunctions = $derived(
     unidentifiedFunctions.filter(
       (func) => !ignoredIdentificationAddresses.has(func.entry_address),
@@ -835,6 +868,12 @@ interface ApplyRenamesResult {
   let arbitrationErrors = $state(new Map<string, string>());
   let arbitratingAddresses = $state(new Set<string>());
   let isBackgroundArbitrating = $state(false);
+  // Same per-address/background rationale as arbitration, for functions
+  // with no FunctionID/BSim candidates at all -- see runBackgroundGeneration.
+  let generationResults = $state(new Map<string, GenerationOutcome>());
+  let generationErrors = $state(new Map<string, string>());
+  let generatingAddresses = $state(new Set<string>());
+  let isBackgroundGenerating = $state(false);
 
   // Ghidra's bundled FunctionID databases already discard matches below
   // 14.6. Keep that native threshold, then add the more important unique-name
@@ -2000,6 +2039,7 @@ interface ApplyRenamesResult {
     );
     void refreshBsimRepetitionCorroboration(items);
     void runBackgroundArbitration();
+    void runBackgroundGeneration();
   }
 
   async function refreshBsimRepetitionCorroboration(items: FunctionIdentification[]) {
@@ -2085,6 +2125,25 @@ interface ApplyRenamesResult {
         );
       } catch (error) {
         console.error("Failed to load stored arbitration results", error);
+      }
+      // Same rationale as arbitration, for generative suggestions.
+      try {
+        const storedGeneration = await invoke<StoredGenerationOutcome[]>(
+          "get_generation_results",
+          { projectId: id },
+        );
+        generationResults = new Map(
+          storedGeneration.map((stored) => [
+            stored.entry_address,
+            {
+              suggested_name: stored.suggested_name,
+              reasoning: stored.reasoning,
+              provider_label: stored.provider_label,
+            },
+          ]),
+        );
+      } catch (error) {
+        console.error("Failed to load stored generation results", error);
       }
       installIdentificationEvidence(loaded.identifications ?? []);
       functionIdAnalysisAvailable = loaded.identifications !== null;
@@ -2880,6 +2939,71 @@ interface ApplyRenamesResult {
     }
   }
 
+  // Same shape as arbitrateFunction, for functions with zero FunctionID/
+  // BSim candidates (nothing to select between, see naming_generation.rs).
+  // The result is deliberately never fed into automaticRenameEvaluation --
+  // an invented name needs a human to look at it before it's applied,
+  // unlike RTTI/FunctionID/BSim/arbitration choices which are all backed
+  // by a real, independently-found candidate.
+  async function generateSuggestionFor(entryAddress: string): Promise<void> {
+    generatingAddresses = new Set(generatingAddresses).add(entryAddress);
+    const errorsWithoutThisAddress = new Map(generationErrors);
+    errorsWithoutThisAddress.delete(entryAddress);
+    generationErrors = errorsWithoutThisAddress;
+
+    try {
+      const result = await invoke<GenerationOutcome>("generate_identification_suggestion", {
+        entryAddress,
+      });
+      generationResults = new Map(generationResults).set(entryAddress, result);
+      if (activeProjectId) {
+        const projectId = activeProjectId;
+        void invoke("save_generation_result", { projectId, entryAddress, outcome: result }).catch(
+          (error) => console.error("Failed to persist the generation result", error),
+        );
+      }
+    } catch (error) {
+      generationErrors = new Map(generationErrors).set(entryAddress, String(error));
+    } finally {
+      const remaining = new Set(generatingAddresses);
+      remaining.delete(entryAddress);
+      generatingAddresses = remaining;
+    }
+  }
+
+  async function requestGeneration() {
+    if (!selectedFunction) return;
+    await generateSuggestionFor(selectedFunction.entry_address);
+  }
+
+  // Mirrors runBackgroundArbitration: sequential, one real API call at a
+  // time, gated on an enabled provider, skipping anything already resolved
+  // or already failed so a reopen never re-spends a call on the same
+  // function twice.
+  async function runBackgroundGeneration() {
+    if (isBackgroundGenerating) return;
+    if (!aiProviders.some((provider) => provider.enabled)) return;
+
+    const pending = unidentifiedFunctions
+      .filter(
+        (func) =>
+          hasNoEvidenceAtAll(func) &&
+          !generationResults.has(func.entry_address) &&
+          !generationErrors.has(func.entry_address),
+      )
+      .map((func) => func.entry_address);
+    if (pending.length === 0) return;
+
+    isBackgroundGenerating = true;
+    try {
+      for (const entryAddress of pending) {
+        await generateSuggestionFor(entryAddress);
+      }
+    } finally {
+      isBackgroundGenerating = false;
+    }
+  }
+
   function selectIdentificationEvidenceFirst() {
     const selectedHasEvidence = selectedFunctionAddress !== null &&
       hasIdentificationEvidence(selectedFunctionAddress);
@@ -3232,6 +3356,7 @@ interface ApplyRenamesResult {
       newAiProviderModel = "";
       await loadAiProviders();
       void runBackgroundArbitration();
+      void runBackgroundGeneration();
     } catch (error) {
       aiProvidersError = String(error);
     } finally {
@@ -3247,6 +3372,7 @@ interface ApplyRenamesResult {
       await invoke("set_ai_provider_enabled", { id: provider.id, enabled: !provider.enabled });
       await loadAiProviders();
       void runBackgroundArbitration();
+      void runBackgroundGeneration();
     } catch (error) {
       aiProvidersError = String(error);
     } finally {
@@ -4745,6 +4871,17 @@ interface ApplyRenamesResult {
                   {/if}
                 </p>
               {/if}
+              {#if generationTotal > 0}
+                <p class="arbitration-queue-status generation-queue-status">
+                  {#if isBackgroundGenerating}
+                    Génération IA en arrière-plan : {generationResolved} / {generationTotal} traitée(s)…
+                  {:else if generationResolved < generationTotal}
+                    {generationTotal - generationResolved} fonction(s) sans preuve en attente de suggestion IA.
+                  {:else}
+                    Génération IA terminée : {generationTotal} fonction(s) traitée(s).
+                  {/if}
+                </p>
+              {/if}
               <div class="identification-queue-tools">
                 <div role="group" aria-label="Filtrer la file de renommage">
                   <button type="button" class:active={identificationQueueFilter === "matched"} onclick={() => { identificationQueueFilter = "matched"; identificationPage = 1; }}>Avec proposition <b>{matchedIdentificationCount}</b></button>
@@ -4932,7 +5069,47 @@ interface ApplyRenamesResult {
                     {/if}
 
                     {#if selectedIdentificationCandidates.length === 0 && (selectedBsimResult?.matches.length ?? 0) === 0}
-                      <div class="no-identification-evidence"><strong>Aucune preuve automatique disponible</strong><span>Tu peux lire le pseudocode et saisir un nom manuellement, ou ignorer cette fonction.</span></div>
+                      {#if hasNoEvidenceAtAll(selectedFunction)}
+                        {@const currentResult = generationResults.get(selectedFunction.entry_address)}
+                        {@const currentError = generationErrors.get(selectedFunction.entry_address)}
+                        {@const isRunning = generatingAddresses.has(selectedFunction.entry_address)}
+                        <div class="evidence-source-group generation-evidence-group">
+                          <h5>Suggestion IA (aucune preuve automatique)
+                            <span>
+                              FunctionID et BSim n'ont trouvé aucun candidat pour cette fonction — un agent IA propose un nom à partir du contexte réel (pseudocode, appelants, appelés, chaînes), sans aucune garantie : c'est une invention, pas une preuve, à valider toi-même avant d'appliquer.
+                            </span>
+                          </h5>
+                          <div class="arbitration-panel generation-panel">
+                            {#if isRunning}
+                              <p class="arbitration-status">L'agent réfléchit…</p>
+                            {:else if currentResult}
+                              {@const suggestedName = currentResult.suggested_name}
+                              {@const suggestedDisplayName = suggestedName ? displayCandidateName(suggestedName) : null}
+                              {@const suggestedSafeName = suggestedName ? (normalizedAutomaticSymbolName(suggestedName) ?? suggestedName) : null}
+                              <div class="arbitration-result">
+                                {#if suggestedDisplayName && suggestedSafeName}
+                                  <strong>Suggestion de l'agent : {suggestedDisplayName}</strong>
+                                  <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(suggestedSafeName)}>Utiliser ce nom ({suggestedSafeName})</button>
+                                {:else}
+                                  <strong>L'agent n'a proposé aucun nom</strong>
+                                {/if}
+                                <p>{currentResult.reasoning}</p>
+                                <small>Fournisseur : {currentResult.provider_label}</small>
+                              </div>
+                            {:else if currentError}
+                              <p class="settings-inline-error" role="alert">{currentError}</p>
+                              <button type="button" class="secondary-button" onclick={requestGeneration}>Réessayer</button>
+                            {:else if aiProviders.some((provider) => provider.enabled)}
+                              <p class="arbitration-status">En attente de son tour dans la file de génération automatique…</p>
+                            {:else}
+                              <p class="arbitration-status">Aucun fournisseur IA activé — configure-le dans Réglages pour que la suggestion se fasse automatiquement, ou lance-la manuellement.</p>
+                              <button type="button" class="secondary-button" onclick={requestGeneration}>Demander une suggestion à l'agent</button>
+                            {/if}
+                          </div>
+                        </div>
+                      {:else}
+                        <div class="no-identification-evidence"><strong>Aucune preuve automatique disponible</strong><span>Tu peux lire le pseudocode et saisir un nom manuellement, ou ignorer cette fonction.</span></div>
+                      {/if}
                     {/if}
                   </section>
 
@@ -9118,6 +9295,7 @@ interface ApplyRenamesResult {
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
   .rtti-evidence-group h5 { color: #86efac; }
   .arbitration-evidence-group h5 { color: #c4b5fd; }
+  .generation-evidence-group h5 { color: #fbbf24; }
   .rtti-corroboration-badge { display: inline-block; margin-left: 0.4rem; padding: 0.12rem 0.4rem; border-radius: 4px; background: #123326; color: #86efac; font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
   .fid-raw-candidates > summary { margin-bottom: 0.4rem; color: #8192ad; font-size: 0.66rem; cursor: pointer; list-style: none; }
   .fid-raw-candidates > summary::-webkit-details-marker { display: none; }

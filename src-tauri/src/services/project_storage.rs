@@ -15,6 +15,7 @@ use crate::models::ghidra_session::AnalysisSession;
 use crate::models::project::ProjectMetadata;
 use crate::services::ghidra_headless::ghidra_analysis_root_dir;
 use crate::services::naming_arbitration::StoredArbitrationOutcome;
+use crate::services::naming_generation::StoredGenerationOutcome;
 
 const PROJECTS_DIR_NAME: &str = "projects";
 const PROJECT_METADATA_FILE_NAME: &str = "project.json";
@@ -22,6 +23,7 @@ const PROJECT_EXPORT_FILE_NAME: &str = "export.json";
 const PROJECT_DATA_ARCHIVE_FILE_NAME: &str = "analysis.zip";
 const PROJECT_IDENTIFICATIONS_FILE_NAME: &str = "identifications.json";
 const PROJECT_ARBITRATION_FILE_NAME: &str = "arbitration-results.json";
+const PROJECT_GENERATION_FILE_NAME: &str = "generation-results.json";
 
 // `metadata.session` is the permanent reference to a project's original
 // Ghidra analysis; `session_available` is always computed fresh (never
@@ -151,7 +153,14 @@ fn replace_project_identifications_at(
         .map_err(|error| format!("invalid saved project export: {error}"))?;
     export.validate()?;
     let arbitration = read_stored_arbitration(&dir)?;
-    write_project_archive(&dir, &export, Some(identifications), arbitration.as_deref())
+    let generation = read_stored_generation(&dir)?;
+    write_project_archive(
+        &dir,
+        &export,
+        Some(identifications),
+        arbitration.as_deref(),
+        generation.as_deref(),
+    )
 }
 
 pub fn replace_project_arbitration(
@@ -181,7 +190,14 @@ fn replace_project_arbitration_at(
     } else {
         read_stored_identifications(&dir, None)?
     };
-    write_project_archive(&dir, &export, identifications.as_deref(), Some(results))
+    let generation = read_stored_generation(&dir)?;
+    write_project_archive(
+        &dir,
+        &export,
+        identifications.as_deref(),
+        Some(results),
+        generation.as_deref(),
+    )
 }
 
 pub fn load_project_arbitration(
@@ -233,6 +249,92 @@ fn read_stored_arbitration(dir: &Path) -> Result<Option<Vec<StoredArbitrationOut
     result
 }
 
+pub fn replace_project_generation(
+    app: &AppHandle,
+    id: &str,
+    results: &[StoredGenerationOutcome],
+) -> Result<(), String> {
+    replace_project_generation_at(&real_projects_root_dir(app)?, id, results)
+}
+
+fn replace_project_generation_at(
+    root: &Path,
+    id: &str,
+    results: &[StoredGenerationOutcome],
+) -> Result<(), String> {
+    require_safe_project_id(id)?;
+    let dir = project_dir_at(root, id);
+    if !dir.is_dir() {
+        return Err(format!("no saved project exists with id '{id}'"));
+    }
+    let (export_json, archived_identifications) = read_project_payload(&dir)?;
+    let export: GhidraExport = serde_json::from_str(&export_json)
+        .map_err(|error| format!("invalid saved project export: {error}"))?;
+    export.validate()?;
+    let identifications = if archived_identifications.is_some() {
+        archived_identifications
+    } else {
+        read_stored_identifications(&dir, None)?
+    };
+    let arbitration = read_stored_arbitration(&dir)?;
+    write_project_archive(
+        &dir,
+        &export,
+        identifications.as_deref(),
+        arbitration.as_deref(),
+        Some(results),
+    )
+}
+
+pub fn load_project_generation(
+    app: &AppHandle,
+    id: &str,
+) -> Result<Vec<StoredGenerationOutcome>, String> {
+    load_project_generation_at(&real_projects_root_dir(app)?, id)
+}
+
+fn load_project_generation_at(root: &Path, id: &str) -> Result<Vec<StoredGenerationOutcome>, String> {
+    require_safe_project_id(id)?;
+    let dir = project_dir_at(root, id);
+    if !dir.is_dir() {
+        return Err(format!("no saved project exists with id '{id}'"));
+    }
+    Ok(read_stored_generation(&dir)?.unwrap_or_default())
+}
+
+fn read_stored_generation(dir: &Path) -> Result<Option<Vec<StoredGenerationOutcome>>, String> {
+    let archive_path = dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME);
+    if !archive_path.is_file() {
+        return Ok(None);
+    }
+    let file = fs::File::open(&archive_path).map_err(|error| {
+        format!(
+            "failed to open project archive '{}': {error}",
+            archive_path.display()
+        )
+    })?;
+    let mut archive = ZipArchive::new(file).map_err(|error| {
+        format!(
+            "invalid project archive '{}': {error}",
+            archive_path.display()
+        )
+    })?;
+    let result = match archive.by_name(PROJECT_GENERATION_FILE_NAME) {
+        Ok(mut entry) => {
+            let mut json = String::new();
+            entry
+                .read_to_string(&mut json)
+                .map_err(|error| format!("failed to inflate generation results: {error}"))?;
+            let results: Vec<StoredGenerationOutcome> = serde_json::from_str(&json)
+                .map_err(|error| format!("invalid stored generation results: {error}"))?;
+            Ok(Some(results))
+        }
+        Err(zip::result::ZipError::FileNotFound) => Ok(None),
+        Err(error) => Err(format!("failed to read generation results: {error}")),
+    };
+    result
+}
+
 fn replace_project_export_at(root: &Path, id: &str, export: &GhidraExport) -> Result<(), String> {
     require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
@@ -242,7 +344,14 @@ fn replace_project_export_at(root: &Path, id: &str, export: &GhidraExport) -> Re
     export.validate()?;
     let identifications = read_stored_identifications(&dir, None)?;
     let arbitration = read_stored_arbitration(&dir)?;
-    write_project_archive(&dir, export, identifications.as_deref(), arbitration.as_deref())
+    let generation = read_stored_generation(&dir)?;
+    write_project_archive(
+        &dir,
+        export,
+        identifications.as_deref(),
+        arbitration.as_deref(),
+        generation.as_deref(),
+    )
 }
 
 pub fn require_managed_session(app: &AppHandle, session: &AnalysisSession) -> Result<(), String> {
@@ -343,7 +452,7 @@ fn save_project_at_with_identifications(
     };
 
     write_metadata(&dir, &metadata)?;
-    write_project_archive(&dir, export, identifications, None)?;
+    write_project_archive(&dir, export, identifications, None, None)?;
 
     Ok(metadata)
 }
@@ -365,6 +474,7 @@ fn write_project_archive(
     export: &GhidraExport,
     identifications: Option<&[FunctionIdentification]>,
     arbitration: Option<&[StoredArbitrationOutcome]>,
+    generation: Option<&[StoredGenerationOutcome]>,
 ) -> Result<(), String> {
     let export_json = serde_json::to_vec(export)
         .map_err(|error| format!("failed to serialize the analysis export: {error}"))?;
@@ -376,6 +486,10 @@ fn write_project_archive(
         .map(serde_json::to_vec)
         .transpose()
         .map_err(|error| format!("failed to serialize arbitration results: {error}"))?;
+    let generation_json = generation
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|error| format!("failed to serialize generation results: {error}"))?;
 
     let archive_path = dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME);
     let temporary_path = dir.join(format!("{PROJECT_DATA_ARCHIVE_FILE_NAME}.tmp"));
@@ -408,6 +522,14 @@ fn write_project_archive(
         archive
             .write_all(&json)
             .map_err(|error| format!("failed to compress arbitration results: {error}"))?;
+    }
+    if let Some(json) = generation_json {
+        archive
+            .start_file(PROJECT_GENERATION_FILE_NAME, options)
+            .map_err(|error| format!("failed to start the generation archive entry: {error}"))?;
+        archive
+            .write_all(&json)
+            .map_err(|error| format!("failed to compress generation results: {error}"))?;
     }
     archive
         .finish()
@@ -1429,6 +1551,145 @@ mod tests {
         let loaded = load_project_arbitration_at(&root, &saved.id)
             .expect("arbitration results should survive a FunctionID replace");
         assert_eq!(loaded, results);
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    fn sample_generation(entry_address: &str, suggested_name: Option<&str>) -> StoredGenerationOutcome {
+        StoredGenerationOutcome {
+            entry_address: entry_address.to_owned(),
+            suggested_name: suggested_name.map(str::to_owned),
+            reasoning: "appelle CreateFileA avec un mode lecture".to_owned(),
+            provider_label: "Ollama (local)".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_freshly_saved_project_has_no_generation_results_yet() {
+        let root = isolated_root("generation-none-yet");
+        let export = sample_export("sample.exe");
+        let saved = save_project_at(&root, "Fresh", &export, None).expect("saving should succeed");
+
+        let results = load_project_generation_at(&root, &saved.id)
+            .expect("loading generation on a project that never had any should succeed");
+        assert!(results.is_empty());
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn generation_results_round_trip_through_the_project_archive() {
+        let root = isolated_root("generation-round-trip");
+        let export = sample_export("sample.exe");
+        let saved = save_project_at(&root, "Generated", &export, None).expect("saving");
+
+        let results = vec![
+            sample_generation("0x140009a10", Some("open_config_file")),
+            sample_generation("0x140009a40", None),
+        ];
+        replace_project_generation_at(&root, &saved.id, &results)
+            .expect("storing generation results should succeed");
+
+        let loaded = load_project_generation_at(&root, &saved.id)
+            .expect("loading the stored generation results should succeed");
+        assert_eq!(loaded, results);
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn a_later_generation_result_for_the_same_address_replaces_the_earlier_one() {
+        let root = isolated_root("generation-replace-address");
+        let export = sample_export("sample.exe");
+        let saved = save_project_at(&root, "Generated", &export, None).expect("saving");
+
+        replace_project_generation_at(&root, &saved.id, &[sample_generation("0x1", None)])
+            .expect("storing the first generation result should succeed");
+        replace_project_generation_at(
+            &root,
+            &saved.id,
+            &[sample_generation("0x1", Some("resolved_name"))],
+        )
+        .expect("storing the updated generation result should succeed");
+
+        let loaded = load_project_generation_at(&root, &saved.id).expect("loading should succeed");
+        assert_eq!(loaded, vec![sample_generation("0x1", Some("resolved_name"))]);
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn replacing_the_export_preserves_existing_generation_results() {
+        let root = isolated_root("generation-survives-export-replace");
+        let original = sample_export("before.exe");
+        let saved = save_project_at(&root, "Editable", &original, None).expect("saving");
+
+        let results = vec![sample_generation("0x1", Some("resolved_name"))];
+        replace_project_generation_at(&root, &saved.id, &results)
+            .expect("storing generation results should succeed");
+
+        let updated = sample_export("after.exe");
+        replace_project_export_at(&root, &saved.id, &updated)
+            .expect("replacing the export should succeed");
+
+        let loaded = load_project_generation_at(&root, &saved.id)
+            .expect("generation results should survive an export replace");
+        assert_eq!(loaded, results);
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn replacing_function_id_results_preserves_existing_generation_results() {
+        let root = isolated_root("generation-survives-identifications-replace");
+        let export = sample_export("sample.exe");
+        let saved = save_project_at(&root, "Editable", &export, None).expect("saving");
+
+        let results = vec![sample_generation("0x1", Some("resolved_name"))];
+        replace_project_generation_at(&root, &saved.id, &results)
+            .expect("storing generation results should succeed");
+
+        let identifications = vec![FunctionIdentification {
+            entry_address: "0x1400016b0".to_owned(),
+            candidates: Vec::new(),
+            bsim_candidates: Vec::new(),
+            bsim_scanned: false,
+            bsim_message: None,
+        }];
+        replace_project_identifications_at(&root, &saved.id, &identifications)
+            .expect("replacing identifications should succeed");
+
+        let loaded = load_project_generation_at(&root, &saved.id)
+            .expect("generation results should survive a FunctionID replace");
+        assert_eq!(loaded, results);
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn replacing_arbitration_results_preserves_existing_generation_results_and_vice_versa() {
+        let root = isolated_root("generation-and-arbitration-coexist");
+        let export = sample_export("sample.exe");
+        let saved = save_project_at(&root, "Editable", &export, None).expect("saving");
+
+        let generation = vec![sample_generation("0x1", Some("resolved_name"))];
+        replace_project_generation_at(&root, &saved.id, &generation)
+            .expect("storing generation results should succeed");
+
+        let arbitration = vec![sample_arbitration("0x2", Some("resolved_name"))];
+        replace_project_arbitration_at(&root, &saved.id, &arbitration)
+            .expect("storing arbitration results should succeed");
+
+        assert_eq!(
+            load_project_generation_at(&root, &saved.id)
+                .expect("generation results should survive an arbitration replace"),
+            generation
+        );
+        assert_eq!(
+            load_project_arbitration_at(&root, &saved.id)
+                .expect("arbitration results should still be readable"),
+            arbitration
+        );
 
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
     }
