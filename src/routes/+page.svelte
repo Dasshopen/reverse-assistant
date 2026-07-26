@@ -262,7 +262,7 @@ interface FunctionIdentification {
 interface AutomaticRenameChoice {
   func: GhidraFunction;
   name: string;
-  source: "rtti" | "function_id" | "bsim" | "arbitration";
+  source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation";
   scoreLabel: string;
   evidenceLabel: string;
   alternativeCount: number;
@@ -954,9 +954,12 @@ interface ApplyRenamesResult {
     return chosenName;
   }
 
-  function identificationSourceLabel(source: "rtti" | "function_id" | "bsim" | "arbitration"): string {
+  function identificationSourceLabel(
+    source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation",
+  ): string {
     if (source === "rtti") return "RTTI";
-    if (source === "arbitration") return "Agent IA";
+    if (source === "arbitration") return "Agent IA (arbitrage)";
+    if (source === "generation") return "Agent IA (invention)";
     return source === "function_id" ? "FunctionID" : "BSim";
   }
 
@@ -1161,6 +1164,35 @@ interface ApplyRenamesResult {
         }
       }
 
+      // FunctionID and BSim found nothing at all for this function -- there
+      // is no candidate to select between (arbitration doesn't apply), only
+      // the generative agent's own invention from real context. This is
+      // never treated the same as verified evidence: it's still put in
+      // "auto" (per explicit request -- the user shouldn't have to click
+      // each one by hand), but always as its own visibly distinct source,
+      // carrying the agent's own reasoning so it's clear *why* it chose
+      // this name, not just that it did.
+      if (hasNoEvidenceAtAll(func)) {
+        const generation = generationResults.get(func.entry_address);
+        if (generation?.suggested_name) {
+          const normalizedName = normalizedAutomaticSymbolName(generation.suggested_name);
+          if (normalizedName) {
+            const safeName = reserveUniqueAutomaticName(normalizedName, func.entry_address, reservedNames);
+            choices.push({
+              func,
+              name: safeName,
+              source: "generation",
+              scoreLabel: "invention IA",
+              evidenceLabel: `${generation.provider_label} : ${generation.reasoning}`,
+              alternativeCount: 0,
+              decisionLabel: "Aucune preuve FunctionID/BSim -- nom inventé par l'agent IA à partir du pseudocode, des appelants/appelés et des chaînes",
+              ambiguous: true,
+            });
+          }
+        }
+        continue;
+      }
+
       const fidCandidates = uniqueFidCandidates(identifications.get(func.entry_address) ?? []);
       const bestFid = fidCandidates[0];
       const bsim = bsimResultForAddress(func.entry_address);
@@ -1349,17 +1381,27 @@ interface ApplyRenamesResult {
   let automaticRenameWithoutEvidenceCount = $derived(
     Math.max(0, unidentifiedFunctions.length - automaticRenameCandidates.length - automaticRenameRejections.length),
   );
+  // Shown in their own section, separate from the evidence-backed table --
+  // see the comment in automaticRenameEvaluation on why an invented name is
+  // never blended in with RTTI/FunctionID/BSim/arbitration choices, even
+  // though it's still included in the same bulk "apply" action.
+  let automaticRenameGenerationCandidates = $derived(
+    automaticRenameCandidates.filter((choice) => choice.source === "generation"),
+  );
+  let automaticRenameCandidatesWithEvidence = $derived(
+    automaticRenameCandidates.filter((choice) => choice.source !== "generation"),
+  );
   let automaticIdentificationPageCount = $derived(
     Math.max(
       1,
-      Math.ceil(automaticRenameCandidates.length / automaticIdentificationPageSize),
+      Math.ceil(automaticRenameCandidatesWithEvidence.length / automaticIdentificationPageSize),
     ),
   );
   let currentAutomaticIdentificationPage = $derived(
     Math.min(automaticIdentificationPage, automaticIdentificationPageCount),
   );
   let paginatedAutomaticRenameCandidates = $derived(
-    automaticRenameCandidates.slice(
+    automaticRenameCandidatesWithEvidence.slice(
       (currentAutomaticIdentificationPage - 1) * automaticIdentificationPageSize,
       currentAutomaticIdentificationPage * automaticIdentificationPageSize,
     ),
@@ -4785,7 +4827,10 @@ interface ApplyRenamesResult {
             <div>
               <strong>{automaticRenameCandidates.length} proposition(s) nettoyée(s) peuvent être appliquées</strong>
               <span>
-                {automaticAmbiguousChoiceCount} choix ambigu(s) clairement signalé(s) ·
+                {automaticAmbiguousChoiceCount} choix ambigu(s) clairement signalé(s)
+                {#if automaticRenameGenerationCandidates.length > 0}
+                  (dont {automaticRenameGenerationCandidates.length} inventé(s) par IA, voir plus bas)
+                {/if} ·
                 {automaticRenameWithoutEvidenceCount} fonction(s) sans preuve exploitable.
               </span>
             </div>
@@ -4798,7 +4843,7 @@ interface ApplyRenamesResult {
           {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
           {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
 
-          {#if automaticRenameCandidates.length > 0}
+          {#if automaticRenameCandidatesWithEvidence.length > 0}
           <section class="automatic-choice-preview">
             <header>
               <div><h3>Choix préparés</h3><span>Chaque ligne conserve la preuve utilisée avant l'écriture dans Ghidra.</span></div>
@@ -4826,6 +4871,26 @@ interface ApplyRenamesResult {
               <span>{currentAutomaticIdentificationPage} / {automaticIdentificationPageCount}</span>
               <button type="button" disabled={currentAutomaticIdentificationPage === automaticIdentificationPageCount} onclick={() => (automaticIdentificationPage = Math.min(automaticIdentificationPageCount, currentAutomaticIdentificationPage + 1))}>→</button>
             </nav>
+          </section>
+          {/if}
+
+          {#if automaticRenameGenerationCandidates.length > 0}
+          <section class="automatic-choice-preview generation-choice-preview">
+            <header>
+              <div>
+                <h3>Propositions par IA générative</h3>
+                <span>Aucune preuve FunctionID/BSim pour ces fonctions — l'agent a inventé un nom à partir du pseudocode, des appelants/appelés et des chaînes. Ce sont des propositions, pas des faits vérifiés : relis le raisonnement avant de leur faire confiance.</span>
+              </div>
+            </header>
+            <div class="generation-choice-list">
+              {#each automaticRenameGenerationCandidates as item (item.func.entry_address)}
+                <article class="generation-choice-item">
+                  <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
+                  <div class="generation-choice-name">→ <b>{item.name}</b></div>
+                  <p class="generation-choice-reasoning">{item.evidenceLabel}</p>
+                </article>
+              {/each}
+            </div>
           </section>
           {/if}
 
@@ -9124,6 +9189,16 @@ interface ApplyRenamesResult {
   .no-automatic-choice { display: grid; place-items: center; min-height: 270px; align-content: center; gap: 0.25rem; color: #8292ad; text-align: center; }
   .no-automatic-choice strong { color: #cbd5e1; font-size: 0.78rem; }
   .no-automatic-choice span { font-size: 0.65rem; }
+  .generation-choice-preview { border-color: #4a3a14; }
+  .generation-choice-preview > header { border-bottom-color: #4a3a14; }
+  .generation-choice-preview h3 { color: #fbbf24; }
+  .generation-choice-list { display: grid; gap: 0.55rem; padding: 0.75rem; }
+  .generation-choice-item { display: grid; gap: 0.25rem; padding: 0.6rem 0.7rem; border: 1px solid #4a3a14; border-radius: 6px; background: #1a1608; }
+  .generation-choice-item > div:first-child { display: flex; align-items: baseline; gap: 0.5rem; }
+  .generation-choice-item strong { color: #f1f5f9; font-size: 0.7rem; }
+  .generation-choice-item code { color: #7db7e8; font-size: 0.56rem; }
+  .generation-choice-name { color: #fbbf24; font-size: 0.7rem; }
+  .generation-choice-reasoning { margin: 0; color: #cbb98a; font-size: 0.64rem; line-height: 1.5; }
 
   .automatic-rejections {
     border: 1px solid #513444;
