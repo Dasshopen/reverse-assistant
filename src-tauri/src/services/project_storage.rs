@@ -207,7 +207,10 @@ pub fn load_project_arbitration(
     load_project_arbitration_at(&real_projects_root_dir(app)?, id)
 }
 
-fn load_project_arbitration_at(root: &Path, id: &str) -> Result<Vec<StoredArbitrationOutcome>, String> {
+fn load_project_arbitration_at(
+    root: &Path,
+    id: &str,
+) -> Result<Vec<StoredArbitrationOutcome>, String> {
     require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
     if !dir.is_dir() {
@@ -293,7 +296,10 @@ pub fn load_project_generation(
     load_project_generation_at(&real_projects_root_dir(app)?, id)
 }
 
-fn load_project_generation_at(root: &Path, id: &str) -> Result<Vec<StoredGenerationOutcome>, String> {
+fn load_project_generation_at(
+    root: &Path,
+    id: &str,
+) -> Result<Vec<StoredGenerationOutcome>, String> {
     require_safe_project_id(id)?;
     let dir = project_dir_at(root, id);
     if !dir.is_dir() {
@@ -1436,12 +1442,18 @@ mod tests {
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
     }
 
-    fn sample_arbitration(entry_address: &str, chosen_name: Option<&str>) -> StoredArbitrationOutcome {
+    fn sample_arbitration(
+        entry_address: &str,
+        chosen_name: Option<&str>,
+    ) -> StoredArbitrationOutcome {
         StoredArbitrationOutcome {
             entry_address: entry_address.to_owned(),
             chosen_name: chosen_name.map(str::to_owned),
             reasoning: "le contexte appelant/appele confirme ce choix".to_owned(),
             provider_label: "Ollama (local)".to_owned(),
+            confidence: 90,
+            evidence: vec!["appelant cohérent".to_owned()],
+            context_complete: true,
         }
     }
 
@@ -1493,9 +1505,11 @@ mod tests {
         )
         .expect("storing the updated arbitration result should succeed");
 
-        let loaded = load_project_arbitration_at(&root, &saved.id)
-            .expect("loading should succeed");
-        assert_eq!(loaded, vec![sample_arbitration("0x1", Some("resolved_name"))]);
+        let loaded = load_project_arbitration_at(&root, &saved.id).expect("loading should succeed");
+        assert_eq!(
+            loaded,
+            vec![sample_arbitration("0x1", Some("resolved_name"))]
+        );
 
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
     }
@@ -1555,12 +1569,18 @@ mod tests {
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
     }
 
-    fn sample_generation(entry_address: &str, suggested_name: Option<&str>) -> StoredGenerationOutcome {
+    fn sample_generation(
+        entry_address: &str,
+        suggested_name: Option<&str>,
+    ) -> StoredGenerationOutcome {
         StoredGenerationOutcome {
             entry_address: entry_address.to_owned(),
             suggested_name: suggested_name.map(str::to_owned),
             reasoning: "appelle CreateFileA avec un mode lecture".to_owned(),
             provider_label: "Ollama (local)".to_owned(),
+            confidence: 75,
+            evidence: vec!["appel CreateFileA".to_owned()],
+            context_complete: true,
         }
     }
 
@@ -1613,7 +1633,10 @@ mod tests {
         .expect("storing the updated generation result should succeed");
 
         let loaded = load_project_generation_at(&root, &saved.id).expect("loading should succeed");
-        assert_eq!(loaded, vec![sample_generation("0x1", Some("resolved_name"))]);
+        assert_eq!(
+            loaded,
+            vec![sample_generation("0x1", Some("resolved_name"))]
+        );
 
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
     }

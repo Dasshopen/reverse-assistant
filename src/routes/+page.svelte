@@ -211,20 +211,26 @@ interface ArbitrationOutcome {
   chosen_name: string | null;
   reasoning: string;
   provider_label: string;
+  confidence: number;
+  evidence: string[];
 }
 
 interface StoredArbitrationOutcome extends ArbitrationOutcome {
   entry_address: string;
+  context_complete: boolean;
 }
 
 interface GenerationOutcome {
   suggested_name: string | null;
   reasoning: string;
   provider_label: string;
+  confidence: number;
+  evidence: string[];
 }
 
 interface StoredGenerationOutcome extends GenerationOutcome {
   entry_address: string;
+  context_complete: boolean;
 }
 
 interface AiProviderSummary {
@@ -268,6 +274,7 @@ interface AutomaticRenameChoice {
   alternativeCount: number;
   decisionLabel: string;
   ambiguous: boolean;
+  confidence: number;
 }
 
 interface AutomaticRenameRejection {
@@ -484,6 +491,7 @@ interface ApplyRenamesResult {
   let identificationQueueFilter = $state<IdentificationQueueFilter>("matched");
   let identificationQueueSearch = $state("");
   let automaticIdentificationMode = $state(false);
+  let automaticPrudenceLevel = $state(9);
   let automaticIdentificationPage = $state(1);
   const automaticIdentificationPageSize = 12;
   let ignoredIdentificationAddresses = $state(new Set<string>());
@@ -673,6 +681,9 @@ interface ApplyRenamesResult {
           (generationResults.has(func.entry_address) || generationErrors.has(func.entry_address)),
       ).length,
   );
+  let generationProposed = $derived.by(
+    () => [...generationResults.values()].filter((result) => result.suggested_name !== null).length,
+  );
   let remainingIdentificationFunctions = $derived(
     unidentifiedFunctions.filter(
       (func) => !ignoredIdentificationAddresses.has(func.entry_address),
@@ -739,6 +750,10 @@ interface ApplyRenamesResult {
 
   onMount(() => {
     let unlisten: UnlistenFn | undefined;
+    const storedPrudence = Number(window.localStorage.getItem("automatic-rename-prudence"));
+    if (Number.isInteger(storedPrudence) && storedPrudence >= 5 && storedPrudence <= 10) {
+      automaticPrudenceLevel = storedPrudence;
+    }
     listen<AnalysisProgress>("analysis-progress", (event) => {
       analysisProgress = event.payload;
     }).then((stop) => {
@@ -874,15 +889,17 @@ interface ApplyRenamesResult {
   let generationErrors = $state(new Map<string, string>());
   let generatingAddresses = $state(new Set<string>());
   let isBackgroundGenerating = $state(false);
+  let isBackgroundAiRunning = $state(false);
 
   // Ghidra's bundled FunctionID databases already discard matches below
   // 14.6. Keep that native threshold, then add the more important unique-name
   // margin check so equal-scored candidates are never presented as a winner.
   const automaticFidMinimumScore = 14.6;
-  const automaticFidMinimumMargin = 3;
-  const automaticBsimMinimumSimilarity = 0.85;
-  const automaticBsimMinimumSignificance = 10;
-  const automaticBsimMinimumMargin = 0.05;
+  let automaticFidMinimumMargin = $derived(automaticPrudenceLevel / 3);
+  let automaticBsimMinimumSimilarity = $derived(0.67 + automaticPrudenceLevel * 0.02);
+  let automaticBsimMinimumSignificance = $derived(4 + automaticPrudenceLevel * 2 / 3);
+  let automaticBsimMinimumMargin = $derived(0.005 + automaticPrudenceLevel * 0.005);
+  let automaticConfidenceThreshold = $derived(45 + automaticPrudenceLevel * 5);
   // Mirrors identification_corroboration::MINIMUM_CORROBORATING_REPETITIONS
   // (src-tauri/src/services/identification_corroboration.rs).
   const minimumCorroboratingRepetitions = 3;
@@ -1034,10 +1051,11 @@ interface ApplyRenamesResult {
       name: safeName,
       source: "arbitration",
       scoreLabel: "agent IA",
-      evidenceLabel: `${arbitration.provider_label} : ${arbitration.reasoning}`,
+      evidenceLabel: `${arbitration.provider_label} · confiance ${arbitration.confidence}% : ${arbitration.reasoning}`,
       alternativeCount: Math.max(0, tiedCandidatesFor(func.entry_address).length - 1),
       decisionLabel: "Choisi par l'agent IA parmi les candidats ex æquo réels, à partir du contexte (appelants, appelés, chaînes)",
       ambiguous: false,
+      confidence: arbitration.confidence,
     };
   }
 
@@ -1135,6 +1153,7 @@ interface ApplyRenamesResult {
             alternativeCount: 0,
             decisionLabel: "Confirmé par RTTI — donnée réelle du binaire, pas une estimation",
             ambiguous: false,
+            confidence: 100,
           });
           continue;
         }
@@ -1159,6 +1178,7 @@ interface ApplyRenamesResult {
             alternativeCount: func.rtti_class_names.length - 1,
             decisionLabel: "Fonction réellement partagée par plusieurs classes (destructeurs fusionnés par le compilateur) — première classe retenue, confirmée par RTTI comme les autres",
             ambiguous: true,
+            confidence: 94,
           });
           continue;
         }
@@ -1183,10 +1203,11 @@ interface ApplyRenamesResult {
               name: safeName,
               source: "generation",
               scoreLabel: "invention IA",
-              evidenceLabel: `${generation.provider_label} : ${generation.reasoning}`,
+              evidenceLabel: `${generation.provider_label} · confiance ${generation.confidence}% : ${generation.reasoning}`,
               alternativeCount: 0,
               decisionLabel: "Aucune preuve FunctionID/BSim -- nom inventé par l'agent IA à partir du pseudocode, des appelants/appelés et des chaînes",
               ambiguous: true,
+              confidence: generation.confidence,
             });
           }
         }
@@ -1266,6 +1287,9 @@ interface ApplyRenamesResult {
               ? "Candidat unique au-dessus du seuil de sécurité"
               : `Marge de ${margin.toFixed(1)} points sur le deuxième candidat`,
             ambiguous: isAmbiguous,
+            confidence: isAmbiguous
+              ? 70
+              : Math.min(100, Math.round(90 + (margin ?? 0) * 2 + (corroboratedFid || rttiNarrowedFid ? 8 : 0))),
           });
           continue;
         }
@@ -1340,6 +1364,7 @@ interface ApplyRenamesResult {
               ? "Candidat unique au-dessus des seuils de sécurité"
               : `Marge de ${margin.toFixed(3)} sur le deuxième candidat`,
             ambiguous: false,
+            confidence: Math.min(100, Math.round(bestBsim.similarity * 70 + bestBsim.significance * 1.5 + (isCorroborated ? 10 : 0))),
           });
           continue;
         }
@@ -1373,7 +1398,12 @@ interface ApplyRenamesResult {
 
     return { choices, rejections };
   });
-  let automaticRenameCandidates = $derived(automaticRenameEvaluation.choices);
+  let automaticRenameCandidates = $derived(
+    automaticRenameEvaluation.choices.filter((choice) => choice.confidence >= automaticConfidenceThreshold),
+  );
+  let automaticRenameReviewChoices = $derived(
+    automaticRenameEvaluation.choices.filter((choice) => choice.confidence < automaticConfidenceThreshold),
+  );
   let automaticRenameRejections = $derived(automaticRenameEvaluation.rejections);
   let automaticAmbiguousChoiceCount = $derived(
     automaticRenameCandidates.filter((choice) => choice.ambiguous).length,
@@ -2080,8 +2110,7 @@ interface ApplyRenamesResult {
         ]),
     );
     void refreshBsimRepetitionCorroboration(items);
-    void runBackgroundArbitration();
-    void runBackgroundGeneration();
+    void runBackgroundAiAnalysis();
   }
 
   async function refreshBsimRepetitionCorroboration(items: FunctionIdentification[]) {
@@ -2156,12 +2185,14 @@ interface ApplyRenamesResult {
           { projectId: id },
         );
         arbitrationResults = new Map(
-          storedArbitration.map((stored) => [
+          storedArbitration.filter((stored) => stored.context_complete).map((stored) => [
             stored.entry_address,
             {
               chosen_name: stored.chosen_name,
               reasoning: stored.reasoning,
               provider_label: stored.provider_label,
+              confidence: stored.confidence ?? 0,
+              evidence: stored.evidence ?? [],
             },
           ]),
         );
@@ -2175,19 +2206,22 @@ interface ApplyRenamesResult {
           { projectId: id },
         );
         generationResults = new Map(
-          storedGeneration.map((stored) => [
+          storedGeneration
+            .filter((stored) => stored.context_complete)
+            .map((stored) => [
             stored.entry_address,
             {
               suggested_name: stored.suggested_name,
               reasoning: stored.reasoning,
               provider_label: stored.provider_label,
+              confidence: stored.confidence ?? 0,
+              evidence: stored.evidence ?? [],
             },
           ]),
         );
       } catch (error) {
         console.error("Failed to load stored generation results", error);
       }
-      installIdentificationEvidence(loaded.identifications ?? []);
       functionIdAnalysisAvailable = loaded.identifications !== null;
       // A currently-available session (Ghidra project files genuinely
       // present right now, just re-verified by the backend) keeps
@@ -2196,6 +2230,7 @@ interface ApplyRenamesResult {
       // project is unreachable this time -- behaves like a manual import.
       analysisSource = loaded.project.session_available ? "automatic" : "manual";
       activeProjectId = loaded.project.id;
+      installIdentificationEvidence(loaded.identifications ?? []);
       activeWorkspaceView = "overview";
       const scannedAddresses = new Set(
         (loaded.identifications ?? [])
@@ -2637,7 +2672,7 @@ interface ApplyRenamesResult {
     }
   }
 
-  async function requestDecompiledCode(entryAddress: string) {
+  async function requestDecompiledCode(entryAddress: string): Promise<DecompiledFunctionDetails | null> {
     pendingDecompiles = new Set(pendingDecompiles).add(entryAddress);
 
     const errorsWithoutCurrentAddress = new Map(decompileErrors);
@@ -2659,13 +2694,37 @@ interface ApplyRenamesResult {
       if (details.decompiled_code !== null) {
         requestProgramOverview();
       }
+      return details;
     } catch (error) {
       decompileErrors = new Map(decompileErrors).set(entryAddress, String(error));
+      return null;
     } finally {
       const remainingDecompiles = new Set(pendingDecompiles);
       remainingDecompiles.delete(entryAddress);
       pendingDecompiles = remainingDecompiles;
     }
+  }
+
+  async function ensurePseudocodeForAi(entryAddress: string): Promise<boolean> {
+    const func = importedExport?.functions.find((item) => item.entry_address === entryAddress);
+    if (!func || func.is_external) return false;
+    if (func.decompiled_code?.trim()) return true;
+    const cached = decompileCache.get(entryAddress);
+    if (cached?.decompiled_code?.trim()) return true;
+    if (analysisSource !== "automatic") return false;
+
+    // The selected-function effect may already be fetching this exact
+    // pseudocode. Wait for that shared result instead of launching a second
+    // Ghidra JVM for the same address.
+    for (let attempt = 0; pendingDecompiles.has(entryAddress) && attempt < 1_800; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const completed = decompileCache.get(entryAddress);
+    if (completed?.decompiled_code?.trim()) return true;
+    if (pendingDecompiles.has(entryAddress)) return false;
+
+    const details = await requestDecompiledCode(entryAddress);
+    return Boolean(details?.decompiled_code?.trim());
   }
 
   async function requestDisassembly(entryAddress: string) {
@@ -2812,7 +2871,7 @@ interface ApplyRenamesResult {
     const batch = automaticRenameCandidates.slice(0, 500);
     if (batch.length === 0) return;
     if (!window.confirm(
-      `Appliquer ${batch.length} proposition(s) nettoyée(s) dans Ghidra ? ${automaticAmbiguousChoiceCount} choix sont marqués comme ambigus : le premier résultat FunctionID nettoyé sera utilisé, comme affiché dans le tableau.`,
+      `Appliquer ${batch.length} nom(s) ayant atteint le seuil de prudence ${automaticPrudenceLevel}/10 (${automaticConfidenceThreshold} %) dans Ghidra ? Chaque choix et sa preuve restent visibles dans le tableau.`,
     )) return;
 
     automaticRenameError = "";
@@ -2917,6 +2976,14 @@ interface ApplyRenamesResult {
     const candidates = tiedCandidatesFor(entryAddress);
     if (candidates.length === 0) return;
 
+    if (!(await ensurePseudocodeForAi(entryAddress))) {
+      arbitrationErrors = new Map(arbitrationErrors).set(
+        entryAddress,
+        "Arbitrage différé : aucun pseudocode exploitable n'a pu être obtenu.",
+      );
+      return;
+    }
+
     arbitratingAddresses = new Set(arbitratingAddresses).add(entryAddress);
     const errorsWithoutThisAddress = new Map(arbitrationErrors);
     errorsWithoutThisAddress.delete(entryAddress);
@@ -2983,11 +3050,18 @@ interface ApplyRenamesResult {
 
   // Same shape as arbitrateFunction, for functions with zero FunctionID/
   // BSim candidates (nothing to select between, see naming_generation.rs).
-  // The result is deliberately never fed into automaticRenameEvaluation --
-  // an invented name needs a human to look at it before it's applied,
-  // unlike RTTI/FunctionID/BSim/arbitration choices which are all backed
-  // by a real, independently-found candidate.
+  // Open-ended suggestions are kept distinct from evidence-backed names.
+  // They may enter automatic mode only through the explicit confidence/
+  // prudence threshold, and remain visibly labelled as AI suggestions.
   async function generateSuggestionFor(entryAddress: string): Promise<void> {
+    if (!(await ensurePseudocodeForAi(entryAddress))) {
+      generationErrors = new Map(generationErrors).set(
+        entryAddress,
+        "Suggestion différée : aucun pseudocode exploitable n'a pu être obtenu.",
+      );
+      return;
+    }
+
     generatingAddresses = new Set(generatingAddresses).add(entryAddress);
     const errorsWithoutThisAddress = new Map(generationErrors);
     errorsWithoutThisAddress.delete(entryAddress);
@@ -3043,6 +3117,21 @@ interface ApplyRenamesResult {
       }
     } finally {
       isBackgroundGenerating = false;
+    }
+  }
+
+  async function runBackgroundAiAnalysis() {
+    if (isBackgroundAiRunning) return;
+    if (!aiProviders.some((provider) => provider.enabled)) return;
+    isBackgroundAiRunning = true;
+    try {
+      // One bounded pipeline: closed-set arbitration first, then open-ended
+      // generation. This prevents two providers/Ghidra decompilations from
+      // racing and makes the progress counters truthful.
+      await runBackgroundArbitration();
+      await runBackgroundGeneration();
+    } finally {
+      isBackgroundAiRunning = false;
     }
   }
 
@@ -3397,8 +3486,7 @@ interface ApplyRenamesResult {
       newAiProviderApiKey = "";
       newAiProviderModel = "";
       await loadAiProviders();
-      void runBackgroundArbitration();
-      void runBackgroundGeneration();
+      void runBackgroundAiAnalysis();
     } catch (error) {
       aiProvidersError = String(error);
     } finally {
@@ -3413,8 +3501,7 @@ interface ApplyRenamesResult {
     try {
       await invoke("set_ai_provider_enabled", { id: provider.id, enabled: !provider.enabled });
       await loadAiProviders();
-      void runBackgroundArbitration();
-      void runBackgroundGeneration();
+      void runBackgroundAiAnalysis();
     } catch (error) {
       aiProvidersError = String(error);
     } finally {
@@ -4825,15 +4912,31 @@ interface ApplyRenamesResult {
         {#if automaticIdentificationMode}
           <section class="automatic-rename-panel">
             <div>
-              <strong>{automaticRenameCandidates.length} proposition(s) nettoyée(s) peuvent être appliquées</strong>
+              <strong>{automaticRenameCandidates.length} proposition(s) atteignent le niveau de prudence</strong>
               <span>
-                {automaticAmbiguousChoiceCount} choix ambigu(s) clairement signalé(s)
+                {automaticRenameReviewChoices.length + automaticRenameRejections.length} proposition(s) restent à vérifier ·
+                {automaticAmbiguousChoiceCount} choix ambigu(s) signalé(s)
                 {#if automaticRenameGenerationCandidates.length > 0}
                   (dont {automaticRenameGenerationCandidates.length} inventé(s) par IA, voir plus bas)
                 {/if} ·
                 {automaticRenameWithoutEvidenceCount} fonction(s) sans preuve exploitable.
               </span>
             </div>
+            <label class="prudence-control">
+              <span>Prudence <b>{automaticPrudenceLevel}/10</b></span>
+              <input
+                type="range"
+                min="5"
+                max="10"
+                step="1"
+                bind:value={automaticPrudenceLevel}
+                oninput={() => {
+                  automaticIdentificationPage = 1;
+                  window.localStorage.setItem("automatic-rename-prudence", String(automaticPrudenceLevel));
+                }}
+              />
+              <small>Seuil actuel : {automaticConfidenceThreshold}%</small>
+            </label>
             <button
               type="button"
               disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
@@ -4894,13 +4997,21 @@ interface ApplyRenamesResult {
           </section>
           {/if}
 
-          {#if automaticRenameRejections.length > 0}
-            <details class="automatic-rejections" open>
+          {#if automaticRenameReviewChoices.length + automaticRenameRejections.length > 0}
+            <details class="automatic-rejections">
               <summary>
-                <span><strong>{automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Score insuffisant, ambiguïté ou nom nécessitant une validation</small></span>
+                <span><strong>{automaticRenameReviewChoices.length + automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Masquées par défaut pour ne pas imposer une longue liste répétitive</small></span>
                 <b>Voir les raisons</b>
               </summary>
               <div class="automatic-rejection-list">
+                {#each automaticRenameReviewChoices as item (item.func.entry_address)}
+                  <article>
+                    <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
+                    <div><span>{item.name}</span></div>
+                    <div><small>{identificationSourceLabel(item.source)} · confiance {item.confidence}%</small><b>Sous le seuil de prudence actuel ({automaticConfidenceThreshold}%).</b></div>
+                    <button type="button" onclick={() => reviewIdentificationFunction(item.func.entry_address)}>Vérifier manuellement</button>
+                  </article>
+                {/each}
                 {#each automaticRenameRejections as item (item.func.entry_address)}
                   <article>
                     <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
@@ -4943,7 +5054,7 @@ interface ApplyRenamesResult {
                   {:else if generationResolved < generationTotal}
                     {generationTotal - generationResolved} fonction(s) sans preuve en attente de suggestion IA.
                   {:else}
-                    Génération IA terminée : {generationTotal} fonction(s) traitée(s).
+                    Analyse IA terminée : {generationResolved} examinée(s), {generationProposed} nom(s) proposé(s).
                   {/if}
                 </p>
               {/if}
@@ -4963,6 +5074,9 @@ interface ApplyRenamesResult {
                   {@const topEvidenceScore = evidenceCandidates[0]?.overall_score}
                   {@const tiedEvidenceCount = topEvidenceScore === undefined ? 0 : evidenceCandidates.filter((item) => Math.abs(item.overall_score - topEvidenceScore) < 0.0001).length}
                   {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === func.entry_address)}
+                  {@const reviewChoice = automaticRenameReviewChoices.find((choice) => choice.func.entry_address === func.entry_address)}
+                  {@const preparedChoice = automaticChoice ?? reviewChoice}
+                  {@const generatedSuggestion = generationResults.get(func.entry_address)?.suggested_name}
                   <li>
                     <button
                       type="button"
@@ -4970,12 +5084,16 @@ interface ApplyRenamesResult {
                       onclick={() => openFunction(func.entry_address, false)}
                     >
                       <span><strong>{func.name}</strong><code>{func.entry_address}</code></span>
-                      {#if tiedEvidenceCount > 1}
-                        <span class="queue-candidate ambiguous"><small>{tiedEvidenceCount} noms ex æquo</small><b>{automaticChoice?.name ?? "Choix manuel requis"}</b></span>
+                      {#if preparedChoice}
+                        <span class:ambiguous={!automaticChoice} class="queue-candidate"><small>{automaticChoice ? `Prêt auto · ${preparedChoice.confidence}%` : `À vérifier · ${preparedChoice.confidence}%`}</small><b>{preparedChoice.name}</b></span>
+                      {:else if tiedEvidenceCount > 1}
+                        <span class="queue-candidate ambiguous"><small>{tiedEvidenceCount} noms ex æquo</small><b>Arbitrage requis</b></span>
                       {:else if candidate}
-                        <span class="queue-candidate"><small>Proposition nettoyée</small><b>{automaticChoice?.name ?? normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}</b></span>
+                        <span class="queue-candidate"><small>Proposition nettoyée</small><b>{normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}</b></span>
                       {:else if topBsimCandidate}
-                        <span class="queue-candidate"><small>BSim · {topBsimCandidate.similarity.toFixed(3)}</small><b>{automaticChoice?.name ?? normalizedAutomaticSymbolName(topBsimCandidate.name) ?? topBsimCandidate.name}</b></span>
+                        <span class="queue-candidate"><small>BSim · {topBsimCandidate.similarity.toFixed(3)}</small><b>{normalizedAutomaticSymbolName(topBsimCandidate.name) ?? topBsimCandidate.name}</b></span>
+                      {:else if generatedSuggestion}
+                        <span class="queue-candidate"><small>Suggestion IA</small><b>{generatedSuggestion}</b></span>
                       {:else}
                         <span class="queue-no-evidence">Sans correspondance</span>
                       {/if}
@@ -5052,7 +5170,8 @@ interface ApplyRenamesResult {
                                 <strong>L'agent reste incertain</strong>
                               {/if}
                               <p>{currentResult.reasoning}</p>
-                              <small>Fournisseur : {currentResult.provider_label}</small>
+                              {#if currentResult.evidence.length > 0}<ul>{#each currentResult.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}
+                              <small>Confiance : {currentResult.confidence}% · Agent(s) : {currentResult.provider_label}</small>
                             </div>
                           {:else if currentError}
                             <p class="settings-inline-error" role="alert">{currentError}</p>
@@ -5081,7 +5200,7 @@ interface ApplyRenamesResult {
                         </h5>
                         <details
                           class="fid-raw-candidates"
-                          open={!(selectedIdentificationTopTieCount > 1 && !!arbitrationResults.get(selectedFunction.entry_address)?.chosen_name)}
+                          open={selectedFunction.rtti_class_names.length === 0 && !(selectedIdentificationTopTieCount > 1 && !!arbitrationResults.get(selectedFunction.entry_address)?.chosen_name)}
                         >
                           <summary>
                             {selectedIdentificationTopTieCount > 1 && arbitrationResults.get(selectedFunction.entry_address)?.chosen_name
@@ -5139,9 +5258,9 @@ interface ApplyRenamesResult {
                         {@const currentError = generationErrors.get(selectedFunction.entry_address)}
                         {@const isRunning = generatingAddresses.has(selectedFunction.entry_address)}
                         <div class="evidence-source-group generation-evidence-group">
-                          <h5>Suggestion IA (aucune preuve automatique)
+                          <h5>Analyse sémantique IA
                             <span>
-                              FunctionID et BSim n'ont trouvé aucun candidat pour cette fonction — un agent IA propose un nom à partir du contexte réel (pseudocode, appelants, appelés, chaînes), sans aucune garantie : c'est une invention, pas une preuve, à valider toi-même avant d'appliquer.
+                              FunctionID et BSim n'ont trouvé aucun candidat. L'IA analyse alors le pseudocode, les appels et les chaînes ; son résultat reste une proposition avec un niveau de confiance explicite.
                             </span>
                           </h5>
                           <div class="arbitration-panel generation-panel">
@@ -5159,7 +5278,8 @@ interface ApplyRenamesResult {
                                   <strong>L'agent n'a proposé aucun nom</strong>
                                 {/if}
                                 <p>{currentResult.reasoning}</p>
-                                <small>Fournisseur : {currentResult.provider_label}</small>
+                                {#if currentResult.evidence.length > 0}<ul>{#each currentResult.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}
+                                <small>Confiance : {currentResult.confidence}% · Agent(s) : {currentResult.provider_label}</small>
                               </div>
                             {:else if currentError}
                               <p class="settings-inline-error" role="alert">{currentError}</p>
@@ -9145,6 +9265,19 @@ interface ApplyRenamesResult {
   }
 
   .automatic-rename-panel > div { display: grid; gap: 0.18rem; }
+  .automatic-rename-panel .prudence-control {
+    display: grid;
+    grid-template-columns: auto minmax(120px, 190px);
+    align-items: center;
+    gap: 0.18rem 0.55rem;
+    min-width: 250px;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid #3b4b68;
+    border-radius: 7px;
+    background: #0b1423;
+  }
+  .automatic-rename-panel .prudence-control input { width: 100%; accent-color: #8b5cf6; }
+  .automatic-rename-panel .prudence-control small { grid-column: 1 / -1; color: #91a0b8; }
   .automatic-rename-panel strong { color: #ddd6fe; font-size: 0.75rem; }
   .automatic-rename-panel span { color: #91a0b8; font-size: 0.64rem; }
   .automatic-rename-panel button { flex: 0 0 auto; padding: 0.5rem 0.7rem; background: #6d28d9; color: white; font-size: 0.66rem; }

@@ -221,6 +221,8 @@ struct ArbitrationOutcome {
     chosen_name: Option<String>,
     reasoning: String,
     provider_label: String,
+    confidence: u8,
+    evidence: Vec<String>,
 }
 
 #[tauri::command(async)]
@@ -250,37 +252,87 @@ fn arbitrate_identification_tie(
 
     let context = naming_arbitration::build_context_for_function(&export, &entry_address)?;
 
-    // If several providers are enabled at once, the first one configured
-    // is used -- letting the caller pick per-call is a future refinement,
-    // not needed for this first working version.
-    let provider_secrets = ai_providers::enabled_providers_for_app(&app)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            "no AI provider is enabled. Configure one under Réglages first.".to_owned()
-        })?;
+    let enabled = ai_providers::enabled_providers_for_app(&app)?;
+    if enabled.is_empty() {
+        return Err("no AI provider is enabled. Configure one under Réglages first.".to_owned());
+    }
 
-    let provider = services::ai_provider::OpenAiCompatibleProvider {
-        base_url: provider_secrets.base_url,
-        api_key: provider_secrets.api_key,
+    let mut answers = Vec::new();
+    let mut errors = Vec::new();
+    for secrets in enabled {
+        let provider = services::ai_provider::OpenAiCompatibleProvider {
+            base_url: secrets.base_url,
+            api_key: secrets.api_key,
+        };
+        let request = naming_arbitration::build_arbitration_request(
+            &naming_arbitration::ArbitrationRequest {
+                candidates: arbitration_candidates.clone(),
+                context: context.clone(),
+            },
+            &secrets.model,
+        );
+        match provider.complete(&request).and_then(|response| {
+            naming_arbitration::parse_arbitration_response(&response, &arbitration_candidates)
+        }) {
+            Ok(result) => answers.push((secrets.label, result)),
+            Err(error) => errors.push(format!("{}: {error}", secrets.label)),
+        }
+    }
+    if answers.is_empty() {
+        return Err(format!(
+            "all enabled AI providers failed: {}",
+            errors.join("; ")
+        ));
+    }
+
+    let mut votes = std::collections::HashMap::<String, usize>::new();
+    for (_, answer) in &answers {
+        if let Some(name) = &answer.chosen_name {
+            *votes.entry(name.clone()).or_default() += 1;
+        }
+    }
+    let winner = votes.into_iter().max_by_key(|(_, count)| *count);
+    let chosen_name = winner
+        .filter(|(_, count)| answers.len() == 1 || *count * 2 > answers.len())
+        .map(|(name, _)| name);
+    let agreeing: Vec<_> = answers
+        .iter()
+        .filter(|(_, answer)| answer.chosen_name == chosen_name)
+        .collect();
+    let confidence = if chosen_name.is_some() && !agreeing.is_empty() {
+        (agreeing
+            .iter()
+            .map(|(_, answer)| u16::from(answer.confidence))
+            .sum::<u16>()
+            / agreeing.len() as u16) as u8
+    } else {
+        0
     };
-
-    let request = naming_arbitration::build_arbitration_request(
-        &naming_arbitration::ArbitrationRequest {
-            candidates: arbitration_candidates.clone(),
-            context,
-        },
-        &provider_secrets.model,
-    );
-
-    let response = provider.complete(&request)?;
-    let result =
-        naming_arbitration::parse_arbitration_response(&response, &arbitration_candidates)?;
-
+    let evidence = agreeing
+        .iter()
+        .flat_map(|(_, answer)| answer.evidence.clone())
+        .take(12)
+        .collect();
+    let reasoning = if chosen_name.is_some() {
+        agreeing
+            .iter()
+            .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    } else {
+        "Les agents activés ne convergent pas vers un nom unique; validation manuelle requise."
+            .to_owned()
+    };
     Ok(ArbitrationOutcome {
-        chosen_name: result.chosen_name,
-        reasoning: result.reasoning,
-        provider_label: provider_secrets.label,
+        chosen_name,
+        reasoning,
+        provider_label: answers
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join(" + "),
+        confidence,
+        evidence,
     })
 }
 
@@ -301,6 +353,9 @@ fn save_arbitration_result(
         chosen_name: outcome.chosen_name,
         reasoning: outcome.reasoning,
         provider_label: outcome.provider_label,
+        confidence: outcome.confidence,
+        evidence: outcome.evidence,
+        context_complete: true,
     };
     match results
         .iter_mut()
@@ -325,14 +380,16 @@ struct GenerationOutcome {
     suggested_name: Option<String>,
     reasoning: String,
     provider_label: String,
+    confidence: u8,
+    evidence: Vec<String>,
 }
 
 // Unlike arbitrate_identification_tie, this function has *no* FunctionID/
 // BSim candidates at all -- there is nothing to select between, only real
 // context to reason from. See naming_generation.rs for why this makes the
-// answer inherently less safe than a closed-set arbitration choice, and
-// why the frontend never auto-applies it in bulk the way it does RTTI/
-// FunctionID/BSim/arbitration choices.
+// answer inherently less safe than a closed-set arbitration choice. It
+// carries confidence/evidence so the frontend can enforce the user's
+// prudence threshold rather than presenting it as a verified fact.
 #[tauri::command(async)]
 fn generate_identification_suggestion(
     app: AppHandle,
@@ -347,27 +404,81 @@ fn generate_identification_suggestion(
 
     let context = naming_generation::build_context_for_function(&export, &entry_address)?;
 
-    let provider_secrets = ai_providers::enabled_providers_for_app(&app)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            "no AI provider is enabled. Configure one under Réglages first.".to_owned()
-        })?;
+    let enabled = ai_providers::enabled_providers_for_app(&app)?;
+    if enabled.is_empty() {
+        return Err("no AI provider is enabled. Configure one under Réglages first.".to_owned());
+    }
 
-    let provider = services::ai_provider::OpenAiCompatibleProvider {
-        base_url: provider_secrets.base_url,
-        api_key: provider_secrets.api_key,
+    let mut answers = Vec::new();
+    let mut errors = Vec::new();
+    for secrets in enabled {
+        let provider = services::ai_provider::OpenAiCompatibleProvider {
+            base_url: secrets.base_url,
+            api_key: secrets.api_key,
+        };
+        let request = naming_generation::build_generation_request(&context, &secrets.model);
+        match provider
+            .complete(&request)
+            .and_then(|response| naming_generation::parse_generation_response(&response))
+        {
+            Ok(result) => answers.push((secrets.label, result)),
+            Err(error) => errors.push(format!("{}: {error}", secrets.label)),
+        }
+    }
+    if answers.is_empty() {
+        return Err(format!(
+            "all enabled AI providers failed: {}",
+            errors.join("; ")
+        ));
+    }
+
+    let mut votes = std::collections::HashMap::<String, usize>::new();
+    for (_, answer) in &answers {
+        if let Some(name) = &answer.suggested_name {
+            *votes.entry(name.clone()).or_default() += 1;
+        }
+    }
+    let winner = votes.into_iter().max_by_key(|(_, count)| *count);
+    let suggested_name = winner
+        .filter(|(_, count)| answers.len() == 1 || *count * 2 > answers.len())
+        .map(|(name, _)| name);
+    let agreeing: Vec<_> = answers
+        .iter()
+        .filter(|(_, answer)| answer.suggested_name == suggested_name)
+        .collect();
+    let confidence = if suggested_name.is_some() && !agreeing.is_empty() {
+        (agreeing
+            .iter()
+            .map(|(_, answer)| u16::from(answer.confidence))
+            .sum::<u16>()
+            / agreeing.len() as u16) as u8
+    } else {
+        0
     };
-
-    let request = naming_generation::build_generation_request(&context, &provider_secrets.model);
-
-    let response = provider.complete(&request)?;
-    let result = naming_generation::parse_generation_response(&response)?;
-
+    let evidence = agreeing
+        .iter()
+        .flat_map(|(_, answer)| answer.evidence.clone())
+        .take(12)
+        .collect();
+    let reasoning = if suggested_name.is_some() {
+        agreeing
+            .iter()
+            .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    } else {
+        "Les agents activés ne convergent pas vers un nom unique ou manquent de preuves.".to_owned()
+    };
     Ok(GenerationOutcome {
-        suggested_name: result.suggested_name,
-        reasoning: result.reasoning,
-        provider_label: provider_secrets.label,
+        suggested_name,
+        reasoning,
+        provider_label: answers
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join(" + "),
+        confidence,
+        evidence,
     })
 }
 
@@ -387,6 +498,9 @@ fn save_generation_result(
         suggested_name: outcome.suggested_name,
         reasoning: outcome.reasoning,
         provider_label: outcome.provider_label,
+        confidence: outcome.confidence,
+        evidence: outcome.evidence,
+        context_complete: true,
     };
     match results
         .iter_mut()
