@@ -510,7 +510,19 @@ interface ApplyRenamesResult {
   let identificationQueueFilter = $state<IdentificationQueueFilter>("matched");
   let identificationQueueSearch = $state("");
   let automaticIdentificationMode = $state(false);
-  let automaticPrudenceLevel = $state(9);
+  type PrudenceProfile = {
+    value: 5 | 7 | 9 | 10;
+    label: string;
+    shortDescription: string;
+    threshold: number;
+  };
+  const prudenceProfiles: PrudenceProfile[] = [
+    { value: 5, label: "Exploratoire", shortDescription: "Davantage d'hypothèses, à relire", threshold: 55 },
+    { value: 7, label: "Équilibré", shortDescription: "Bon compromis couverture / preuves", threshold: 70 },
+    { value: 9, label: "Strict", shortDescription: "Plusieurs indices cohérents exigés", threshold: 86 },
+    { value: 10, label: "Quasi certain", shortDescription: "Corroboration indépendante forte", threshold: 92 },
+  ];
+  let automaticPrudenceLevel = $state<PrudenceProfile["value"]>(7);
   let automaticIdentificationPage = $state(1);
   const automaticIdentificationPageSize = 12;
   let ignoredIdentificationAddresses = $state(new Set<string>());
@@ -770,8 +782,10 @@ interface ApplyRenamesResult {
   onMount(() => {
     let unlisten: UnlistenFn | undefined;
     const storedPrudence = Number(window.localStorage.getItem("automatic-rename-prudence"));
-    if (Number.isInteger(storedPrudence) && storedPrudence >= 5 && storedPrudence <= 10) {
+    if (storedPrudence === 5 || storedPrudence === 7 || storedPrudence === 9 || storedPrudence === 10) {
       automaticPrudenceLevel = storedPrudence;
+    } else if (Number.isInteger(storedPrudence) && storedPrudence >= 5 && storedPrudence <= 10) {
+      automaticPrudenceLevel = storedPrudence <= 6 ? 5 : storedPrudence <= 8 ? 7 : storedPrudence === 9 ? 9 : 10;
     }
     listen<AnalysisProgress>("analysis-progress", (event) => {
       analysisProgress = event.payload;
@@ -918,9 +932,10 @@ interface ApplyRenamesResult {
   let automaticBsimMinimumSimilarity = $derived(0.67 + automaticPrudenceLevel * 0.02);
   let automaticBsimMinimumSignificance = $derived(4 + automaticPrudenceLevel * 2 / 3);
   let automaticBsimMinimumMargin = $derived(0.005 + automaticPrudenceLevel * 0.005);
-  let automaticConfidenceThreshold = $derived(
-    [0, 35, 40, 45, 50, 55, 62, 70, 78, 86, 92][automaticPrudenceLevel] ?? 86,
+  let activePrudenceProfile = $derived(
+    prudenceProfiles.find((profile) => profile.value === automaticPrudenceLevel) ?? prudenceProfiles[1],
   );
+  let automaticConfidenceThreshold = $derived(activePrudenceProfile.threshold);
   // Mirrors identification_corroboration::MINIMUM_CORROBORATING_REPETITIONS
   // (src-tauri/src/services/identification_corroboration.rs).
   const minimumCorroboratingRepetitions = 3;
@@ -1224,9 +1239,11 @@ interface ApplyRenamesResult {
               name: safeName,
               source: "generation",
               scoreLabel: "invention IA",
-              evidenceLabel: `${generation.provider_label} · confiance ${generation.confidence}% : ${generation.reasoning}`,
+              evidenceLabel: `${generation.provider_label} · confiance calibrée ${generation.confidence}% : ${generation.reasoning}${generation.evidence.length > 0 ? ` · Indices : ${generation.evidence.join(" ; ")}` : ""}`,
               alternativeCount: 0,
-              decisionLabel: "Aucune preuve FunctionID/BSim -- nom inventé par l'agent IA à partir du pseudocode, des appelants/appelés et des chaînes",
+              decisionLabel: generation.evidence.some((item) => item.startsWith("Verification locale :"))
+                ? "Hypothèse IA contrôlée par le vérificateur local ; le score est plafonné par les indices indépendants trouvés"
+                : "Hypothèse IA fondée sur le pseudocode et son contexte ; confiance conservatrice en l'absence de corroboration déterministe enregistrée",
               ambiguous: true,
               confidence: generation.confidence,
             });
@@ -2898,7 +2915,7 @@ interface ApplyRenamesResult {
     const batch = automaticRenameCandidates.slice(0, 500);
     if (batch.length === 0) return;
     if (!window.confirm(
-      `Appliquer ${batch.length} nom(s) ayant atteint le seuil de prudence ${automaticPrudenceLevel}/10 (${automaticConfidenceThreshold} %) dans Ghidra ? Chaque choix et sa preuve restent visibles dans le tableau.`,
+      `Appliquer ${batch.length} nom(s) ayant atteint le niveau « ${activePrudenceProfile.label} » (${automaticConfidenceThreshold} % minimum) dans Ghidra ? Chaque choix et sa preuve restent visibles dans le tableau.`,
     )) return;
 
     automaticRenameError = "";
@@ -5153,21 +5170,25 @@ interface ApplyRenamesResult {
                 {automaticRenameWithoutEvidenceCount} fonction(s) sans preuve exploitable.
               </span>
             </div>
-            <label class="prudence-control">
-              <span>Prudence <b>{automaticPrudenceLevel}/10</b></span>
-              <input
-                type="range"
-                min="5"
-                max="10"
-                step="1"
-                bind:value={automaticPrudenceLevel}
-                oninput={() => {
-                  automaticIdentificationPage = 1;
-                  window.localStorage.setItem("automatic-rename-prudence", String(automaticPrudenceLevel));
-                }}
-              />
-              <small>Seuil actuel : {automaticConfidenceThreshold}%</small>
-            </label>
+            <fieldset class="prudence-control" aria-label="Niveau de prudence du renommage automatique">
+              <legend>Prudence : <b>{activePrudenceProfile.label}</b></legend>
+              <div class="prudence-options">
+                {#each prudenceProfiles as profile (profile.value)}
+                  <button
+                    type="button"
+                    class:active={automaticPrudenceLevel === profile.value}
+                    aria-pressed={automaticPrudenceLevel === profile.value}
+                    title={`${profile.shortDescription} · seuil ${profile.threshold}%`}
+                    onclick={() => {
+                      automaticPrudenceLevel = profile.value;
+                      automaticIdentificationPage = 1;
+                      window.localStorage.setItem("automatic-rename-prudence", String(profile.value));
+                    }}
+                  >{profile.label}</button>
+                {/each}
+              </div>
+              <small>{activePrudenceProfile.shortDescription} · seuil minimal {automaticConfidenceThreshold}%</small>
+            </fieldset>
             <button
               type="button"
               disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
@@ -9498,21 +9519,46 @@ interface ApplyRenamesResult {
   .automatic-rename-panel > div { display: grid; gap: 0.18rem; }
   .automatic-rename-panel .prudence-control {
     display: grid;
-    grid-template-columns: auto minmax(120px, 190px);
-    align-items: center;
-    gap: 0.18rem 0.55rem;
-    min-width: 250px;
-    padding: 0.35rem 0.55rem;
+    gap: 0.35rem;
+    min-width: 430px;
+    margin: 0;
+    padding: 0.45rem 0.6rem 0.55rem;
     border: 1px solid #3b4b68;
     border-radius: 7px;
     background: #0b1423;
   }
-  .automatic-rename-panel .prudence-control input { width: 100%; accent-color: #8b5cf6; }
-  .automatic-rename-panel .prudence-control small { grid-column: 1 / -1; color: #91a0b8; }
+  .automatic-rename-panel .prudence-control legend {
+    padding: 0 0.25rem;
+    color: #a9b7cc;
+    font-size: 0.64rem;
+  }
+  .automatic-rename-panel .prudence-control legend b { color: #ddd6fe; }
+  .automatic-rename-panel .prudence-options {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.3rem;
+  }
+  .automatic-rename-panel .prudence-options button {
+    min-width: 0;
+    padding: 0.38rem 0.45rem;
+    border: 1px solid #33445f;
+    background: #111d30;
+    color: #9fb0c9;
+    font-size: 0.58rem;
+    white-space: nowrap;
+  }
+  .automatic-rename-panel .prudence-options button.active {
+    border-color: #8b5cf6;
+    background: #30205f;
+    color: #fff;
+    box-shadow: 0 0 0 1px rgb(139 92 246 / 25%);
+  }
+  .automatic-rename-panel .prudence-control small { color: #91a0b8; }
   .automatic-rename-panel strong { color: #ddd6fe; font-size: 0.75rem; }
   .automatic-rename-panel span { color: #91a0b8; font-size: 0.64rem; }
-  .automatic-rename-panel button { flex: 0 0 auto; padding: 0.5rem 0.7rem; background: #6d28d9; color: white; font-size: 0.66rem; }
-  .automatic-rename-panel button:hover:not(:disabled) { background: #7c3aed; }
+  .automatic-rename-panel > button { flex: 0 0 auto; padding: 0.5rem 0.7rem; background: #6d28d9; color: white; font-size: 0.66rem; }
+  .automatic-rename-panel > button:hover:not(:disabled) { background: #7c3aed; }
+  .automatic-rename-panel .prudence-options button:hover:not(.active) { background: #17263d; color: #d7e1ef; }
 
   .automatic-choice-preview {
     border: 1px solid #22324a;

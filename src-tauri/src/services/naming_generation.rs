@@ -96,16 +96,50 @@ pub fn calibrate_confidence(context: &GenerationContext, result: &mut Generation
         .iter()
         .chain(facts.callees.iter())
         .any(|neighbor| !neighbor.is_generic_name);
-    let independent_signals = [
-        !facts.imported_symbols.is_empty(),
-        !facts.referenced_strings.is_empty(),
-        !facts.rtti_class_names.is_empty(),
-        meaningful_neighbor,
-        facts.is_entry_point,
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count();
+    let mut verified_signals = Vec::new();
+    if !facts.imported_symbols.is_empty() {
+        verified_signals.push(format!(
+            "imports resolus : {}",
+            facts
+                .imported_symbols
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !facts.referenced_strings.is_empty() {
+        verified_signals.push(format!(
+            "chaines referencees : {}",
+            facts
+                .referenced_strings
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+    if !facts.rtti_class_names.is_empty() {
+        verified_signals.push(format!(
+            "RTTI : {}",
+            facts
+                .rtti_class_names
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if meaningful_neighbor {
+        verified_signals.push("voisin nomme dans le graphe d'appels".to_owned());
+    }
+    if facts.is_entry_point {
+        verified_signals.push("point d'entree du programme".to_owned());
+    }
+    let independent_signals = verified_signals.len();
 
     let mut cap = match independent_signals {
         0 => 45,
@@ -127,6 +161,26 @@ pub fn calibrate_confidence(context: &GenerationContext, result: &mut Generation
         cap = cap.min(45);
     }
     result.confidence = result.confidence.min(cap);
+    let verification = if verified_signals.is_empty() {
+        "Verification locale : pseudocode seulement, aucun indice independant.".to_owned()
+    } else {
+        format!(
+            "Verification locale : {} indice(s) independant(s) confirme(s) ({})",
+            verified_signals.len(),
+            verified_signals.join(" ; ")
+        )
+    };
+    if !result
+        .evidence
+        .iter()
+        .any(|item| item.starts_with("Verification locale :"))
+    {
+        result.evidence.push(verification.clone());
+    }
+    if !result.reasoning.contains("Verification locale :") {
+        result.reasoning.push_str(" | ");
+        result.reasoning.push_str(&verification);
+    }
 }
 
 const SYSTEM_PROMPT: &str =
@@ -949,6 +1003,10 @@ mod tests {
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 45);
+        assert!(result
+            .evidence
+            .iter()
+            .any(|item| item.contains("pseudocode seulement")));
     }
 
     #[test]
@@ -963,6 +1021,10 @@ mod tests {
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 90);
+        let verification = result.evidence.last().expect("verification evidence");
+        assert!(verification.contains("3 indice(s) independant(s)"));
+        assert!(verification.contains("CreateFileA"));
+        assert!(verification.contains("rb"));
     }
 
     #[test]
