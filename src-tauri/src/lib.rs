@@ -621,6 +621,7 @@ fn synthesize_generation_answers(
 fn generate_identification_suggestions(
     app: AppHandle,
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     entry_addresses: Vec<String>,
     provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
 ) -> Result<Vec<GenerationBatchOutcome>, String> {
@@ -632,11 +633,16 @@ fn generate_identification_suggestions(
         .map_err(|_| "the analysis export lock was poisoned".to_owned())?
         .clone()
         .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    // Building caller/thunk/string evidence is whole-program work. Reuse one
+    // immutable index for the complete batch instead of rebuilding it once
+    // per function (six times for a normal background-agent request).
+    let semantic_index = semantic_index_cache.get_or_build(&export)?;
     let contexts = entry_addresses
         .iter()
         .map(|address| {
-            naming_generation::build_context_for_function_with_provisional_names(
+            naming_generation::build_context_for_function_with_index_and_provisional_names(
                 &export,
+                &semantic_index,
                 address,
                 &provisional_names,
             )
@@ -773,6 +779,7 @@ fn generate_identification_suggestions(
 fn refine_identification_suggestions(
     app: AppHandle,
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     seeds: Vec<naming_generation::RefinementSeed>,
     provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
 ) -> Result<Vec<GenerationBatchOutcome>, String> {
@@ -784,14 +791,17 @@ fn refine_identification_suggestions(
         .map_err(|_| "the analysis export lock was poisoned".to_owned())?
         .clone()
         .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    let semantic_index = semantic_index_cache.get_or_build(&export)?;
     let contexts = seeds
         .iter()
         .map(|seed| {
-            let context = naming_generation::build_context_for_function_with_provisional_names(
-                &export,
-                &seed.entry_address,
-                &provisional_names,
-            )?;
+            let context =
+                naming_generation::build_context_for_function_with_index_and_provisional_names(
+                    &export,
+                    &semantic_index,
+                    &seed.entry_address,
+                    &provisional_names,
+                )?;
             let tools = naming_generation::recommended_refinement_tools(&context);
             let findings = services::semantic_memory::execute_investigation_tools(
                 &export,
@@ -857,6 +867,7 @@ fn refine_identification_suggestions(
 fn generate_identification_suggestion(
     app: AppHandle,
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     entry_address: String,
 ) -> Result<GenerationOutcome, String> {
     let export = export_state
@@ -865,7 +876,12 @@ fn generate_identification_suggestion(
         .clone()
         .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
 
-    let context = naming_generation::build_context_for_function(&export, &entry_address)?;
+    let semantic_index = semantic_index_cache.get_or_build(&export)?;
+    let context = naming_generation::build_context_for_function_from_index(
+        &export,
+        &semantic_index,
+        &entry_address,
+    )?;
 
     let enabled = ai_providers::enabled_providers_for_app(&app)?;
     if enabled.is_empty() {
@@ -1517,6 +1533,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(None::<AnalysisSession>))
         .manage(Mutex::new(None::<GhidraExport>))
+        .manage(services::semantic_memory::SemanticIndexCache::default())
         .manage(DecompileCoordinator::default())
         .invoke_handler(tauri::generate_handler![
             get_backend_status,

@@ -35,6 +35,14 @@ surface. The upstream review is recorded in `docs/reva-security-review.md`.
 7. Require observable evidence and an explicit uncertainty in the final answer.
 8. Keep UI acceptance thresholds independent from model self-confidence.
 
+The deterministic evidence index additionally records bounded constants,
+global identifiers, outgoing calls with their arguments and arguments observed
+in decompiled callers. The index is cached in memory and fingerprinted: it is
+rebuilt after a new decompilation, prototype change, project switch or confirmed
+rename, but reused across normal generation batches. These pseudocode-derived
+observations improve hypotheses without being counted as several independent
+proofs.
+
 ## Budgets
 
 - no more than two read-only tools and one follow-up for one function;
@@ -52,6 +60,8 @@ Every change to the reasoning pipeline must be evaluated on symbolized binaries
 whose names are hidden from the agent. Measurements include semantic naming
 accuracy, unsafe names, abstentions, elapsed time and generated-token count.
 Coverage alone is not a success metric.
+The reproducible evaluator and its JSON format are documented in
+`docs/naming-benchmark.md`.
 
 ## Local protocol probe
 

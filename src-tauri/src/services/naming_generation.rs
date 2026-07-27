@@ -9,6 +9,8 @@
 // reaches the user-selected prudence threshold; it is always presented as
 // a suggestion, never as a verified fact.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -25,7 +27,7 @@ pub use crate::services::naming_arbitration::ArbitrationContext;
 
 /// Bumped independently from closed-set FunctionID arbitration so projects
 /// recompute only open-ended suggestions when the semantic agent changes.
-pub const NAMING_GENERATION_VERSION: u32 = 5;
+pub const NAMING_GENERATION_VERSION: u32 = 6;
 
 fn default_analysis_pass() -> u8 {
     1
@@ -63,9 +65,19 @@ pub fn build_context_for_function(
     export: &GhidraExport,
     entry_address: &str,
 ) -> Result<GenerationContext, String> {
+    let semantic_index = semantic_memory::build_semantic_index(export);
+    build_context_for_function_from_index(export, &semantic_index, entry_address)
+}
+
+pub fn build_context_for_function_from_index(
+    export: &GhidraExport,
+    semantic_index: &HashMap<String, FunctionSemanticFacts>,
+    entry_address: &str,
+) -> Result<GenerationContext, String> {
     let base = naming_arbitration::build_context_for_function(export, entry_address)?;
-    let semantic_facts = semantic_memory::build_semantic_index(export)
-        .remove(entry_address)
+    let semantic_facts = semantic_index
+        .get(entry_address)
+        .cloned()
         .ok_or_else(|| format!("no semantic facts exist for function '{entry_address}'"))?;
     Ok(GenerationContext {
         base,
@@ -79,7 +91,22 @@ pub fn build_context_for_function_with_provisional_names(
     entry_address: &str,
     provisional_names: &[ProvisionalFunctionName],
 ) -> Result<GenerationContext, String> {
-    let mut context = build_context_for_function(export, entry_address)?;
+    let semantic_index = semantic_memory::build_semantic_index(export);
+    build_context_for_function_with_index_and_provisional_names(
+        export,
+        &semantic_index,
+        entry_address,
+        provisional_names,
+    )
+}
+
+pub fn build_context_for_function_with_index_and_provisional_names(
+    export: &GhidraExport,
+    semantic_index: &HashMap<String, FunctionSemanticFacts>,
+    entry_address: &str,
+    provisional_names: &[ProvisionalFunctionName],
+) -> Result<GenerationContext, String> {
+    let mut context = build_context_for_function_from_index(export, semantic_index, entry_address)?;
     let direct_neighbors = context
         .semantic_facts
         .callers
@@ -323,7 +350,8 @@ dans la fiche (appel, chaine, type ou instruction), jamais une impression genera
 const TOOL_PROTOCOL_PROMPT: &str = "Si une observation precise peut ameliorer ton hypothese, \
 conserve tout de meme une proposition provisoire dans suggested_name et demande au maximum deux outils read-only dans requested_tools. \
 Valeurs permises : function_overview, caller_context, callee_context, two_hop_graph, \
-cross_references, string_references, type_usages, behavior_signals. \
+cross_references, string_references, type_usages, behavior_signals, numeric_constants, \
+global_references, callsite_arguments. \
 Ne demande un outil que s'il peut repondre a une question explicite dans reasoning. Si la fiche suffit, \
 requested_tools doit etre vide. L'application executera les outils puis te demandera une decision finale.";
 
@@ -464,6 +492,42 @@ fn format_context(context: &GenerationContext) -> String {
         )
     });
 
+    sections.push(if facts.numeric_constants.is_empty() {
+        "Constantes numeriques observees : aucune.".to_owned()
+    } else {
+        format!(
+            "Constantes numeriques observees dans le pseudocode (une seule source, pas des preuves independantes) : {}",
+            bounded_join(&facts.numeric_constants)
+        )
+    });
+
+    sections.push(if facts.global_references.is_empty() {
+        "Acces globaux observes : aucun.".to_owned()
+    } else {
+        format!(
+            "Acces globaux observes dans le pseudocode : {}",
+            bounded_join(&facts.global_references)
+        )
+    });
+
+    sections.push(if facts.callsite_arguments.is_empty() {
+        "Appels sortants avec arguments observes : aucun.".to_owned()
+    } else {
+        format!(
+            "Appels sortants et arguments observes dans le pseudocode : {}",
+            bounded_join(&facts.callsite_arguments)
+        )
+    });
+
+    sections.push(if facts.incoming_callsite_arguments.is_empty() {
+        "Arguments passes a cette fonction par ses appelants : indisponibles.".to_owned()
+    } else {
+        format!(
+            "Arguments passes a cette fonction par ses appelants : {}",
+            bounded_join(&facts.incoming_callsite_arguments)
+        )
+    });
+
     sections.push(if context.provisional_neighbors.is_empty() {
         "Noms provisoires des voisins : aucun.".to_owned()
     } else {
@@ -515,7 +579,7 @@ fn generation_result_schema(entry_address: Option<&str>, executable_body: bool) 
                 "maxItems":2,
                 "items":{
                     "type":"string",
-                    "enum":["function_overview","caller_context","callee_context","two_hop_graph","cross_references","string_references","type_usages","behavior_signals"]
+                    "enum":["function_overview","caller_context","callee_context","two_hop_graph","cross_references","string_references","type_usages","behavior_signals","numeric_constants","global_references","callsite_arguments"]
                 }
             }),
         ),
@@ -742,7 +806,7 @@ pub fn recommended_refinement_tools(context: &GenerationContext) -> Vec<Investig
         || (context.semantic_facts.callers.len() + context.semantic_facts.callees.len()) <= 2;
     if small_or_context_dependent {
         vec![
-            InvestigationTool::BehaviorSignals,
+            InvestigationTool::CallsiteArguments,
             InvestigationTool::TwoHopGraph,
         ]
     } else {
@@ -1024,6 +1088,10 @@ mod tests {
                 referenced_strings: vec!["rb".to_owned()],
                 imported_symbols: vec!["CreateFileA (KERNEL32.DLL)".to_owned()],
                 rtti_class_names: vec![],
+                numeric_constants: vec![],
+                global_references: vec![],
+                incoming_callsite_arguments: vec![],
+                callsite_arguments: vec!["CreateFileA(path, ...);".to_owned()],
                 decompiled: true,
             },
             base: ArbitrationContext {
@@ -1349,14 +1417,14 @@ mod tests {
     }
 
     #[test]
-    fn small_functions_get_behavior_and_two_hop_investigation() {
+    fn small_functions_get_callsite_arguments_and_two_hop_investigation() {
         let mut context = sample_context();
         context.base.decompiled_code = Some("return 0;".to_owned());
 
         assert_eq!(
             recommended_refinement_tools(&context),
             vec![
-                InvestigationTool::BehaviorSignals,
+                InvestigationTool::CallsiteArguments,
                 InvestigationTool::TwoHopGraph
             ]
         );

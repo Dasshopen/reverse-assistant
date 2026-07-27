@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +13,71 @@ use crate::services::call_graph;
 /// foundation of the persistent semantic memory.
 pub const SEMANTIC_MEMORY_VERSION: u32 = 1;
 
+#[derive(Debug)]
+struct CachedSemanticIndex {
+    fingerprint: u64,
+    facts: Arc<HashMap<String, FunctionSemanticFacts>>,
+}
+
+/// Process-local cache for the immutable evidence index. It contains no model
+/// answer and no filesystem state. A fingerprint over every field that can
+/// affect naming invalidates it after decompilation, prototype enrichment,
+/// project switching or a confirmed rename.
+#[derive(Debug, Default)]
+pub struct SemanticIndexCache(Mutex<Option<CachedSemanticIndex>>);
+
+fn semantic_fingerprint(export: &GhidraExport) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    export.program.sha256.hash(&mut hasher);
+    export.functions.len().hash(&mut hasher);
+    export.strings.len().hash(&mut hasher);
+    export.types.len().hash(&mut hasher);
+    for function in &export.functions {
+        function.entry_address.hash(&mut hasher);
+        function.name.hash(&mut hasher);
+        function.return_type.hash(&mut hasher);
+        function.decompiled_code.hash(&mut hasher);
+        function.namespace.hash(&mut hasher);
+        function.rtti_class_names.hash(&mut hasher);
+        function.strings.hash(&mut hasher);
+        function.thunk_target_address.hash(&mut hasher);
+        for parameter in &function.parameters {
+            parameter.name.hash(&mut hasher);
+            parameter.data_type.hash(&mut hasher);
+        }
+        for call in &function.calls {
+            call.target_address.hash(&mut hasher);
+            call.target_name.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+impl SemanticIndexCache {
+    pub fn get_or_build(
+        &self,
+        export: &GhidraExport,
+    ) -> Result<Arc<HashMap<String, FunctionSemanticFacts>>, String> {
+        let fingerprint = semantic_fingerprint(export);
+        let mut cached = self
+            .0
+            .lock()
+            .map_err(|_| "the semantic evidence cache lock was poisoned".to_owned())?;
+        if let Some(existing) = cached
+            .as_ref()
+            .filter(|item| item.fingerprint == fingerprint)
+        {
+            return Ok(Arc::clone(&existing.facts));
+        }
+        let facts = Arc::new(build_semantic_index(export));
+        *cached = Some(CachedSemanticIndex {
+            fingerprint,
+            facts: Arc::clone(&facts),
+        });
+        Ok(facts)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvestigationTool {
@@ -22,6 +89,9 @@ pub enum InvestigationTool {
     StringReferences,
     TypeUsages,
     BehaviorSignals,
+    NumericConstants,
+    GlobalReferences,
+    CallsiteArguments,
 }
 
 impl InvestigationTool {
@@ -42,6 +112,9 @@ impl InvestigationTool {
             "string_references" => Some(Self::StringReferences),
             "type_usages" => Some(Self::TypeUsages),
             "behavior_signals" => Some(Self::BehaviorSignals),
+            "numeric_constants" => Some(Self::NumericConstants),
+            "global_references" => Some(Self::GlobalReferences),
+            "callsite_arguments" => Some(Self::CallsiteArguments),
             _ => None,
         }
     }
@@ -83,7 +156,162 @@ pub struct FunctionSemanticFacts {
     pub referenced_strings: Vec<String>,
     pub imported_symbols: Vec<String>,
     pub rtti_class_names: Vec<String>,
+    /// Direct observations extracted deterministically from pseudocode. They
+    /// improve the hypothesis but remain one source, never three independent
+    /// proofs for confidence calibration.
+    pub numeric_constants: Vec<String>,
+    pub global_references: Vec<String>,
+    pub incoming_callsite_arguments: Vec<String>,
+    pub callsite_arguments: Vec<String>,
     pub decompiled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct DecompiledObservations {
+    numeric_constants: Vec<String>,
+    global_references: Vec<String>,
+    callsite_arguments: Vec<String>,
+}
+
+fn push_unique_bounded(values: &mut Vec<String>, value: String, limit: usize) {
+    if values.len() < limit && !value.is_empty() && !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn is_numeric_constant(token: &str) -> bool {
+    if let Some(hex) = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+    {
+        return !hex.is_empty() && hex.chars().all(|character| character.is_ascii_hexdigit());
+    }
+    token.len() >= 2 && token.chars().all(|character| character.is_ascii_digit())
+}
+
+fn is_global_identifier(token: &str) -> bool {
+    let upper = token.to_ascii_uppercase();
+    upper.starts_with("DAT_")
+        || upper.starts_with("_DAT_")
+        || upper.starts_with("PTR_")
+        || upper.starts_with("_GLOBAL")
+        || upper.starts_with("QWORD_")
+        || upper.starts_with("DWORD_")
+        || upper.starts_with("WORD_")
+        || upper.starts_with("BYTE_")
+}
+
+fn call_identifier_before(line: &str, open_parenthesis: usize) -> Option<&str> {
+    let prefix = &line[..open_parenthesis];
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, character)| {
+            !character.is_ascii_alphanumeric()
+                && *character != '_'
+                && *character != ':'
+                && *character != '~'
+        })
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let identifier = prefix[start..].trim();
+    (!identifier.is_empty()).then_some(identifier)
+}
+
+fn extract_decompiled_observations(function: &GhidraFunction) -> DecompiledObservations {
+    let Some(code) = function.decompiled_code.as_deref() else {
+        return DecompiledObservations::default();
+    };
+    let mut observations = DecompiledObservations::default();
+    let ignored_calls = [
+        "if",
+        "for",
+        "while",
+        "switch",
+        "sizeof",
+        "return",
+        // Common Ghidra cast spellings: parentheses after these tokens are
+        // type conversions, not calls and must not pollute call evidence.
+        "void",
+        "code",
+        "char",
+        "int",
+        "uint",
+        "long",
+        "ulong",
+        "undefined",
+        "undefined1",
+        "undefined2",
+        "undefined4",
+        "undefined8",
+    ];
+
+    for raw_line in code.lines() {
+        let line = raw_line.trim();
+        for token in line.split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != 'x'
+        }) {
+            if is_numeric_constant(token) {
+                push_unique_bounded(&mut observations.numeric_constants, token.to_owned(), 24);
+            }
+            if is_global_identifier(token) {
+                push_unique_bounded(&mut observations.global_references, token.to_owned(), 24);
+            }
+        }
+        for (index, _) in line.match_indices('(') {
+            let Some(identifier) = call_identifier_before(line, index) else {
+                continue;
+            };
+            if ignored_calls
+                .iter()
+                .any(|keyword| identifier.eq_ignore_ascii_case(keyword))
+                || identifier == function.name
+            {
+                continue;
+            }
+            push_unique_bounded(
+                &mut observations.callsite_arguments,
+                bounded_fact(line, 500),
+                20,
+            );
+        }
+    }
+    observations
+}
+
+fn extract_incoming_callsites(
+    target: &GhidraFunction,
+    caller_addresses: &HashSet<&str>,
+    functions: &HashMap<&str, &GhidraFunction>,
+) -> Vec<String> {
+    let needle = format!("{}(", target.name);
+    let mut observations = Vec::new();
+    let mut sorted_callers = caller_addresses.iter().copied().collect::<Vec<_>>();
+    sorted_callers.sort_unstable();
+    for caller_address in sorted_callers {
+        let Some(caller) = functions.get(caller_address).copied() else {
+            continue;
+        };
+        let Some(code) = caller.decompiled_code.as_deref() else {
+            continue;
+        };
+        for line in code
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(&needle))
+        {
+            push_unique_bounded(
+                &mut observations,
+                format!(
+                    "depuis {}@{} : {}",
+                    caller.name,
+                    caller.entry_address,
+                    bounded_fact(line, 500)
+                ),
+                20,
+            );
+        }
+    }
+    observations
 }
 
 pub fn is_generic_function_name(name: &str) -> bool {
@@ -177,11 +405,14 @@ pub fn build_semantic_index(export: &GhidraExport) -> HashMap<String, FunctionSe
         .functions
         .iter()
         .map(|function| {
+            let observations = extract_decompiled_observations(function);
             let caller_addresses = call_graph::resolve_calling_functions(
                 &callers,
                 &functions,
                 &function.entry_address,
             );
+            let incoming_callsite_arguments =
+                extract_incoming_callsites(function, &caller_addresses, &functions);
             let caller_facts = caller_addresses
                 .iter()
                 .filter_map(|address| functions.get(address).copied())
@@ -253,6 +484,10 @@ pub fn build_semantic_index(export: &GhidraExport) -> HashMap<String, FunctionSe
                 referenced_strings: function.strings.clone(),
                 imported_symbols,
                 rtti_class_names: function.rtti_class_names.clone(),
+                numeric_constants: observations.numeric_constants,
+                global_references: observations.global_references,
+                incoming_callsite_arguments,
+                callsite_arguments: observations.callsite_arguments,
                 decompiled: function.decompiled_code.is_some(),
             };
             (function.entry_address.clone(), facts)
@@ -390,6 +625,7 @@ pub fn execute_investigation_tools(
         .get(entry_address)
         .copied()
         .ok_or_else(|| format!("no function exists at address '{entry_address}'"))?;
+    let observations = extract_decompiled_observations(function);
     let caller_index = call_graph::build_caller_index(export);
     let mut unique_tools = Vec::new();
     for tool in requested.iter().take(2) {
@@ -584,6 +820,39 @@ pub fn execute_investigation_tools(
                     }
                 }
                 InvestigationTool::BehaviorSignals => behavior_signals(function),
+                InvestigationTool::NumericConstants => {
+                    if observations.numeric_constants.is_empty() {
+                        "Aucune constante numerique significative extraite.".to_owned()
+                    } else {
+                        observations.numeric_constants.join(", ")
+                    }
+                }
+                InvestigationTool::GlobalReferences => {
+                    if observations.global_references.is_empty() {
+                        "Aucun acces global nomme extrait du pseudocode.".to_owned()
+                    } else {
+                        observations.global_references.join(", ")
+                    }
+                }
+                InvestigationTool::CallsiteArguments => {
+                    let caller_addresses = call_graph::resolve_calling_functions(
+                        &caller_index,
+                        &functions,
+                        entry_address,
+                    );
+                    let incoming =
+                        extract_incoming_callsites(function, &caller_addresses, &functions);
+                    if incoming.is_empty() && observations.callsite_arguments.is_empty() {
+                        "Aucun appel avec arguments observable dans le pseudocode.".to_owned()
+                    } else {
+                        incoming
+                            .into_iter()
+                            .chain(observations.callsite_arguments.iter().cloned())
+                            .take(30)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                }
             };
             Ok(ToolFinding { tool, content })
         })
@@ -710,5 +979,85 @@ mod tests {
         assert!(signals.contains("branche: if (allowed)"));
         assert!(signals.contains("appel: printf"));
         assert!(signals.contains("retour: return"));
+    }
+
+    #[test]
+    fn deterministic_observations_extract_constants_globals_and_call_arguments() {
+        let mut function = fauxware()
+            .functions
+            .into_iter()
+            .find(|function| function.entry_address == "0x400664")
+            .expect("authenticate exists in the fixture");
+        function.decompiled_code = Some(
+            "void authenticate(char *name) {\nDAT_0040a010 = 0x2a;\nread(0, name, 64);\nif (strlen(name) == 16) return;\n}"
+                .to_owned(),
+        );
+        let observations = extract_decompiled_observations(&function);
+        assert!(observations.numeric_constants.contains(&"0x2a".to_owned()));
+        assert!(observations.numeric_constants.contains(&"64".to_owned()));
+        assert!(observations
+            .global_references
+            .contains(&"DAT_0040a010".to_owned()));
+        assert!(observations
+            .callsite_arguments
+            .iter()
+            .any(|line| line.contains("read(0, name, 64)")));
+        assert!(observations
+            .callsite_arguments
+            .iter()
+            .any(|line| line.contains("strlen(name)")));
+    }
+
+    #[test]
+    fn every_new_tool_name_has_a_strict_wire_mapping() {
+        assert_eq!(
+            InvestigationTool::from_wire_name("numeric-constants"),
+            Some(InvestigationTool::NumericConstants)
+        );
+        assert_eq!(
+            InvestigationTool::from_wire_name("global references"),
+            Some(InvestigationTool::GlobalReferences)
+        );
+        assert_eq!(
+            InvestigationTool::from_wire_name("callsite_arguments"),
+            Some(InvestigationTool::CallsiteArguments)
+        );
+    }
+
+    #[test]
+    fn semantic_index_observes_arguments_from_a_decompiled_caller() {
+        let mut export = fauxware();
+        export
+            .functions
+            .iter_mut()
+            .find(|function| function.name == "main")
+            .expect("main exists")
+            .decompiled_code = Some("authenticate(username, password);".to_owned());
+        let index = build_semantic_index(&export);
+        assert!(index["0x400664"]
+            .incoming_callsite_arguments
+            .iter()
+            .any(|line| line.contains("authenticate(username, password)")));
+    }
+
+    #[test]
+    fn semantic_cache_reuses_and_invalidates_indexes() {
+        let cache = SemanticIndexCache::default();
+        let mut export = fauxware();
+        let first = cache.get_or_build(&export).expect("first index");
+        let reused = cache.get_or_build(&export).expect("cached index");
+        assert!(Arc::ptr_eq(&first, &reused));
+
+        export
+            .functions
+            .iter_mut()
+            .find(|function| function.entry_address == "0x400664")
+            .expect("authenticate exists")
+            .decompiled_code = Some("return 42;".to_owned());
+        let rebuilt = cache.get_or_build(&export).expect("rebuilt index");
+        assert!(!Arc::ptr_eq(&first, &rebuilt));
+        assert!(rebuilt["0x400664"]
+            .numeric_constants
+            .contains(&"42".to_owned()));
     }
 }

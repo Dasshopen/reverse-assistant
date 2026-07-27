@@ -14,6 +14,7 @@ pub mod global_strings;
 pub mod identification_corroboration;
 pub mod imports_exports;
 pub mod naming_arbitration;
+pub mod naming_benchmark;
 pub mod naming_generation;
 pub mod program_overview;
 pub mod project_storage;
