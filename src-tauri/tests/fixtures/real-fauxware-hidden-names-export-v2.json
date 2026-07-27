@@ -1,0 +1,2169 @@
+{
+  "schema_version": 2,
+  "program": {
+    "name": "01-fauxware.elf",
+    "sha256": "c2d90645a45e99221593547e55c601a901b80f807ae96f94c60a7661df0b3e0b",
+    "format": "ELF",
+    "architecture": "x86_64",
+    "endianness": "little",
+    "image_base": "0x400000",
+    "external_entry_points": [
+      {
+        "address": "0x4004e0",
+        "name": "_init",
+        "kind": "function"
+      },
+      {
+        "address": "0x400580",
+        "name": "_start",
+        "kind": "function"
+      },
+      {
+        "address": "0x400664",
+        "name": "FUN_00400664",
+        "kind": "function"
+      },
+      {
+        "address": "0x4006ed",
+        "name": "FUN_004006ed",
+        "kind": "function"
+      },
+      {
+        "address": "0x4006fd",
+        "name": "FUN_004006fd",
+        "kind": "function"
+      },
+      {
+        "address": "0x40071d",
+        "name": "main",
+        "kind": "function"
+      },
+      {
+        "address": "0x4007e0",
+        "name": "__libc_csu_init",
+        "kind": "function"
+      },
+      {
+        "address": "0x400870",
+        "name": "__libc_csu_fini",
+        "kind": "function"
+      },
+      {
+        "address": "0x4008b8",
+        "name": "_fini",
+        "kind": "function"
+      },
+      {
+        "address": "0x4008c8",
+        "name": "_IO_stdin_used",
+        "kind": "data"
+      },
+      {
+        "address": "0x600e40",
+        "name": "__DTOR_END__",
+        "kind": "data"
+      },
+      {
+        "address": "0x601038",
+        "name": "data_start",
+        "kind": "data"
+      },
+      {
+        "address": "0x601040",
+        "name": "__dso_handle",
+        "kind": "data"
+      },
+      {
+        "address": "0x601048",
+        "name": "sneaky",
+        "kind": "data"
+      },
+      {
+        "address": "0x601050",
+        "name": "completed.6531",
+        "kind": "data"
+      },
+      {
+        "address": "0x601060",
+        "name": "_end",
+        "kind": "unknown"
+      }
+    ],
+    "required_libraries": [
+      "libc.so.6"
+    ]
+  },
+  "functions": [
+    {
+      "entry_address": "0x1",
+      "name": "puts",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x2",
+      "name": "printf",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__format",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x3",
+      "name": "read",
+      "return_type": "ssize_t",
+      "parameters": [
+        {
+          "name": "__fd",
+          "data_type": "int"
+        },
+        {
+          "name": "__buf",
+          "data_type": "void *"
+        },
+        {
+          "name": "__nbytes",
+          "data_type": "size_t"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4",
+      "name": "__libc_start_main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x5",
+      "name": "strcmp",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s1",
+          "data_type": "char *"
+        },
+        {
+          "name": "__s2",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x6",
+      "name": "open",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__file",
+          "data_type": "char *"
+        },
+        {
+          "name": "__oflag",
+          "data_type": "int"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x7",
+      "name": "exit",
+      "return_type": "void",
+      "parameters": [
+        {
+          "name": "__status",
+          "data_type": "int"
+        }
+      ],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x8",
+      "name": "__gmon_start__",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": true,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4004e0",
+      "name": "_init",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "ctx",
+          "data_type": "EVP_PKEY_CTX *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x4005ac",
+          "target_name": "call_gmon_start"
+        },
+        {
+          "target_address": "0x400640",
+          "target_name": "frame_dummy"
+        },
+        {
+          "target_address": "0x400880",
+          "target_name": "__do_global_ctors_aux"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400500",
+      "name": "FUN_00400500",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400510",
+      "name": "puts",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602000",
+          "target_name": "puts"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": "0x602000",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400520",
+      "name": "printf",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__format",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602008",
+          "target_name": "printf"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": "0x602008",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400530",
+      "name": "read",
+      "return_type": "ssize_t",
+      "parameters": [
+        {
+          "name": "__fd",
+          "data_type": "int"
+        },
+        {
+          "name": "__buf",
+          "data_type": "void *"
+        },
+        {
+          "name": "__nbytes",
+          "data_type": "size_t"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602010",
+          "target_name": "read"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": "0x602010",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400540",
+      "name": "__libc_start_main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602018",
+          "target_name": "__libc_start_main"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": "0x602018",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400550",
+      "name": "strcmp",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s1",
+          "data_type": "char *"
+        },
+        {
+          "name": "__s2",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602020",
+          "target_name": "strcmp"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": "0x602020",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400560",
+      "name": "open",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__file",
+          "data_type": "char *"
+        },
+        {
+          "name": "__oflag",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602030",
+          "target_name": "open"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": "0x602030",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400570",
+      "name": "exit",
+      "return_type": "void",
+      "parameters": [
+        {
+          "name": "__status",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602038",
+          "target_name": "exit"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": "0x602038",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400580",
+      "name": "_start",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x400540",
+          "target_name": "__libc_start_main"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4005ac",
+      "name": "call_gmon_start",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x602028",
+          "target_name": "__gmon_start__"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4005d0",
+      "name": "__do_global_dtors_aux",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400640",
+      "name": "frame_dummy",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400664",
+      "name": "FUN_00400664",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": "\r\nundefined8 FUN_00400664(char *param_1,char *param_2)\r\n\r\n{\r\n  int iVar1;\r\n  undefined8 uVar2;\r\n  char local_18 [8];\r\n  undefined1 local_10;\r\n  int local_c;\r\n  \r\n  local_10 = 0;\r\n  iVar1 = strcmp(param_2,sneaky);\r\n  if (iVar1 == 0) {\r\n    uVar2 = 1;\r\n  }\r\n  else {\r\n    local_c = open(param_1,0);\r\n    read(local_c,local_18,8);\r\n    iVar1 = strcmp(param_2,local_18);\r\n    if (iVar1 == 0) {\r\n      uVar2 = 1;\r\n    }\r\n    else {\r\n      uVar2 = 0;\r\n    }\r\n  }\r\n  return uVar2;\r\n}\r\n\r\n",
+      "calls": [
+        {
+          "target_address": "0x400530",
+          "target_name": "read"
+        },
+        {
+          "target_address": "0x400550",
+          "target_name": "strcmp"
+        },
+        {
+          "target_address": "0x400560",
+          "target_name": "open"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4006ed",
+      "name": "FUN_004006ed",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": "\r\nvoid FUN_004006ed(void)\r\n\r\n{\r\n  puts(\"Welcome to the admin console, trusted user!\");\r\n  return;\r\n}\r\n\r\n",
+      "calls": [
+        {
+          "target_address": "0x400510",
+          "target_name": "puts"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4006fd",
+      "name": "FUN_004006fd",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": "\r\nvoid FUN_004006fd(void)\r\n\r\n{\r\n  printf(\"Go away!\");\r\n                    /* WARNING: Subroutine does not return */\r\n  exit(1);\r\n}\r\n\r\n",
+      "calls": [
+        {
+          "target_address": "0x400520",
+          "target_name": "printf"
+        },
+        {
+          "target_address": "0x400570",
+          "target_name": "exit"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x40071d",
+      "name": "main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": "\r\nvoid main(void)\r\n\r\n{\r\n  int local_2c;\r\n  undefined1 local_28 [8];\r\n  undefined1 local_20;\r\n  undefined1 local_18 [8];\r\n  undefined1 local_10;\r\n  \r\n  local_10 = 0;\r\n  local_20 = 0;\r\n  puts(\"Username: \");\r\n  read(0,local_18,8);\r\n  read(0,&local_2c,1);\r\n  puts(\"Password: \");\r\n  read(0,local_28,8);\r\n  read(0,&local_2c,1);\r\n  local_2c = FUN_00400664(local_18,local_28);\r\n  if (local_2c == 0) {\r\n    FUN_004006fd();\r\n  }\r\n  else {\r\n    FUN_004006ed();\r\n  }\r\n  return;\r\n}\r\n\r\n",
+      "calls": [
+        {
+          "target_address": "0x400510",
+          "target_name": "puts"
+        },
+        {
+          "target_address": "0x400530",
+          "target_name": "read"
+        },
+        {
+          "target_address": "0x400664",
+          "target_name": "FUN_00400664"
+        },
+        {
+          "target_address": "0x4006ed",
+          "target_name": "FUN_004006ed"
+        },
+        {
+          "target_address": "0x4006fd",
+          "target_name": "FUN_004006fd"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4007e0",
+      "name": "__libc_csu_init",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x4004e0",
+          "target_name": "_init"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400870",
+      "name": "__libc_csu_fini",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x400880",
+      "name": "__do_global_ctors_aux",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x4008b8",
+      "name": "_fini",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": false,
+      "decompiled_code": null,
+      "calls": [
+        {
+          "target_address": "0x4005d0",
+          "target_name": "__do_global_dtors_aux"
+        }
+      ],
+      "library": null,
+      "thunk_target_address": null,
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602000",
+      "name": "puts",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x1",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602008",
+      "name": "printf",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__format",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x2",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602010",
+      "name": "read",
+      "return_type": "ssize_t",
+      "parameters": [
+        {
+          "name": "__fd",
+          "data_type": "int"
+        },
+        {
+          "name": "__buf",
+          "data_type": "void *"
+        },
+        {
+          "name": "__nbytes",
+          "data_type": "size_t"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x3",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602018",
+      "name": "__libc_start_main",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x4",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602020",
+      "name": "strcmp",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__s1",
+          "data_type": "char *"
+        },
+        {
+          "name": "__s2",
+          "data_type": "char *"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x5",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602028",
+      "name": "__gmon_start__",
+      "return_type": "undefined",
+      "parameters": [],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x8",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602030",
+      "name": "open",
+      "return_type": "int",
+      "parameters": [
+        {
+          "name": "__file",
+          "data_type": "char *"
+        },
+        {
+          "name": "__oflag",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x6",
+      "namespace": null
+    },
+    {
+      "entry_address": "0x602038",
+      "name": "exit",
+      "return_type": "void",
+      "parameters": [
+        {
+          "name": "__status",
+          "data_type": "int"
+        }
+      ],
+      "is_external": false,
+      "is_thunk": true,
+      "decompiled_code": null,
+      "calls": [],
+      "library": null,
+      "thunk_target_address": "0x7",
+      "namespace": null
+    }
+  ],
+  "strings": [
+    {
+      "address": "0x0",
+      "value": "GCC: (Ubuntu/Linaro 4.6.3-1ubuntu5) 4.6.3",
+      "references": [
+        {
+          "instruction_address": "0x690",
+          "function_address": null
+        }
+      ]
+    },
+    {
+      "address": "0x400238",
+      "value": "/lib64/ld-linux-x86-64.so.2",
+      "references": [
+        {
+          "instruction_address": "0x50",
+          "function_address": null
+        },
+        {
+          "instruction_address": "0x400088",
+          "function_address": null
+        }
+      ]
+    },
+    {
+      "address": "0x4008d0",
+      "value": "SOSNEAKY",
+      "references": [
+        {
+          "instruction_address": "0x400678",
+          "function_address": "0x400664"
+        },
+        {
+          "instruction_address": "0x400683",
+          "function_address": "0x400664"
+        },
+        {
+          "instruction_address": "0x601048",
+          "function_address": null
+        }
+      ]
+    },
+    {
+      "address": "0x4008e0",
+      "value": "Welcome to the admin console, trusted user!",
+      "references": [
+        {
+          "instruction_address": "0x4006f1",
+          "function_address": "0x4006ed"
+        }
+      ]
+    },
+    {
+      "address": "0x40090c",
+      "value": "Go away!",
+      "references": [
+        {
+          "instruction_address": "0x400701",
+          "function_address": "0x4006fd"
+        },
+        {
+          "instruction_address": "0x400706",
+          "function_address": "0x4006fd"
+        }
+      ]
+    },
+    {
+      "address": "0x400915",
+      "value": "Username: ",
+      "references": [
+        {
+          "instruction_address": "0x400734",
+          "function_address": "0x40071d"
+        }
+      ]
+    },
+    {
+      "address": "0x400920",
+      "value": "Password: ",
+      "references": [
+        {
+          "instruction_address": "0x40076a",
+          "function_address": "0x40071d"
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "name": "eh_frame_hdr",
+      "kind": "struct",
+      "category": "/",
+      "size": 4,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "eh_frame_hdr_version",
+          "data_type": "byte",
+          "offset": 0
+        },
+        {
+          "name": "eh_frame_pointer_encoding",
+          "data_type": "dwfenc",
+          "offset": 1
+        },
+        {
+          "name": "eh_frame_desc_entry_count_encoding",
+          "data_type": "dwfenc",
+          "offset": 2
+        },
+        {
+          "name": "eh_frame_table_encoding",
+          "data_type": "dwfenc",
+          "offset": 3
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x40092c",
+          "data_label": "eh_frame_hdr_0040092c"
+        }
+      ]
+    },
+    {
+      "name": "fde_table_entry",
+      "kind": "struct",
+      "category": "/",
+      "size": 8,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "initial_loc",
+          "data_type": "dword",
+          "offset": 0
+        },
+        {
+          "name": "data_loc",
+          "data_type": "dword",
+          "offset": 4
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400938",
+          "data_label": null
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400940",
+          "data_label": null
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400948",
+          "data_label": null
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400950",
+          "data_label": null
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400958",
+          "data_label": null
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400960",
+          "data_label": null
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400968",
+          "data_label": null
+        }
+      ]
+    },
+    {
+      "name": "Elf64_Dyn",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 16,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "d_tag",
+          "data_type": "Elf64_DynTag",
+          "offset": 0
+        },
+        {
+          "name": "d_val",
+          "data_type": "qword",
+          "offset": 8
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x600e50",
+          "data_label": "_DYNAMIC"
+        }
+      ]
+    },
+    {
+      "name": "Elf64_DynTag",
+      "kind": "enum",
+      "category": "/ELF",
+      "size": 8,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [
+        {
+          "name": "DT_NULL",
+          "value": 0
+        },
+        {
+          "name": "DT_NEEDED",
+          "value": 1
+        },
+        {
+          "name": "DT_PLTRELSZ",
+          "value": 2
+        },
+        {
+          "name": "DT_PLTGOT",
+          "value": 3
+        },
+        {
+          "name": "DT_HASH",
+          "value": 4
+        },
+        {
+          "name": "DT_STRTAB",
+          "value": 5
+        },
+        {
+          "name": "DT_SYMTAB",
+          "value": 6
+        },
+        {
+          "name": "DT_RELA",
+          "value": 7
+        },
+        {
+          "name": "DT_RELASZ",
+          "value": 8
+        },
+        {
+          "name": "DT_RELAENT",
+          "value": 9
+        },
+        {
+          "name": "DT_STRSZ",
+          "value": 10
+        },
+        {
+          "name": "DT_SYMENT",
+          "value": 11
+        },
+        {
+          "name": "DT_INIT",
+          "value": 12
+        },
+        {
+          "name": "DT_FINI",
+          "value": 13
+        },
+        {
+          "name": "DT_SONAME",
+          "value": 14
+        },
+        {
+          "name": "DT_RPATH",
+          "value": 15
+        },
+        {
+          "name": "DT_SYMBOLIC",
+          "value": 16
+        },
+        {
+          "name": "DT_REL",
+          "value": 17
+        },
+        {
+          "name": "DT_RELSZ",
+          "value": 18
+        },
+        {
+          "name": "DT_RELENT",
+          "value": 19
+        },
+        {
+          "name": "DT_PLTREL",
+          "value": 20
+        },
+        {
+          "name": "DT_DEBUG",
+          "value": 21
+        },
+        {
+          "name": "DT_TEXTREL",
+          "value": 22
+        },
+        {
+          "name": "DT_JMPREL",
+          "value": 23
+        },
+        {
+          "name": "DT_BIND_NOW",
+          "value": 24
+        },
+        {
+          "name": "DT_INIT_ARRAY",
+          "value": 25
+        },
+        {
+          "name": "DT_FINI_ARRAY",
+          "value": 26
+        },
+        {
+          "name": "DT_INIT_ARRAYSZ",
+          "value": 27
+        },
+        {
+          "name": "DT_FINI_ARRAYSZ",
+          "value": 28
+        },
+        {
+          "name": "DT_RUNPATH",
+          "value": 29
+        },
+        {
+          "name": "DT_FLAGS",
+          "value": 30
+        },
+        {
+          "name": "DT_PREINIT_ARRAY",
+          "value": 32
+        },
+        {
+          "name": "DT_PREINIT_ARRAYSZ",
+          "value": 33
+        },
+        {
+          "name": "DT_RELRSZ",
+          "value": 35
+        },
+        {
+          "name": "DT_RELR",
+          "value": 36
+        },
+        {
+          "name": "DT_RELRENT",
+          "value": 37
+        },
+        {
+          "name": "DT_ANDROID_REL",
+          "value": 1610612751
+        },
+        {
+          "name": "DT_ANDROID_RELSZ",
+          "value": 1610612752
+        },
+        {
+          "name": "DT_ANDROID_RELA",
+          "value": 1610612753
+        },
+        {
+          "name": "DT_ANDROID_RELASZ",
+          "value": 1610612754
+        },
+        {
+          "name": "DT_ANDROID_RELR",
+          "value": 1879040000
+        },
+        {
+          "name": "DT_ANDROID_RELRSZ",
+          "value": 1879040001
+        },
+        {
+          "name": "DT_ANDROID_RELRENT",
+          "value": 1879040003
+        },
+        {
+          "name": "DT_GNU_PRELINKED",
+          "value": 1879047669
+        },
+        {
+          "name": "DT_GNU_CONFLICTSZ",
+          "value": 1879047670
+        },
+        {
+          "name": "DT_GNU_LIBLISTSZ",
+          "value": 1879047671
+        },
+        {
+          "name": "DT_CHECKSUM",
+          "value": 1879047672
+        },
+        {
+          "name": "DT_PLTPADSZ",
+          "value": 1879047673
+        },
+        {
+          "name": "DT_MOVEENT",
+          "value": 1879047674
+        },
+        {
+          "name": "DT_MOVESZ",
+          "value": 1879047675
+        },
+        {
+          "name": "DT_FEATURE_1",
+          "value": 1879047676
+        },
+        {
+          "name": "DT_POSFLAG_1",
+          "value": 1879047677
+        },
+        {
+          "name": "DT_SYMINSZ",
+          "value": 1879047678
+        },
+        {
+          "name": "DT_SYMINENT",
+          "value": 1879047679
+        },
+        {
+          "name": "DT_GNU_XHASH",
+          "value": 1879047924
+        },
+        {
+          "name": "DT_GNU_HASH",
+          "value": 1879047925
+        },
+        {
+          "name": "DT_TLSDESC_PLT",
+          "value": 1879047926
+        },
+        {
+          "name": "DT_TLSDESC_GOT",
+          "value": 1879047927
+        },
+        {
+          "name": "DT_GNU_CONFLICT",
+          "value": 1879047928
+        },
+        {
+          "name": "DT_GNU_LIBLIST",
+          "value": 1879047929
+        },
+        {
+          "name": "DT_CONFIG",
+          "value": 1879047930
+        },
+        {
+          "name": "DT_DEPAUDIT",
+          "value": 1879047931
+        },
+        {
+          "name": "DT_AUDIT",
+          "value": 1879047932
+        },
+        {
+          "name": "DT_PLTPAD",
+          "value": 1879047933
+        },
+        {
+          "name": "DT_MOVETAB",
+          "value": 1879047934
+        },
+        {
+          "name": "DT_SYMINFO",
+          "value": 1879047935
+        },
+        {
+          "name": "DT_VERSYM",
+          "value": 1879048176
+        },
+        {
+          "name": "DT_RELACOUNT",
+          "value": 1879048185
+        },
+        {
+          "name": "DT_RELCOUNT",
+          "value": 1879048186
+        },
+        {
+          "name": "DT_FLAGS_1",
+          "value": 1879048187
+        },
+        {
+          "name": "DT_VERDEF",
+          "value": 1879048188
+        },
+        {
+          "name": "DT_VERDEFNUM",
+          "value": 1879048189
+        },
+        {
+          "name": "DT_VERNEED",
+          "value": 1879048190
+        },
+        {
+          "name": "DT_VERNEEDNUM",
+          "value": 1879048191
+        },
+        {
+          "name": "DT_AUXILIARY",
+          "value": 2147483645
+        },
+        {
+          "name": "DT_FILTER",
+          "value": 2147483647
+        }
+      ],
+      "target_type_name": null,
+      "usages": []
+    },
+    {
+      "name": "Elf64_Ehdr",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 64,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "e_ident_magic_num",
+          "data_type": "byte",
+          "offset": 0
+        },
+        {
+          "name": "e_ident_magic_str",
+          "data_type": "string",
+          "offset": 1
+        },
+        {
+          "name": "e_ident_class",
+          "data_type": "byte",
+          "offset": 4
+        },
+        {
+          "name": "e_ident_data",
+          "data_type": "byte",
+          "offset": 5
+        },
+        {
+          "name": "e_ident_version",
+          "data_type": "byte",
+          "offset": 6
+        },
+        {
+          "name": "e_ident_osabi",
+          "data_type": "byte",
+          "offset": 7
+        },
+        {
+          "name": "e_ident_abiversion",
+          "data_type": "byte",
+          "offset": 8
+        },
+        {
+          "name": "e_ident_pad",
+          "data_type": "byte[7]",
+          "offset": 9
+        },
+        {
+          "name": "e_type",
+          "data_type": "word",
+          "offset": 16
+        },
+        {
+          "name": "e_machine",
+          "data_type": "word",
+          "offset": 18
+        },
+        {
+          "name": "e_version",
+          "data_type": "dword",
+          "offset": 20
+        },
+        {
+          "name": "e_entry",
+          "data_type": "qword",
+          "offset": 24
+        },
+        {
+          "name": "e_phoff",
+          "data_type": "qword",
+          "offset": 32
+        },
+        {
+          "name": "e_shoff",
+          "data_type": "qword",
+          "offset": 40
+        },
+        {
+          "name": "e_flags",
+          "data_type": "dword",
+          "offset": 48
+        },
+        {
+          "name": "e_ehsize",
+          "data_type": "word",
+          "offset": 52
+        },
+        {
+          "name": "e_phentsize",
+          "data_type": "word",
+          "offset": 54
+        },
+        {
+          "name": "e_phnum",
+          "data_type": "word",
+          "offset": 56
+        },
+        {
+          "name": "e_shentsize",
+          "data_type": "word",
+          "offset": 58
+        },
+        {
+          "name": "e_shnum",
+          "data_type": "word",
+          "offset": 60
+        },
+        {
+          "name": "e_shstrndx",
+          "data_type": "word",
+          "offset": 62
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400000",
+          "data_label": null
+        }
+      ]
+    },
+    {
+      "name": "Elf64_Phdr",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 56,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "p_type",
+          "data_type": "Elf_ProgramHeaderType",
+          "offset": 0
+        },
+        {
+          "name": "p_flags",
+          "data_type": "dword",
+          "offset": 4
+        },
+        {
+          "name": "p_offset",
+          "data_type": "qword",
+          "offset": 8
+        },
+        {
+          "name": "p_vaddr",
+          "data_type": "qword",
+          "offset": 16
+        },
+        {
+          "name": "p_paddr",
+          "data_type": "qword",
+          "offset": 24
+        },
+        {
+          "name": "p_filesz",
+          "data_type": "qword",
+          "offset": 32
+        },
+        {
+          "name": "p_memsz",
+          "data_type": "qword",
+          "offset": 40
+        },
+        {
+          "name": "p_align",
+          "data_type": "qword",
+          "offset": 48
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400040",
+          "data_label": "Elf64_Phdr_ARRAY_00400040"
+        }
+      ]
+    },
+    {
+      "name": "Elf64_Rela",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 24,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "r_offset",
+          "data_type": "qword",
+          "offset": 0
+        },
+        {
+          "name": "r_info",
+          "data_type": "qword",
+          "offset": 8
+        },
+        {
+          "name": "r_addend",
+          "data_type": "qword",
+          "offset": 16
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400420",
+          "data_label": "__DT_RELA"
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400438",
+          "data_label": "__DT_JMPREL"
+        }
+      ]
+    },
+    {
+      "name": "Elf64_Shdr",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 64,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "sh_name",
+          "data_type": "dword",
+          "offset": 0
+        },
+        {
+          "name": "sh_type",
+          "data_type": "Elf_SectionHeaderType",
+          "offset": 4
+        },
+        {
+          "name": "sh_flags",
+          "data_type": "qword",
+          "offset": 8
+        },
+        {
+          "name": "sh_addr",
+          "data_type": "qword",
+          "offset": 16
+        },
+        {
+          "name": "sh_offset",
+          "data_type": "qword",
+          "offset": 24
+        },
+        {
+          "name": "sh_size",
+          "data_type": "qword",
+          "offset": 32
+        },
+        {
+          "name": "sh_link",
+          "data_type": "dword",
+          "offset": 40
+        },
+        {
+          "name": "sh_info",
+          "data_type": "dword",
+          "offset": 44
+        },
+        {
+          "name": "sh_addralign",
+          "data_type": "qword",
+          "offset": 48
+        },
+        {
+          "name": "sh_entsize",
+          "data_type": "qword",
+          "offset": 56
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x0",
+          "data_label": "Elf64_Shdr_ARRAY__elfSectionHeaders__00000000"
+        }
+      ]
+    },
+    {
+      "name": "Elf64_Sym",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 24,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "st_name",
+          "data_type": "dword",
+          "offset": 0
+        },
+        {
+          "name": "st_info",
+          "data_type": "byte",
+          "offset": 4
+        },
+        {
+          "name": "st_other",
+          "data_type": "byte",
+          "offset": 5
+        },
+        {
+          "name": "st_shndx",
+          "data_type": "word",
+          "offset": 6
+        },
+        {
+          "name": "st_value",
+          "data_type": "qword",
+          "offset": 8
+        },
+        {
+          "name": "st_size",
+          "data_type": "qword",
+          "offset": 16
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x4002b8",
+          "data_label": "__DT_SYMTAB"
+        },
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x0",
+          "data_label": "Elf64_Sym_ARRAY_.symtab__00000000"
+        }
+      ]
+    },
+    {
+      "name": "Elf_ProgramHeaderType",
+      "kind": "enum",
+      "category": "/ELF",
+      "size": 4,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [
+        {
+          "name": "PT_NULL",
+          "value": 0
+        },
+        {
+          "name": "PT_LOAD",
+          "value": 1
+        },
+        {
+          "name": "PT_DYNAMIC",
+          "value": 2
+        },
+        {
+          "name": "PT_INTERP",
+          "value": 3
+        },
+        {
+          "name": "PT_NOTE",
+          "value": 4
+        },
+        {
+          "name": "PT_SHLIB",
+          "value": 5
+        },
+        {
+          "name": "PT_PHDR",
+          "value": 6
+        },
+        {
+          "name": "PT_TLS",
+          "value": 7
+        },
+        {
+          "name": "PT_GNU_EH_FRAME",
+          "value": 1685382480
+        },
+        {
+          "name": "PT_GNU_STACK",
+          "value": 1685382481
+        },
+        {
+          "name": "PT_GNU_RELRO",
+          "value": 1685382482
+        }
+      ],
+      "target_type_name": null,
+      "usages": []
+    },
+    {
+      "name": "Elf_SectionHeaderType",
+      "kind": "enum",
+      "category": "/ELF",
+      "size": 4,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [
+        {
+          "name": "SHT_NULL",
+          "value": 0
+        },
+        {
+          "name": "SHT_PROGBITS",
+          "value": 1
+        },
+        {
+          "name": "SHT_SYMTAB",
+          "value": 2
+        },
+        {
+          "name": "SHT_STRTAB",
+          "value": 3
+        },
+        {
+          "name": "SHT_RELA",
+          "value": 4
+        },
+        {
+          "name": "SHT_HASH",
+          "value": 5
+        },
+        {
+          "name": "SHT_DYNAMIC",
+          "value": 6
+        },
+        {
+          "name": "SHT_NOTE",
+          "value": 7
+        },
+        {
+          "name": "SHT_NOBITS",
+          "value": 8
+        },
+        {
+          "name": "SHT_REL",
+          "value": 9
+        },
+        {
+          "name": "SHT_SHLIB",
+          "value": 10
+        },
+        {
+          "name": "SHT_DYNSYM",
+          "value": 11
+        },
+        {
+          "name": "SHT_INIT_ARRAY",
+          "value": 14
+        },
+        {
+          "name": "SHT_FINI_ARRAY",
+          "value": 15
+        },
+        {
+          "name": "SHT_PREINIT_ARRAY",
+          "value": 16
+        },
+        {
+          "name": "SHT_GROUP",
+          "value": 17
+        },
+        {
+          "name": "SHT_SYMTAB_SHNDX",
+          "value": 18
+        },
+        {
+          "name": "SHT_ANDROID_REL",
+          "value": 1610612737
+        },
+        {
+          "name": "SHT_ANDROID_RELA",
+          "value": 1610612738
+        },
+        {
+          "name": "SHT_GNU_ATTRIBUTES",
+          "value": 1879048181
+        },
+        {
+          "name": "SHT_GNU_HASH",
+          "value": 1879048182
+        },
+        {
+          "name": "SHT_GNU_LIBLIST",
+          "value": 1879048183
+        },
+        {
+          "name": "SHT_CHECKSUM",
+          "value": 1879048184
+        },
+        {
+          "name": "SHT_SUNW_move",
+          "value": 1879048186
+        },
+        {
+          "name": "SHT_SUNW_COMDAT",
+          "value": 1879048187
+        },
+        {
+          "name": "SHT_SUNW_syminfo",
+          "value": 1879048188
+        },
+        {
+          "name": "SHT_GNU_verdef",
+          "value": 1879048189
+        },
+        {
+          "name": "SHT_GNU_verneed",
+          "value": 1879048190
+        },
+        {
+          "name": "SHT_GNU_versym",
+          "value": 1879048191
+        }
+      ],
+      "target_type_name": null,
+      "usages": []
+    },
+    {
+      "name": "GnuBuildId",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 36,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "namesz",
+          "data_type": "dword",
+          "offset": 0
+        },
+        {
+          "name": "descsz",
+          "data_type": "dword",
+          "offset": 4
+        },
+        {
+          "name": "type",
+          "data_type": "dword",
+          "offset": 8
+        },
+        {
+          "name": "name",
+          "data_type": "string",
+          "offset": 12
+        },
+        {
+          "name": "hash",
+          "data_type": "byte[20]",
+          "offset": 16
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400274",
+          "data_label": "GnuBuildId_00400274"
+        }
+      ]
+    },
+    {
+      "name": "NoteAbiTag",
+      "kind": "struct",
+      "category": "/ELF",
+      "size": 32,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [
+        {
+          "name": "namesz",
+          "data_type": "dword",
+          "offset": 0
+        },
+        {
+          "name": "descsz",
+          "data_type": "dword",
+          "offset": 4
+        },
+        {
+          "name": "type",
+          "data_type": "dword",
+          "offset": 8
+        },
+        {
+          "name": "name",
+          "data_type": "string",
+          "offset": 12
+        },
+        {
+          "name": "abiType",
+          "data_type": "dword",
+          "offset": 16
+        },
+        {
+          "name": "requiredKernelVersion",
+          "data_type": "dword[3]",
+          "offset": 20
+        }
+      ],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": [
+        {
+          "kind": "global_data",
+          "function_address": null,
+          "function_name": null,
+          "parameter_name": null,
+          "data_address": "0x400254",
+          "data_label": "NoteAbiTag_00400254"
+        }
+      ]
+    },
+    {
+      "name": "EVP_PKEY_CTX",
+      "kind": "typedef",
+      "category": "/ossl_typ.h",
+      "size": 1,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [],
+      "target_type_name": "evp_pkey_ctx_st",
+      "usages": [
+        {
+          "kind": "function_parameter",
+          "function_address": "0x4004e0",
+          "function_name": "_init",
+          "parameter_name": "ctx",
+          "data_address": null,
+          "data_label": null
+        }
+      ]
+    },
+    {
+      "name": "evp_pkey_ctx_st",
+      "kind": "struct",
+      "category": "/ossl_typ.h",
+      "size": 1,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [],
+      "target_type_name": null,
+      "usages": []
+    },
+    {
+      "name": "size_t",
+      "kind": "typedef",
+      "category": "/stddef.h",
+      "size": 8,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [],
+      "target_type_name": "ulong",
+      "usages": [
+        {
+          "kind": "function_parameter",
+          "function_address": "0x400530",
+          "function_name": "read",
+          "parameter_name": "__nbytes",
+          "data_address": null,
+          "data_label": null
+        },
+        {
+          "kind": "function_parameter",
+          "function_address": "0x602010",
+          "function_name": "read",
+          "parameter_name": "__nbytes",
+          "data_address": null,
+          "data_label": null
+        },
+        {
+          "kind": "function_parameter",
+          "function_address": "0x3",
+          "function_name": "read",
+          "parameter_name": "__nbytes",
+          "data_address": null,
+          "data_label": null
+        }
+      ]
+    },
+    {
+      "name": "__ssize_t",
+      "kind": "typedef",
+      "category": "/types.h",
+      "size": 8,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [],
+      "target_type_name": "long",
+      "usages": []
+    },
+    {
+      "name": "ssize_t",
+      "kind": "typedef",
+      "category": "/types.h",
+      "size": 8,
+      "is_opaque": false,
+      "is_anonymous": false,
+      "fields": [],
+      "enum_values": [],
+      "target_type_name": "__ssize_t",
+      "usages": [
+        {
+          "kind": "function_return",
+          "function_address": "0x400530",
+          "function_name": "read",
+          "parameter_name": null,
+          "data_address": null,
+          "data_label": null
+        },
+        {
+          "kind": "function_return",
+          "function_address": "0x602010",
+          "function_name": "read",
+          "parameter_name": null,
+          "data_address": null,
+          "data_label": null
+        },
+        {
+          "kind": "function_return",
+          "function_address": "0x3",
+          "function_name": "read",
+          "parameter_name": null,
+          "data_address": null,
+          "data_label": null
+        }
+      ]
+    }
+  ]
+}
