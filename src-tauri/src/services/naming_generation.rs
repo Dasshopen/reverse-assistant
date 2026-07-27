@@ -25,7 +25,7 @@ pub use crate::services::naming_arbitration::ArbitrationContext;
 
 /// Bumped independently from closed-set FunctionID arbitration so projects
 /// recompute only open-ended suggestions when the semantic agent changes.
-pub const NAMING_GENERATION_VERSION: u32 = 4;
+pub const NAMING_GENERATION_VERSION: u32 = 5;
 
 fn default_analysis_pass() -> u8 {
     1
@@ -322,7 +322,8 @@ dans la fiche (appel, chaine, type ou instruction), jamais une impression genera
 
 const TOOL_PROTOCOL_PROMPT: &str = "Si une observation precise peut ameliorer ton hypothese, \
 conserve tout de meme une proposition provisoire dans suggested_name et demande au maximum deux outils read-only dans requested_tools. \
-Valeurs permises : caller_context, callee_context, two_hop_graph, string_references, type_usages. \
+Valeurs permises : function_overview, caller_context, callee_context, two_hop_graph, \
+cross_references, string_references, type_usages, behavior_signals. \
 Ne demande un outil que s'il peut repondre a une question explicite dans reasoning. Si la fiche suffit, \
 requested_tools doit etre vide. L'application executera les outils puis te demandera une decision finale.";
 
@@ -514,7 +515,7 @@ fn generation_result_schema(entry_address: Option<&str>, executable_body: bool) 
                 "maxItems":2,
                 "items":{
                     "type":"string",
-                    "enum":["caller_context","callee_context","two_hop_graph","string_references","type_usages"]
+                    "enum":["function_overview","caller_context","callee_context","two_hop_graph","cross_references","string_references","type_usages","behavior_signals"]
                 }
             }),
         ),
@@ -741,13 +742,13 @@ pub fn recommended_refinement_tools(context: &GenerationContext) -> Vec<Investig
         || (context.semantic_facts.callers.len() + context.semantic_facts.callees.len()) <= 2;
     if small_or_context_dependent {
         vec![
-            InvestigationTool::CallerContext,
+            InvestigationTool::BehaviorSignals,
             InvestigationTool::TwoHopGraph,
         ]
     } else {
         vec![
-            InvestigationTool::CallerContext,
-            InvestigationTool::CalleeContext,
+            InvestigationTool::BehaviorSignals,
+            InvestigationTool::CrossReferences,
         ]
     }
 }
@@ -1348,14 +1349,14 @@ mod tests {
     }
 
     #[test]
-    fn small_functions_get_caller_and_two_hop_investigation() {
+    fn small_functions_get_behavior_and_two_hop_investigation() {
         let mut context = sample_context();
         context.base.decompiled_code = Some("return 0;".to_owned());
 
         assert_eq!(
             recommended_refinement_tools(&context),
             vec![
-                InvestigationTool::CallerContext,
+                InvestigationTool::BehaviorSignals,
                 InvestigationTool::TwoHopGraph
             ]
         );

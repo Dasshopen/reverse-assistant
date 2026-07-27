@@ -16,6 +16,12 @@ The implementation is clean-room and combines publicly documented ideas:
 
 No proprietary model, corpus or source code is copied into this repository.
 
+The ReVa-inspired layer is implemented in-process as bounded, read-only Rust
+queries (`function_overview`, cross-references, callers/callees, call graph,
+strings, types and behaviour signals). Reverse Assistant does not embed ReVa's
+HTTP/MCP server, arbitrary Python scripting, file-editing tools or network
+surface. The upstream review is recorded in `docs/reva-security-review.md`.
+
 ## Pipeline
 
 1. Build deterministic fact sheets for every function.

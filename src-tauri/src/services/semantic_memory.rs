@@ -14,11 +14,14 @@ pub const SEMANTIC_MEMORY_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvestigationTool {
+    FunctionOverview,
     CallerContext,
     CalleeContext,
     TwoHopGraph,
+    CrossReferences,
     StringReferences,
     TypeUsages,
+    BehaviorSignals,
 }
 
 impl InvestigationTool {
@@ -31,11 +34,14 @@ impl InvestigationTool {
             .replace(['-', ' '], "_")
             .as_str()
         {
+            "function_overview" => Some(Self::FunctionOverview),
             "caller_context" => Some(Self::CallerContext),
             "callee_context" => Some(Self::CalleeContext),
             "two_hop_graph" => Some(Self::TwoHopGraph),
+            "cross_references" => Some(Self::CrossReferences),
             "string_references" => Some(Self::StringReferences),
             "type_usages" => Some(Self::TypeUsages),
+            "behavior_signals" => Some(Self::BehaviorSignals),
             _ => None,
         }
     }
@@ -305,8 +311,71 @@ fn compact_function(function: &GhidraFunction) -> String {
     )
 }
 
-/// Executes a small, read-only investigation selected by the model.  Results
-/// are bounded here rather than relying on the prompt to control context size.
+fn bounded_fact(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let mut bounded = value.chars().take(max_chars).collect::<String>();
+    bounded.push_str("...");
+    bounded
+}
+
+fn behavior_signals(function: &GhidraFunction) -> String {
+    let Some(code) = function.decompiled_code.as_deref() else {
+        return "Pseudocode indisponible : aucun signal comportemental extrait.".to_owned();
+    };
+    let mut findings = Vec::new();
+    for raw_line in code.lines() {
+        let line = raw_line.trim();
+        let lower = line.to_ascii_lowercase();
+        let category = if lower.starts_with("if ") || lower.starts_with("if(") {
+            Some("branche")
+        } else if lower.starts_with("for ")
+            || lower.starts_with("for(")
+            || lower.starts_with("while ")
+            || lower.starts_with("while(")
+        {
+            Some("boucle")
+        } else if lower.starts_with("return") {
+            Some("retour")
+        } else if lower.contains("malloc(")
+            || lower.contains("calloc(")
+            || lower.contains("realloc(")
+            || lower.contains("operator_new")
+        {
+            Some("allocation")
+        } else if lower.contains("memcpy(")
+            || lower.contains("memmove(")
+            || lower.contains("memset(")
+            || lower.contains("strcpy(")
+            || lower.contains("strlen(")
+        {
+            Some("memoire/chaine")
+        } else if line.contains("DAT_") && line.contains('=') {
+            Some("ecriture_etat")
+        } else if line.contains('(') && line.contains(')') && line.ends_with(';') {
+            Some("appel")
+        } else {
+            None
+        };
+        if let Some(category) = category {
+            findings.push(format!("{category}: {}", bounded_fact(line, 500)));
+        }
+        if findings.len() == 36 {
+            break;
+        }
+    }
+    if findings.is_empty() {
+        "Aucun signal comportemental distinct extrait du pseudocode.".to_owned()
+    } else {
+        findings.join("\n")
+    }
+}
+
+/// Executes a small, read-only investigation selected by the model. This
+/// adopts ReVa's useful tool-selection pattern inside our existing process:
+/// no MCP listener, arbitrary Python execution, file editing or network call.
+/// Results are bounded here rather than relying on the prompt to control size.
 pub fn execute_investigation_tools(
     export: &GhidraExport,
     entry_address: &str,
@@ -333,6 +402,30 @@ pub fn execute_investigation_tools(
         .into_iter()
         .map(|tool| {
             let content = match tool {
+                InvestigationTool::FunctionOverview => {
+                    let caller_count = caller_index
+                        .get(entry_address)
+                        .map_or(0, |callers| callers.len());
+                    let prototype = format!(
+                        "{} {}({})",
+                        function.return_type,
+                        function.name,
+                        function
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.data_type.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    format!(
+                        "prototype: {prototype}\nexterne: {}\nthunk: {}\nappelants directs: {caller_count}\nappels sortants: {}\nchaines: {}\nclasses RTTI: {}",
+                        function.is_external,
+                        function.is_thunk,
+                        function.calls.len(),
+                        function.strings.iter().take(12).map(|value| bounded_fact(value, 300)).collect::<Vec<_>>().join(" | "),
+                        function.rtti_class_names.iter().take(12).map(|value| bounded_fact(value, 300)).collect::<Vec<_>>().join(" | ")
+                    )
+                }
                 InvestigationTool::CallerContext => {
                     let callers = call_graph::resolve_calling_functions(
                         &caller_index,
@@ -396,6 +489,44 @@ pub fn execute_investigation_tools(
                         .collect::<Vec<_>>()
                         .join("\n")
                 }
+                InvestigationTool::CrossReferences => {
+                    let mut lines = call_graph::resolve_calling_functions(
+                        &caller_index,
+                        &functions,
+                        entry_address,
+                    )
+                    .into_iter()
+                    .filter_map(|address| functions.get(address).copied())
+                    .take(20)
+                    .map(|caller| {
+                        format!("appel entrant: {} @ {}", caller.name, caller.entry_address)
+                    })
+                    .collect::<Vec<_>>();
+                    for string in &export.strings {
+                        for reference in string.references.iter().filter(|reference| {
+                            reference.function_address.as_deref() == Some(entry_address)
+                        }) {
+                            lines.push(format!(
+                                "reference chaine: {} @ instruction {}",
+                                bounded_fact(&string.value, 300), reference.instruction_address
+                            ));
+                            if lines.len() == 30 {
+                                break;
+                            }
+                        }
+                        if lines.len() == 30 {
+                            break;
+                        }
+                    }
+                    if let Some(target) = &function.thunk_target_address {
+                        lines.push(format!("cible thunk: {target}"));
+                    }
+                    if lines.is_empty() {
+                        "Aucune reference croisee attribuee a cette fonction.".to_owned()
+                    } else {
+                        lines.join("\n")
+                    }
+                }
                 InvestigationTool::StringReferences => {
                     let mut lines = Vec::new();
                     for string in &export.strings {
@@ -452,6 +583,7 @@ pub fn execute_investigation_tools(
                         lines.join("\n")
                     }
                 }
+                InvestigationTool::BehaviorSignals => behavior_signals(function),
             };
             Ok(ToolFinding { tool, content })
         })
@@ -546,5 +678,37 @@ mod tests {
         assert_eq!(findings.len(), 2, "the per-turn tool budget is enforced");
         assert!(findings[0].content.contains("main"));
         assert!(findings[1].content.contains("SOSNEAKY"));
+    }
+
+    #[test]
+    fn reva_inspired_tools_expose_facts_without_executing_code() {
+        let export = fauxware();
+        let findings = execute_investigation_tools(
+            &export,
+            "0x400664",
+            &[
+                InvestigationTool::FunctionOverview,
+                InvestigationTool::CrossReferences,
+            ],
+        )
+        .expect("read-only overview and cross-reference tools should execute");
+        assert!(findings[0].content.contains("prototype:"));
+        assert!(findings[1].content.contains("appel entrant: main"));
+    }
+
+    #[test]
+    fn behavior_signals_keep_only_bounded_observable_lines() {
+        let mut function = fauxware()
+            .functions
+            .into_iter()
+            .find(|function| function.entry_address == "0x400664")
+            .expect("authenticate exists in the fixture");
+        function.decompiled_code = Some(
+            "void authenticate(void) {\nif (allowed) {\nprintf(\"ok\");\n}\nreturn;\n}".to_owned(),
+        );
+        let signals = behavior_signals(&function);
+        assert!(signals.contains("branche: if (allowed)"));
+        assert!(signals.contains("appel: printf"));
+        assert!(signals.contains("retour: return"));
     }
 }
