@@ -2249,7 +2249,12 @@ interface ApplyRenamesResult {
         );
         generationResults = new Map(
           storedGeneration
-            .filter((stored) => stored.context_complete && stored.agent_version >= 4)
+            .filter(
+              (stored) =>
+                stored.context_complete &&
+                stored.agent_version >= 4 &&
+                isUsableStoredGeneration(stored),
+            )
             .map((stored) => [
             stored.entry_address,
             {
@@ -2554,6 +2559,16 @@ interface ApplyRenamesResult {
 
   function isGeneratedFunctionName(name: string): boolean {
     return /^(?:thunk_)?FUN_[0-9a-f]+$/i.test(name) || /^sub_[0-9a-f]+$/i.test(name);
+  }
+
+  function isUsableStoredGeneration(stored: StoredGenerationOutcome): boolean {
+    if (stored.suggested_name === null) return true;
+    const normalized = stored.suggested_name.trim().toLowerCase();
+    if ((stored.confidence ?? 0) === 0) return false;
+    if (isGeneratedFunctionName(stored.suggested_name)) return false;
+    if (normalized.startsWith("unknown_") || normalized.endsWith("_unknown")) return false;
+    const compact = normalized.replaceAll("_", "");
+    return compact !== "utilityfunction" && compact !== "genericfunction";
   }
 
   function formatProjectDate(createdAtUnixSeconds: number): string {

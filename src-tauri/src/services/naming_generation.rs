@@ -590,8 +590,15 @@ pub fn parse_generation_batch_response(
                 format!("the model omitted function '{expected}' from its batch response")
             })?;
         let suggested_name = match &item.suggested_name {
-            Some(name) if is_plausible_identifier(name) => Some(name.clone()),
-            Some(name) => return Err(format!("the model suggested invalid identifier '{name}'")),
+            Some(name) if !is_plausible_identifier(name) => {
+                return Err(format!("the model suggested invalid identifier '{name}'"))
+            }
+            Some(name) if item.confidence == 0 => {
+                return Err(format!(
+                    "the model suggested '{name}' for '{expected}' with zero confidence"
+                ))
+            }
+            Some(name) => Some(name.clone()),
             None => None,
         };
         results.push(GenerationBatchResult {
@@ -609,6 +616,18 @@ pub fn parse_generation_batch_response(
                     .collect(),
             },
         });
+    }
+    let mut names = std::collections::HashSet::new();
+    for result in &results {
+        let Some(name) = result.result.suggested_name.as_deref() else {
+            continue;
+        };
+        let normalized = name.to_ascii_lowercase();
+        if !names.insert(normalized) && expected_addresses.len() > 1 {
+            return Err(format!(
+                "the model repeated generated name '{name}' for several functions in one batch"
+            ));
+        }
     }
     Ok(results)
 }
@@ -672,16 +691,21 @@ fn is_plausible_identifier(name: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
     let normalized = name.to_ascii_lowercase();
-    let is_generic = matches!(
-        normalized.as_str(),
-        "function"
-            | "func"
-            | "sub"
-            | "helper"
-            | "process_data"
-            | "handle_data"
-            | "unknown_function"
-    );
+    let compact = normalized.replace('_', "");
+    let is_generic = semantic_memory::is_generic_function_name(name)
+        || normalized.starts_with("unknown_")
+        || normalized.ends_with("_unknown")
+        || matches!(compact.as_str(), "utilityfunction" | "genericfunction")
+        || matches!(
+            normalized.as_str(),
+            "function"
+                | "func"
+                | "sub"
+                | "helper"
+                | "process_data"
+                | "handle_data"
+                | "unknown_function"
+        );
     starts_ok
         && name.len() <= 200
         && !is_generic
@@ -715,12 +739,15 @@ pub fn parse_generation_response(
             .map_err(|error| format!("invalid generation response JSON: {error}"))?;
 
     let suggested_name = match parsed.suggested_name {
-        Some(name) if is_plausible_identifier(&name) => Some(name),
-        Some(name) => {
+        Some(name) if !is_plausible_identifier(&name) => {
             return Err(format!(
                 "the model suggested '{name}', which is not a valid identifier shape"
             ))
         }
+        Some(name) if parsed.confidence == 0 => {
+            return Err(format!("the model suggested '{name}' with zero confidence"))
+        }
+        Some(name) => Some(name),
         None => None,
     };
 
@@ -835,7 +862,7 @@ mod tests {
     #[test]
     fn a_plausible_identifier_suggestion_is_accepted() {
         let response = ChatCompletionResponse {
-            content: r#"{"suggested_name": "open_config_file", "reasoning": "Appelle CreateFileA avec un mode lecture (\"rb\")."}"#.to_owned(),
+            content: r#"{"suggested_name": "open_config_file", "confidence": 65, "reasoning": "Appelle CreateFileA avec un mode lecture (\"rb\")."}"#.to_owned(),
         };
 
         let result = parse_generation_response(&response)
@@ -912,6 +939,40 @@ mod tests {
         };
         let error = parse_generation_response(&response).expect_err("generic names are not useful");
         assert!(error.contains("not a valid identifier shape"));
+    }
+
+    #[test]
+    fn a_generated_ghidra_placeholder_is_rejected() {
+        let response = ChatCompletionResponse {
+            content: r#"{"suggested_name":"FUN_140009ca0","confidence":65,"evidence":["appel"],"reasoning":"Nom recopie."}"#.to_owned(),
+        };
+        let error = parse_generation_response(&response)
+            .expect_err("a generated Ghidra placeholder is not a useful proposal");
+        assert!(error.contains("not a valid identifier shape"));
+    }
+
+    #[test]
+    fn a_named_answer_with_zero_confidence_is_rejected() {
+        let response = ChatCompletionResponse {
+            content: r#"{"suggested_name":"handle_file_operations","confidence":0,"evidence":[],"reasoning":"Aucun signal."}"#.to_owned(),
+        };
+        let error = parse_generation_response(&response)
+            .expect_err("zero-confidence text is an abstention, not a proposal");
+        assert!(error.contains("zero confidence"));
+    }
+
+    #[test]
+    fn repeated_names_in_a_multi_function_batch_trigger_individual_retry() {
+        let response = ChatCompletionResponse {
+            content: r#"{"results":[
+                {"entry_address":"0x1","suggested_name":"handle_file_operations","confidence":55,"evidence":["appel"],"reasoning":"..."},
+                {"entry_address":"0x2","suggested_name":"handle_file_operations","confidence":55,"evidence":["appel"],"reasoning":"..."}
+            ]}"#.to_owned(),
+        };
+        let error =
+            parse_generation_batch_response(&response, &["0x1".to_owned(), "0x2".to_owned()])
+                .expect_err("identical batch names are a contamination signal");
+        assert!(error.contains("repeated generated name"));
     }
 
     #[test]
