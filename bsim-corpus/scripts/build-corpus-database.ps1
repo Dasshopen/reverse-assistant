@@ -1,5 +1,5 @@
-# Builds the BSim seed database from the DLLs already compiled by
-# build-sqlite.ps1 / build-zlib.ps1: analyzes each one with a full (non
+# Builds the BSim seed database from the reference binaries already compiled
+# by the library/runtime build scripts: analyzes each one with a full (non
 # speed-optimized) Ghidra headless pass so the PDB analyzer assigns real
 # function names, then generates and commits BSim signatures for it.
 #
@@ -41,12 +41,13 @@ $libraries = @(
     @{ Name = "lz4"; Dll = Join-Path $corpusRoot "build\lz4-1.10.0-x64-release-syms\lz4.dll" },
     @{ Name = "xxhash"; Dll = Join-Path $corpusRoot "build\xxhash-0.8.3-x64-release-syms\xxhash.dll" },
     @{ Name = "zstd"; Dll = Join-Path $corpusRoot "build\zstd-1.5.7-x64-release-syms\zstd.dll" },
-    @{ Name = "brotli"; Dll = Join-Path $corpusRoot "build\brotli-1.2.0-x64-release-syms\brotli.dll" }
+    @{ Name = "brotli"; Dll = Join-Path $corpusRoot "build\brotli-1.2.0-x64-release-syms\brotli.dll" },
+    @{ Name = "msvc-runtime"; Dll = Join-Path $corpusRoot "build\msvc-runtime-x64-release-syms\msvc-runtime-reference.exe" }
 )
 
 foreach ($library in $libraries) {
     if (-not (Test-Path -LiteralPath $library.Dll -PathType Leaf)) {
-        throw "$($library.Name) DLL not found at $($library.Dll); run its build script first."
+        throw "$($library.Name) reference binary not found at $($library.Dll); run its build script first."
     }
 }
 

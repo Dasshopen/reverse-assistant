@@ -27,10 +27,36 @@ pub use crate::services::naming_arbitration::ArbitrationContext;
 /// recompute only open-ended suggestions when the semantic agent changes.
 pub const NAMING_GENERATION_VERSION: u32 = 4;
 
+fn default_analysis_pass() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisionalFunctionName {
+    pub entry_address: String,
+    pub name: String,
+    #[serde(default)]
+    pub confidence: u8,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionalNeighborName {
+    pub entry_address: String,
+    pub name: String,
+    pub confidence: u8,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerationContext {
     pub base: ArbitrationContext,
     pub semantic_facts: FunctionSemanticFacts,
+    /// Names proposed during an earlier analysis step. They are deliberately
+    /// kept separate from real Ghidra symbols so the model can use them as
+    /// hypotheses without the confidence calibrator mistaking them for facts.
+    pub provisional_neighbors: Vec<ProvisionalNeighborName>,
 }
 
 pub fn build_context_for_function(
@@ -44,7 +70,46 @@ pub fn build_context_for_function(
     Ok(GenerationContext {
         base,
         semantic_facts,
+        provisional_neighbors: Vec::new(),
     })
+}
+
+pub fn build_context_for_function_with_provisional_names(
+    export: &GhidraExport,
+    entry_address: &str,
+    provisional_names: &[ProvisionalFunctionName],
+) -> Result<GenerationContext, String> {
+    let mut context = build_context_for_function(export, entry_address)?;
+    let direct_neighbors = context
+        .semantic_facts
+        .callers
+        .iter()
+        .chain(context.semantic_facts.callees.iter())
+        .map(|neighbor| neighbor.entry_address.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    context.provisional_neighbors = provisional_names
+        .iter()
+        .filter(|provisional| {
+            provisional.entry_address != entry_address
+                && provisional.confidence >= 45
+                && direct_neighbors.contains(provisional.entry_address.as_str())
+                && !semantic_memory::is_generic_function_name(&provisional.name)
+        })
+        .map(|provisional| ProvisionalNeighborName {
+            entry_address: provisional.entry_address.clone(),
+            name: provisional.name.clone(),
+            confidence: provisional.confidence,
+            source: provisional.source.clone(),
+        })
+        .collect();
+    context.provisional_neighbors.sort_by(|left, right| {
+        right
+            .confidence
+            .cmp(&left.confidence)
+            .then_with(|| left.entry_address.cmp(&right.entry_address))
+    });
+    context.provisional_neighbors.truncate(12);
+    Ok(context)
 }
 
 /// A generative naming answer, persisted alongside the project so it
@@ -64,6 +129,10 @@ pub struct StoredGenerationOutcome {
     pub context_complete: bool,
     #[serde(default)]
     pub agent_version: u32,
+    /// Pass 1 is the initial decompilation analysis. Pass 2 revisits weak
+    /// hypotheses after high-confidence neighbours have become available.
+    #[serde(default = "default_analysis_pass")]
+    pub analysis_pass: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,13 +210,32 @@ pub fn calibrate_confidence(context: &GenerationContext, result: &mut Generation
     }
     let independent_signals = verified_signals.len();
 
-    let mut cap = match independent_signals {
+    // Propagated AI names are useful context but are not independent proof.
+    // A single strong neighbour can make a vague hypothesis more useful; two
+    // independently located strong neighbours can let it reach the balanced
+    // profile, but never the strict profiles on propagation alone.
+    let propagated_anchors = context
+        .provisional_neighbors
+        .iter()
+        .filter(|neighbor| neighbor.confidence >= 65)
+        .count();
+
+    let mut cap: u8 = match independent_signals {
         0 => 45,
         1 => 65,
         2 => 80,
         3 => 90,
         _ => 95,
     };
+    if independent_signals == 0 {
+        cap = cap.max(match propagated_anchors {
+            0 => 45,
+            1 => 55,
+            _ => 65,
+        });
+    } else if propagated_anchors > 0 {
+        cap = cap.saturating_add(5).min(85);
+    }
     let proposed = result.suggested_name.as_deref().unwrap_or_default();
     let tokens = name_tokens(proposed);
     let low_information = tokens.iter().any(|token| token == "data")
@@ -180,6 +268,28 @@ pub fn calibrate_confidence(context: &GenerationContext, result: &mut Generation
     if !result.reasoning.contains("Verification locale :") {
         result.reasoning.push_str(" | ");
         result.reasoning.push_str(&verification);
+    }
+    if !context.provisional_neighbors.is_empty() {
+        let propagated = format!(
+            "Contexte propage (hypotheses, pas preuves) : {}",
+            context
+                .provisional_neighbors
+                .iter()
+                .take(4)
+                .map(|neighbor| format!(
+                    "{}@{} {}% [{}]",
+                    neighbor.name, neighbor.entry_address, neighbor.confidence, neighbor.source
+                ))
+                .collect::<Vec<_>>()
+                .join(" ; ")
+        );
+        if !result
+            .evidence
+            .iter()
+            .any(|item| item.starts_with("Contexte propage"))
+        {
+            result.evidence.push(propagated);
+        }
     }
 }
 
@@ -348,6 +458,23 @@ fn format_context(context: &GenerationContext) -> String {
                 .iter()
                 .take(MAX_CONTEXT_ITEMS)
                 .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+
+    sections.push(if context.provisional_neighbors.is_empty() {
+        "Noms provisoires des voisins : aucun.".to_owned()
+    } else {
+        format!(
+            "Noms provisoires des voisins (HYPOTHESES IA, jamais des symboles confirmes) : {}",
+            context
+                .provisional_neighbors
+                .iter()
+                .map(|neighbor| format!(
+                    "{}@{} [confiance {}%; source {}]",
+                    neighbor.name, neighbor.entry_address, neighbor.confidence, neighbor.source
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -534,6 +661,94 @@ requested_tools doit obligatoirement etre vide et il doit y avoir exactement une
                 .map(|(address, context, _)| (address.clone(), context.clone()))
                 .collect::<Vec<_>>(),
         )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementSeed {
+    pub entry_address: String,
+    pub suggested_name: Option<String>,
+    pub confidence: u8,
+    #[serde(default)]
+    pub reasoning: String,
+}
+
+/// A compact second-pass request. It does not start another open-ended tool
+/// loop: the application already performs the bounded caller/callee inquiry
+/// before this request. One provider and one response are therefore enough.
+pub fn build_refinement_batch_request(
+    contexts: &[(String, GenerationContext, Vec<ToolFinding>)],
+    seeds: &[RefinementSeed],
+    model: &str,
+) -> ChatCompletionRequest {
+    let items = contexts
+        .iter()
+        .map(|(address, context, findings)| {
+            let seed = seeds.iter().find(|seed| seed.entry_address == *address);
+            let previous = seed
+                .map(|seed| {
+                    format!(
+                        "PROPOSITION PASSE 1 : {} (confiance {}%)\nRAISON PASSE 1 : {}",
+                        seed.suggested_name.as_deref().unwrap_or("aucune"),
+                        seed.confidence,
+                        seed.reasoning
+                    )
+                })
+                .unwrap_or_else(|| "PROPOSITION PASSE 1 : aucune".to_owned());
+            format!(
+                "ADRESSE {address}\n{previous}\n\n{}\n\nENQUETE CONTEXTUELLE AUTOMATIQUE\n{}",
+                format_batch_context(context),
+                format_tool_findings(findings)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n==========\n\n");
+    let schema_contexts = contexts
+        .iter()
+        .map(|(address, context, _)| (address.clone(), context.clone()))
+        .collect::<Vec<_>>();
+    ChatCompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "{SYSTEM_PROMPT} Tu effectues une SECONDE PASSE LEGERE. Une premiere passe a deja propose un nom. \
+Utilise les nouveaux noms provisoires voisins et l'enquete caller/callee pour conserver, preciser ou remplacer ce nom. \
+Les noms provisoires restent des hypotheses : ne les cite jamais comme preuve independante et ne propage pas leur erreur. \
+Ne demande aucun outil. Retourne uniquement l'objet JSON results attendu, une entree par adresse, dans le meme ordre."
+                ),
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: items,
+            },
+        ],
+        temperature: Some(0.0),
+        require_json_object: true,
+        response_schema: Some(generation_batch_schema(&schema_contexts)),
+    }
+}
+
+pub fn recommended_refinement_tools(context: &GenerationContext) -> Vec<InvestigationTool> {
+    let code_len = context
+        .base
+        .decompiled_code
+        .as_deref()
+        .map(str::len)
+        .unwrap_or(0);
+    let small_or_context_dependent = code_len <= 1_500
+        || (context.semantic_facts.callers.len() + context.semantic_facts.callees.len()) <= 2;
+    if small_or_context_dependent {
+        vec![
+            InvestigationTool::CallerContext,
+            InvestigationTool::TwoHopGraph,
+        ]
+    } else {
+        vec![
+            InvestigationTool::CallerContext,
+            InvestigationTool::CalleeContext,
+        ]
     }
 }
 
@@ -822,6 +1037,7 @@ mod tests {
                 callee_names: vec!["CreateFileA".to_owned()],
                 referenced_strings: vec!["rb".to_owned()],
             },
+            provisional_neighbors: Vec::new(),
         }
     }
 
@@ -1086,6 +1302,63 @@ mod tests {
         assert!(verification.contains("3 indice(s) independant(s)"));
         assert!(verification.contains("CreateFileA"));
         assert!(verification.contains("rb"));
+    }
+
+    #[test]
+    fn propagated_names_help_without_becoming_independent_proof() {
+        let mut context = sample_context();
+        context.semantic_facts.callers.clear();
+        context.semantic_facts.callees.clear();
+        context.semantic_facts.imported_symbols.clear();
+        context.semantic_facts.referenced_strings.clear();
+        context.semantic_facts.rtti_class_names.clear();
+        context.provisional_neighbors = vec![
+            ProvisionalNeighborName {
+                entry_address: "0x2".to_owned(),
+                name: "parse_header".to_owned(),
+                confidence: 80,
+                source: "passe 1".to_owned(),
+            },
+            ProvisionalNeighborName {
+                entry_address: "0x3".to_owned(),
+                name: "validate_header".to_owned(),
+                confidence: 75,
+                source: "passe 1".to_owned(),
+            },
+        ];
+        let mut result = GenerationResult {
+            suggested_name: Some("initialize_header".to_owned()),
+            reasoning: "Role observe : initialise un en-tete.".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+        };
+
+        calibrate_confidence(&context, &mut result);
+
+        assert_eq!(result.confidence, 65);
+        assert!(result
+            .evidence
+            .iter()
+            .any(|item| item.contains("hypotheses, pas preuves")));
+        assert!(result
+            .evidence
+            .iter()
+            .any(|item| item.contains("aucun indice independant")));
+    }
+
+    #[test]
+    fn small_functions_get_caller_and_two_hop_investigation() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some("return 0;".to_owned());
+
+        assert_eq!(
+            recommended_refinement_tools(&context),
+            vec![
+                InvestigationTool::CallerContext,
+                InvestigationTool::TwoHopGraph
+            ]
+        );
     }
 
     #[test]

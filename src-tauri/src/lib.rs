@@ -508,9 +508,11 @@ struct GenerationOutcome {
     provider_label: String,
     confidence: u8,
     evidence: Vec<String>,
+    #[serde(default)]
+    analysis_pass: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct GenerationBatchOutcome {
     entry_address: String,
     suggested_name: Option<String>,
@@ -518,17 +520,13 @@ struct GenerationBatchOutcome {
     provider_label: String,
     confidence: u8,
     evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ProvisionalFunctionName {
-    entry_address: String,
-    name: String,
+    analysis_pass: u8,
 }
 
 fn synthesize_generation_answers(
     entry_address: &str,
     answers: &[(String, naming_generation::GenerationResult)],
+    analysis_pass: u8,
 ) -> GenerationBatchOutcome {
     let named: Vec<_> = answers
         .iter()
@@ -615,6 +613,7 @@ fn synthesize_generation_answers(
             .join(" + "),
         confidence,
         evidence,
+        analysis_pass,
     }
 }
 
@@ -623,30 +622,25 @@ fn generate_identification_suggestions(
     app: AppHandle,
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
     entry_addresses: Vec<String>,
-    provisional_names: Vec<ProvisionalFunctionName>,
+    provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
 ) -> Result<Vec<GenerationBatchOutcome>, String> {
     if entry_addresses.is_empty() || entry_addresses.len() > 6 {
         return Err("a generation batch must contain between 1 and 6 functions".to_owned());
     }
-    let mut export = export_state
+    let export = export_state
         .lock()
         .map_err(|_| "the analysis export lock was poisoned".to_owned())?
         .clone()
         .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
-    for provisional in provisional_names {
-        if let Some(function) = export
-            .functions
-            .iter_mut()
-            .find(|function| function.entry_address == provisional.entry_address)
-        {
-            function.name = provisional.name;
-        }
-    }
     let contexts = entry_addresses
         .iter()
         .map(|address| {
-            naming_generation::build_context_for_function(&export, address)
-                .map(|context| (address.clone(), context))
+            naming_generation::build_context_for_function_with_provisional_names(
+                &export,
+                address,
+                &provisional_names,
+            )
+            .map(|context| (address.clone(), context))
         })
         .collect::<Result<Vec<_>, String>>()?;
     let enabled = ai_providers::enabled_providers_for_app(&app)?;
@@ -764,8 +758,91 @@ fn generate_identification_suggestions(
         .map(|address| {
             by_address
                 .get(address)
-                .map(|answers| synthesize_generation_answers(address, answers))
+                .map(|answers| synthesize_generation_answers(address, answers, 1))
                 .ok_or_else(|| format!("no provider returned a result for '{address}'"))
+        })
+        .collect()
+}
+
+/// Revisits only weak first-pass hypotheses after stronger neighbouring names
+/// are available. This deliberately uses a single enabled provider, one
+/// compact request and no model-driven tool loop; the bounded graph inquiry is
+/// executed locally before the request, making it substantially cheaper than
+/// repeating the full first pass.
+#[tauri::command(async)]
+fn refine_identification_suggestions(
+    app: AppHandle,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    seeds: Vec<naming_generation::RefinementSeed>,
+    provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
+) -> Result<Vec<GenerationBatchOutcome>, String> {
+    if seeds.is_empty() || seeds.len() > 6 {
+        return Err("a refinement batch must contain between 1 and 6 functions".to_owned());
+    }
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    let contexts = seeds
+        .iter()
+        .map(|seed| {
+            let context = naming_generation::build_context_for_function_with_provisional_names(
+                &export,
+                &seed.entry_address,
+                &provisional_names,
+            )?;
+            let tools = naming_generation::recommended_refinement_tools(&context);
+            let findings = services::semantic_memory::execute_investigation_tools(
+                &export,
+                &seed.entry_address,
+                &tools,
+            )?;
+            Ok((seed.entry_address.clone(), context, findings))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let provider_secrets = ai_providers::enabled_providers_for_app(&app)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            "no AI provider is enabled. Configure one under Réglages first.".to_owned()
+        })?;
+    let provider = services::ai_provider::OpenAiCompatibleProvider {
+        base_url: provider_secrets.base_url,
+        api_key: provider_secrets.api_key,
+    };
+    let request = naming_generation::build_refinement_batch_request(
+        &contexts,
+        &seeds,
+        &provider_secrets.model,
+    );
+    let expected = seeds
+        .iter()
+        .map(|seed| seed.entry_address.clone())
+        .collect::<Vec<_>>();
+    let response = provider.complete(&request)?;
+    let results = naming_generation::parse_generation_batch_response(&response, &expected)?;
+    results
+        .into_iter()
+        .map(|item| {
+            let context = contexts
+                .iter()
+                .find(|(address, _, _)| address == &item.entry_address)
+                .map(|(_, context, _)| context)
+                .ok_or_else(|| {
+                    format!("no refinement context exists for '{}'", item.entry_address)
+                })?;
+            let mut result = item.result;
+            naming_generation::calibrate_confidence(context, &mut result);
+            Ok(GenerationBatchOutcome {
+                entry_address: item.entry_address,
+                suggested_name: result.suggested_name,
+                reasoning: result.reasoning,
+                provider_label: format!("{} · passe contextuelle", provider_secrets.label),
+                confidence: result.confidence,
+                evidence: result.evidence,
+                analysis_pass: 2,
+            })
         })
         .collect()
 }
@@ -861,13 +938,14 @@ fn generate_identification_suggestion(
         ));
     }
 
-    let synthesized = synthesize_generation_answers(&entry_address, &answers);
+    let synthesized = synthesize_generation_answers(&entry_address, &answers, 1);
     Ok(GenerationOutcome {
         suggested_name: synthesized.suggested_name,
         reasoning: synthesized.reasoning,
         provider_label: synthesized.provider_label,
         confidence: synthesized.confidence,
         evidence: synthesized.evidence,
+        analysis_pass: 1,
     })
 }
 
@@ -909,6 +987,7 @@ fn save_generation_result(
         evidence: outcome.evidence,
         context_complete: true,
         agent_version: naming_generation::NAMING_GENERATION_VERSION,
+        analysis_pass: outcome.analysis_pass.max(1),
     };
     match results
         .iter_mut()
@@ -916,6 +995,39 @@ fn save_generation_result(
     {
         Some(existing) => *existing = stored,
         None => results.push(stored),
+    }
+    project_storage::replace_project_generation(&app, &project_id, &results)
+}
+
+#[tauri::command]
+fn save_generation_results(
+    app: AppHandle,
+    project_id: String,
+    outcomes: Vec<GenerationBatchOutcome>,
+) -> Result<(), String> {
+    if outcomes.is_empty() {
+        return Ok(());
+    }
+    let mut results = project_storage::load_project_generation(&app, &project_id)?;
+    for outcome in outcomes {
+        let stored = naming_generation::StoredGenerationOutcome {
+            entry_address: outcome.entry_address.clone(),
+            suggested_name: outcome.suggested_name,
+            reasoning: outcome.reasoning,
+            provider_label: outcome.provider_label,
+            confidence: outcome.confidence,
+            evidence: outcome.evidence,
+            context_complete: true,
+            agent_version: naming_generation::NAMING_GENERATION_VERSION,
+            analysis_pass: outcome.analysis_pass.max(1),
+        };
+        match results
+            .iter_mut()
+            .find(|existing| existing.entry_address == outcome.entry_address)
+        {
+            Some(existing) => *existing = stored,
+            None => results.push(stored),
+        }
     }
     project_storage::replace_project_generation(&app, &project_id, &results)
 }
@@ -1428,8 +1540,10 @@ pub fn run() {
             get_arbitration_results,
             generate_identification_suggestion,
             generate_identification_suggestions,
+            refine_identification_suggestions,
             get_semantic_analysis_order,
             save_generation_result,
+            save_generation_results,
             get_generation_results,
             get_managed_setup_plan,
             install_managed_setup,
@@ -1489,7 +1603,7 @@ mod tests {
             ("agent C".to_owned(), generated(Some("encrypt_buffer"), 82)),
         ];
 
-        let result = synthesize_generation_answers("0x1", &answers);
+        let result = synthesize_generation_answers("0x1", &answers, 1);
 
         assert!(matches!(
             result.suggested_name.as_deref(),
@@ -1509,7 +1623,7 @@ mod tests {
             ("agent B".to_owned(), generated(None, 0)),
         ];
 
-        let result = synthesize_generation_answers("0x2", &answers);
+        let result = synthesize_generation_answers("0x2", &answers, 1);
 
         assert_eq!(result.suggested_name, None);
         assert_eq!(result.confidence, 0);

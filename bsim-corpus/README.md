@@ -64,6 +64,7 @@ working hashes but weak or absent names.
 .\scripts\build-xxhash.ps1
 .\scripts\build-zstd.ps1
 .\scripts\build-brotli.ps1
+.\scripts\build-msvc-runtime.ps1
 
 # 2. Analyze them and build the BSim database
 .\scripts\build-corpus-database.ps1 -GhidraInstallDir "C:\path\to\ghidra_12.x_PUBLIC"
@@ -84,6 +85,15 @@ matching correctly) before any decision to expand to more libraries,
 architectures, or compile profiles; zstd and brotli were added the same way
 and validated the same way — expand further only after checking the
 pipeline still holds.
+
+The local `build-msvc-runtime.ps1` target is intentionally different. It
+builds a local, `/MT`, symbol-rich reference executable from a small harness
+covering common CRT/STL families. This teaches BSim the exact MSVC/UCRT version
+installed on the user's machine, which is more useful for current Windows
+binaries than pretending those statically linked helpers belong to SQLite or
+zlib. Neither the generated executable nor its PDB is distributed; the local
+`toolchain.txt` records compiler provenance. Wrapper functions are prefixed
+`ra_reference_` so a match can never be mistaken for a Microsoft symbol.
 
 Brotli's hash-chain implementation is macro-templated into families of a
 dozen-plus near-identical functions per hash size (`HashTypeLengthH2`..

@@ -56,6 +56,11 @@ $libraries = @(
         Name = "brotli"
         ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\brotli"
         Program = "brotli.dll"
+    },
+    @{
+        Name = "msvc-runtime"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\msvc-runtime"
+        Program = "msvc-runtime-reference.exe"
     }
 )
 

@@ -240,6 +240,7 @@ interface GenerationOutcome {
   provider_label: string;
   confidence: number;
   evidence: string[];
+  analysis_pass?: number;
 }
 
 interface GenerationBatchOutcome extends GenerationOutcome {
@@ -2263,6 +2264,7 @@ interface ApplyRenamesResult {
               provider_label: stored.provider_label,
               confidence: stored.confidence ?? 0,
               evidence: stored.evidence ?? [],
+              analysis_pass: stored.analysis_pass ?? 1,
             },
           ]),
         );
@@ -3259,7 +3261,7 @@ interface ApplyRenamesResult {
         analysisProgress = {
           stage: "ai-naming",
           message: `Suggestions IA groupées : ${completed} / ${pending.length} fonctions…`,
-          completed_percent: 70 + Math.round(29 * completed / pending.length),
+          completed_percent: 70 + Math.round(19 * completed / pending.length),
         };
         for (const address of addresses) {
           generatingAddresses = new Set(generatingAddresses).add(address);
@@ -3270,6 +3272,8 @@ interface ApplyRenamesResult {
             .map(([entry_address, result]) => ({
               entry_address,
               name: result.suggested_name as string,
+              confidence: result.confidence,
+              source: result.provider_label,
             }));
           const results = await invoke<GenerationBatchOutcome[]>(
             "generate_identification_suggestions",
@@ -3278,16 +3282,14 @@ interface ApplyRenamesResult {
           const nextResults = new Map(generationResults);
           for (const result of results) {
             nextResults.set(result.entry_address, result);
-            if (activeProjectId) {
-              const projectId = activeProjectId;
-              void invoke("save_generation_result", {
-                projectId,
-                entryAddress: result.entry_address,
-                outcome: result,
-              }).catch((error) => console.error("Failed to persist generation result", error));
-            }
           }
           generationResults = nextResults;
+          if (activeProjectId) {
+            await invoke("save_generation_results", {
+              projectId: activeProjectId,
+              outcomes: results,
+            });
+          }
         } catch (batchError) {
           // Small local models occasionally return malformed JSON for a
           // multi-function answer. Preserve coverage by retrying only that
@@ -3304,6 +3306,104 @@ interface ApplyRenamesResult {
       }
     } finally {
       isBackgroundGenerating = false;
+    }
+  }
+
+  async function runBackgroundRefinement() {
+    const provisionalNames = [
+      ...[...arbitrationResults.entries()]
+        .filter(([, result]) => result.chosen_name !== null && result.confidence >= 65)
+        .map(([entry_address, result]) => ({
+          entry_address,
+          name: result.chosen_name as string,
+          confidence: result.confidence,
+          source: result.provider_label,
+        })),
+      ...[...generationResults.entries()]
+        .filter(([, result]) => result.suggested_name !== null && result.confidence >= 65)
+        .map(([entry_address, result]) => ({
+          entry_address,
+          name: result.suggested_name as string,
+          confidence: result.confidence,
+          source: result.provider_label,
+        })),
+    ];
+    const anchorAddresses = new Set(provisionalNames.map((item) => item.entry_address));
+    const connectedToAnchor = new Set<string>();
+    for (const func of importedExport?.functions ?? []) {
+      const targets = func.calls
+        .map((call) => call.target_address)
+        .filter((address): address is string => address !== null);
+      if (func.thunk_target_address) targets.push(func.thunk_target_address);
+      for (const target of targets) {
+        if (anchorAddresses.has(func.entry_address)) connectedToAnchor.add(target);
+        if (anchorAddresses.has(target)) connectedToAnchor.add(func.entry_address);
+      }
+    }
+    const pending = [...generationResults.entries()]
+      .filter(([entryAddress, result]) =>
+        (result.analysis_pass ?? 1) < 2 &&
+        ((result.suggested_name !== null && result.confidence < 65) ||
+          (result.suggested_name === null && connectedToAnchor.has(entryAddress))),
+      );
+    if (pending.length === 0) return;
+    const batchSize = 6;
+    for (let start = 0; start < pending.length; start += batchSize) {
+      const batch = pending.slice(start, start + batchSize);
+      analysisProgress = {
+        stage: "ai-refinement",
+        message: `Seconde passe contextuelle : ${Math.min(start + batch.length, pending.length)} / ${pending.length} fonctions…`,
+        completed_percent: 90 + Math.round(9 * Math.min(start + batch.length, pending.length) / pending.length),
+      };
+      const seeds = batch.map(([entry_address, result]) => ({
+        entry_address,
+        suggested_name: result.suggested_name,
+        confidence: result.confidence,
+        reasoning: result.reasoning,
+      }));
+      try {
+        const refined = await invoke<GenerationBatchOutcome[]>(
+          "refine_identification_suggestions",
+          { seeds, provisionalNames },
+        );
+        const nextResults = new Map(generationResults);
+        const persisted: GenerationBatchOutcome[] = [];
+        for (const result of refined) {
+          const previous = nextResults.get(result.entry_address);
+          const accepted = previous &&
+            (result.suggested_name === null || result.confidence < previous.confidence)
+            ? {
+                ...previous,
+                analysis_pass: 2,
+                evidence: [
+                  ...previous.evidence,
+                  "Passe contextuelle effectuée : aucune amélioration suffisamment solide.",
+                ],
+              }
+            : result;
+          nextResults.set(result.entry_address, accepted);
+          persisted.push({ ...accepted, entry_address: result.entry_address });
+        }
+        generationResults = nextResults;
+        if (activeProjectId) {
+          await invoke("save_generation_results", {
+            projectId: activeProjectId,
+            outcomes: persisted,
+          });
+        }
+      } catch (error) {
+        console.warn("Contextual refinement batch failed", error);
+        for (const [entryAddress, previous] of batch) {
+          generationErrors = new Map(generationErrors).set(
+            entryAddress,
+            `Seconde passe contextuelle indisponible : ${String(error)}`,
+          );
+          generationResults = new Map(generationResults).set(entryAddress, {
+            ...previous,
+            analysis_pass: 2,
+          });
+        }
+      }
     }
   }
 
@@ -3370,6 +3470,7 @@ interface ApplyRenamesResult {
       };
       await runBackgroundArbitration();
       await runBackgroundGeneration();
+      await runBackgroundRefinement();
       analysisProgress = {
         stage: "complete",
         message: "Reconnaissance et suggestions IA terminées.",
