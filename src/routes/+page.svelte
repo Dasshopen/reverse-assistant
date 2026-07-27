@@ -517,9 +517,9 @@ interface ApplyRenamesResult {
     threshold: number;
   };
   const prudenceProfiles: PrudenceProfile[] = [
-    { value: 5, label: "Exploratoire", shortDescription: "Davantage d'hypothèses, à relire", threshold: 55 },
-    { value: 7, label: "Équilibré", shortDescription: "Bon compromis couverture / preuves", threshold: 70 },
-    { value: 9, label: "Strict", shortDescription: "Plusieurs indices cohérents exigés", threshold: 86 },
+    { value: 5, label: "Exploratoire", shortDescription: "Hypothèses issues du pseudocode, à relire", threshold: 45 },
+    { value: 7, label: "Équilibré", shortDescription: "Au moins un indice indépendant attendu", threshold: 65 },
+    { value: 9, label: "Strict", shortDescription: "Plusieurs indices cohérents exigés", threshold: 80 },
     { value: 10, label: "Quasi certain", shortDescription: "Corroboration indépendante forte", threshold: 92 },
   ];
   let automaticPrudenceLevel = $state<PrudenceProfile["value"]>(7);
