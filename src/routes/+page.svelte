@@ -2232,7 +2232,7 @@ interface ApplyRenamesResult {
         );
         generationResults = new Map(
           storedGeneration
-            .filter((stored) => stored.context_complete && stored.agent_version >= 3)
+            .filter((stored) => stored.context_complete && stored.agent_version >= 4)
             .map((stored) => [
             stored.entry_address,
             {

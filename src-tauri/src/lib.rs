@@ -672,10 +672,7 @@ fn generate_identification_suggestions(
             Ok(mut results) => {
                 let followup_contexts = results
                     .iter()
-                    .filter(|item| {
-                        item.result.suggested_name.is_none()
-                            && !item.result.requested_tools.is_empty()
-                    })
+                    .filter(|item| !item.result.requested_tools.is_empty())
                     .filter_map(|item| {
                         let context = contexts
                             .iter()
@@ -718,7 +715,13 @@ fn generate_identification_suggestions(
                                         .iter_mut()
                                         .find(|item| item.entry_address == followup.entry_address)
                                     {
-                                        initial.result = followup.result;
+                                        // A failed final hypothesis must never erase a usable
+                                        // provisional one returned before the investigation.
+                                        if followup.result.suggested_name.is_some()
+                                            || initial.result.suggested_name.is_none()
+                                        {
+                                            initial.result = followup.result;
+                                        }
                                     }
                                 }
                             }
@@ -734,10 +737,17 @@ fn generate_identification_suggestions(
                     }
                 }
                 for item in results {
+                    let mut result = item.result;
+                    if let Some((_, context)) = contexts
+                        .iter()
+                        .find(|(address, _)| address == &item.entry_address)
+                    {
+                        naming_generation::calibrate_confidence(context, &mut result);
+                    }
                     by_address
                         .entry(item.entry_address)
                         .or_default()
-                        .push((secrets.label.clone(), item.result));
+                        .push((secrets.label.clone(), result));
                 }
             }
             Err(error) => errors.push(format!("{}: {error}", secrets.label)),
@@ -798,7 +808,7 @@ fn generate_identification_suggestion(
             .and_then(|response| naming_generation::parse_generation_response(&response))
         {
             Ok(mut result) => {
-                if result.suggested_name.is_none() && !result.requested_tools.is_empty() {
+                if !result.requested_tools.is_empty() {
                     match services::semantic_memory::execute_investigation_tools(
                         &export,
                         &entry_address,
@@ -820,7 +830,11 @@ fn generate_identification_suggestion(
                             }) {
                                 Ok(mut followups) => {
                                     if let Some(followup) = followups.pop() {
-                                        result = followup.result;
+                                        if followup.result.suggested_name.is_some()
+                                            || result.suggested_name.is_none()
+                                        {
+                                            result = followup.result;
+                                        }
                                     }
                                 }
                                 Err(error) => errors.push(format!(
@@ -834,6 +848,7 @@ fn generate_identification_suggestion(
                         }
                     }
                 }
+                naming_generation::calibrate_confidence(&context, &mut result);
                 answers.push((secrets.label, result));
             }
             Err(error) => errors.push(format!("{}: {error}", secrets.label)),

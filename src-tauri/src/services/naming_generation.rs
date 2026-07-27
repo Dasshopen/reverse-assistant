@@ -25,7 +25,7 @@ pub use crate::services::naming_arbitration::ArbitrationContext;
 
 /// Bumped independently from closed-set FunctionID arbitration so projects
 /// recompute only open-ended suggestions when the semantic agent changes.
-pub const NAMING_GENERATION_VERSION: u32 = 3;
+pub const NAMING_GENERATION_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerationContext {
@@ -80,6 +80,55 @@ pub struct GenerationResult {
     pub requested_tools: Vec<InvestigationTool>,
 }
 
+/// Small local models regularly report near-certainty for a plausible-sounding
+/// name even when their only evidence is a short body calling another generic
+/// function.  Confidence used by automatic rename must therefore be bounded by
+/// deterministic facts, not trusted verbatim from the model.
+pub fn calibrate_confidence(context: &GenerationContext, result: &mut GenerationResult) {
+    if result.suggested_name.is_none() {
+        result.confidence = 0;
+        return;
+    }
+
+    let facts = &context.semantic_facts;
+    let meaningful_neighbor = facts
+        .callers
+        .iter()
+        .chain(facts.callees.iter())
+        .any(|neighbor| !neighbor.is_generic_name);
+    let independent_signals = [
+        !facts.imported_symbols.is_empty(),
+        !facts.referenced_strings.is_empty(),
+        !facts.rtti_class_names.is_empty(),
+        meaningful_neighbor,
+        facts.is_entry_point,
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+
+    let mut cap = match independent_signals {
+        0 => 45,
+        1 => 65,
+        2 => 80,
+        3 => 90,
+        _ => 95,
+    };
+    let proposed = result.suggested_name.as_deref().unwrap_or_default();
+    let tokens = name_tokens(proposed);
+    let low_information = tokens.iter().any(|token| token == "data")
+        && !facts
+            .referenced_strings
+            .iter()
+            .any(|value| !value.is_empty())
+        && facts.imported_symbols.is_empty()
+        && facts.rtti_class_names.is_empty();
+    if low_information {
+        cap = cap.min(45);
+    }
+    result.confidence = result.confidence.min(cap);
+}
+
 const SYSTEM_PROMPT: &str =
     "Tu es l'etape NOMMAGE d'un agent local de reverse engineering. Tu dois d'abord decrire \
 le comportement observable de la fonction, puis seulement proposer un nom. Tu disposes d'une \
@@ -107,8 +156,8 @@ Prefere un nom descriptif prudent fonde sur l'action et l'objet reellement obser
 reasoning, commence par 'Role observe :'. Chaque evidence doit citer un element vraiment present \
 dans la fiche (appel, chaine, type ou instruction), jamais une impression generale.";
 
-const TOOL_PROTOCOL_PROMPT: &str = "Si la fiche ne suffit pas encore mais qu'une observation precise pourrait lever l'incertitude, \
-retourne suggested_name=null et demande au maximum deux outils read-only dans requested_tools. \
+const TOOL_PROTOCOL_PROMPT: &str = "Si une observation precise peut ameliorer ton hypothese, \
+conserve tout de meme une proposition provisoire dans suggested_name et demande au maximum deux outils read-only dans requested_tools. \
 Valeurs permises : caller_context, callee_context, two_hop_graph, string_references, type_usages. \
 Ne demande un outil que s'il peut repondre a une question explicite dans reasoning. Si la fiche suffit, \
 requested_tools doit etre vide. L'application executera les outils puis te demandera une decision finale.";
@@ -255,11 +304,15 @@ fn format_context(context: &GenerationContext) -> String {
 
 const MAX_BATCH_CODE_CHARS: usize = 4_500;
 
-fn generation_result_schema(entry_address: Option<&str>) -> Value {
+fn generation_result_schema(entry_address: Option<&str>, executable_body: bool) -> Value {
     let mut properties = serde_json::Map::from_iter([
         (
             "suggested_name".to_owned(),
-            json!({ "anyOf": [{"type":"string"}, {"type":"null"}] }),
+            if executable_body {
+                json!({ "type":"string", "minLength":1 })
+            } else {
+                json!({ "anyOf": [{"type":"string", "minLength":1}, {"type":"null"}] })
+            },
         ),
         (
             "confidence".to_owned(),
@@ -307,10 +360,12 @@ fn generation_result_schema(entry_address: Option<&str>) -> Value {
     })
 }
 
-fn generation_batch_schema(addresses: &[String]) -> Value {
-    let items = addresses
+fn generation_batch_schema(contexts: &[(String, GenerationContext)]) -> Value {
+    let items = contexts
         .iter()
-        .map(|address| generation_result_schema(Some(address)))
+        .map(|(address, context)| {
+            generation_result_schema(Some(address), context.base.decompiled_code.is_some())
+        })
         .collect::<Vec<_>>();
     json!({
         "type":"object",
@@ -318,8 +373,8 @@ fn generation_batch_schema(addresses: &[String]) -> Value {
         "properties":{
             "results":{
                 "type":"array",
-                "minItems":addresses.len(),
-                "maxItems":addresses.len(),
+                "minItems":contexts.len(),
+                "maxItems":contexts.len(),
                 "prefixItems":items
             }
         },
@@ -341,10 +396,6 @@ pub fn build_generation_batch_request(
     contexts: &[(String, GenerationContext)],
     model: &str,
 ) -> ChatCompletionRequest {
-    let addresses = contexts
-        .iter()
-        .map(|(address, _)| address.clone())
-        .collect::<Vec<_>>();
     let items = contexts
         .iter()
         .map(|(address, context)| format!("ADRESSE {address}\n{}", format_batch_context(context)))
@@ -366,7 +417,7 @@ Il doit y avoir exactement une entree par adresse, dans le meme ordre."
         ],
         temperature: Some(0.0),
         require_json_object: true,
-        response_schema: Some(generation_batch_schema(&addresses)),
+        response_schema: Some(generation_batch_schema(contexts)),
     }
 }
 
@@ -392,10 +443,6 @@ pub fn build_generation_followup_batch_request(
     contexts: &[(String, GenerationContext, Vec<ToolFinding>)],
     model: &str,
 ) -> ChatCompletionRequest {
-    let addresses = contexts
-        .iter()
-        .map(|(address, _, _)| address.clone())
-        .collect::<Vec<_>>();
     let items = contexts
         .iter()
         .map(|(address, context, findings)| {
@@ -427,7 +474,12 @@ requested_tools doit obligatoirement etre vide et il doit y avoir exactement une
         ],
         temperature: Some(0.0),
         require_json_object: true,
-        response_schema: Some(generation_batch_schema(&addresses)),
+        response_schema: Some(generation_batch_schema(
+            &contexts
+                .iter()
+                .map(|(address, context, _)| (address.clone(), context.clone()))
+                .collect::<Vec<_>>(),
+        )),
     }
 }
 
@@ -553,7 +605,10 @@ pub fn build_generation_request(context: &GenerationContext, model: &str) -> Cha
         ],
         temperature: Some(0.0),
         require_json_object: true,
-        response_schema: Some(generation_result_schema(None)),
+        response_schema: Some(generation_result_schema(
+            None,
+            context.base.decompiled_code.is_some(),
+        )),
     }
 }
 
@@ -854,6 +909,60 @@ mod tests {
                 ["const"],
             "0x2"
         );
+        assert_eq!(
+            schema["properties"]["results"]["prefixItems"][0]["properties"]["suggested_name"]
+                ["type"],
+            "string",
+            "a decompiled function must produce a hypothesis; uncertainty belongs in confidence"
+        );
+    }
+
+    #[test]
+    fn only_a_function_without_pseudocode_may_return_a_null_name() {
+        let mut context = sample_context();
+        context.base.decompiled_code = None;
+        context.semantic_facts.decompiled = false;
+        let request =
+            build_generation_batch_request(&[("0x1".to_owned(), context)], "qwen2.5-coder:7b");
+        let schema = request.response_schema.expect("batch schema");
+        assert!(
+            schema["properties"]["results"]["prefixItems"][0]["properties"]["suggested_name"]
+                ["anyOf"]
+                .is_array()
+        );
+    }
+
+    #[test]
+    fn model_overconfidence_is_capped_when_no_independent_signal_exists() {
+        let mut context = sample_context();
+        context.semantic_facts.callers.clear();
+        context.semantic_facts.callees.clear();
+        context.semantic_facts.imported_symbols.clear();
+        context.semantic_facts.referenced_strings.clear();
+        context.semantic_facts.rtti_class_names.clear();
+        let mut result = GenerationResult {
+            suggested_name: Some("initializeAndProcessData".to_owned()),
+            reasoning: "Role observe : initialise puis transmet des donnees.".to_owned(),
+            confidence: 95,
+            evidence: vec!["boucle de remise a zero".to_owned()],
+            requested_tools: Vec::new(),
+        };
+        calibrate_confidence(&context, &mut result);
+        assert_eq!(result.confidence, 45);
+    }
+
+    #[test]
+    fn several_independent_facts_allow_but_do_not_invent_high_confidence() {
+        let context = sample_context();
+        let mut result = GenerationResult {
+            suggested_name: Some("open_file".to_owned()),
+            reasoning: "Role observe : ouvre un fichier.".to_owned(),
+            confidence: 96,
+            evidence: vec!["CreateFileA".to_owned(), "rb".to_owned()],
+            requested_tools: Vec::new(),
+        };
+        calibrate_confidence(&context, &mut result);
+        assert_eq!(result.confidence, 90);
     }
 
     #[test]
