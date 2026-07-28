@@ -11,6 +11,8 @@ automatically, elapsed time and model-call count. The evaluator reports:
 - proposal precision;
 - automatic-rename precision;
 - unsafe automatic names;
+- exact-symbol recovery and optional human-reviewed semantic usefulness as
+  two separate measurements;
 - abstentions;
 - elapsed time and model calls.
 
@@ -32,7 +34,8 @@ Minimal suite shape:
     "confidence": 80,
     "automatically_applied": true,
     "elapsed_ms": 1250,
-    "model_calls": 1
+    "model_calls": 1,
+    "semantic_review": "useful"
   }]
 }
 ```
@@ -61,8 +64,9 @@ serialized fixture before writing it.
 `cargo run --manifest-path src-tauri/Cargo.toml --bin fauxware-benchmark`
 replays the exact pipeline `generate_identification_suggestion` uses --
 single pass, at most one read-only tool follow-up, then
-`calibrate_confidence` -- against a local Ollama endpoint (qwen2.5-coder:7b)
-and reports the resulting suite.
+one contradictory name-verification pass and deterministic Rust validation
+-- against a local Ollama endpoint (qwen2.5-coder:7b) and reports the resulting
+suite.
 
 First real result (qwen2.5-coder:7b, 2026-07-27):
 
@@ -91,5 +95,32 @@ Two distinct things are visible in this one run and should not be conflated:
    rule ("AI confidence is a signal, not ground truth") exists to prevent,
    and this first run shows it is not yet doing so for pure open generation
    (as opposed to arbitration's closed-set case, which this run does not
-   exercise). Not fixed here -- flagged for a deliberate decision before any
-   further generation-agent work.
+   exercise).
+
+## Contradictory-verifier result
+
+The open-generation pipeline now keeps the proposed name, but no longer lets
+generic context richness certify its wording. A second, adversarial model pass
+must map each meaningful name token to a concrete citation. Rust then checks
+that every cited string, import, caller/callee, pseudocode fragment, constant,
+global or callsite value actually exists in the deterministic context. A
+fabricated citation is discarded. If the verifier fails or does not justify
+the full name, the suggestion remains visible for manual review but cannot
+reach the default 65% automatic threshold.
+
+Real rerun on 2026-07-28 (local qwen2.5-coder:7b; model wording can vary):
+
+| address | expected | suggested | calibrated confidence | auto-applied? |
+|---|---|---|---|---|
+| 0x400664 | `authenticate` | `check_sneaky_or_file_content` | 55% | no |
+| 0x4006ed | `accepted` | `display_admin_welcome_message` | 60% | no |
+| 0x4006fd | `rejected` | `terminate_and_notify` | 30% | no |
+
+Coverage stayed at 100%, while unsafe automatic renames fell from 3/3 to 0/3.
+The run also exposed why deterministic validation is necessary: the local
+verifier sometimes put a complete identifier in a single `name_token`, cited
+an invented sentence, used the wrong evidence kind, or contradicted an actual
+`exit` import. None of those model mistakes raised confidence. Exact-symbol
+precision remains 0% for these paraphrases; semantic usefulness is recorded
+only when a human explicitly sets `semantic_review`, never guessed by the
+evaluator.

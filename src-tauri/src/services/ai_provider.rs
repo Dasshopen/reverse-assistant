@@ -160,7 +160,17 @@ impl ChatCompletionProvider for OpenAiCompatibleProvider {
 
         let response = call
             .send_string(&body.to_string())
-            .map_err(|error| format!("chat completion request to '{url}' failed: {error}"))?;
+            .map_err(|error| match error {
+                ureq::Error::Status(status, response) => {
+                    let details = response
+                        .into_string()
+                        .unwrap_or_else(|_| "response body unavailable".to_owned());
+                    format!(
+                        "chat completion request to '{url}' failed with HTTP {status}: {details}"
+                    )
+                }
+                other => format!("chat completion request to '{url}' failed: {other}"),
+            })?;
         let body_text = response.into_string().map_err(|error| {
             format!("failed to read the chat completion response body from '{url}': {error}")
         })?;

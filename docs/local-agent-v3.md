@@ -33,7 +33,11 @@ surface. The upstream review is recorded in `docs/reva-security-review.md`.
 5. Let the local model request a small number of read-only investigations.
 6. Produce an observable role before proposing a symbol name.
 7. Require observable evidence and an explicit uncertainty in the final answer.
-8. Keep UI acceptance thresholds independent from model self-confidence.
+8. Run one contradictory verifier over the generated batch. It must bind each
+   meaningful word in the proposed identifier to an observable citation.
+9. Validate every verifier citation against the deterministic Rust fact sheet;
+   missing or invented facts cannot raise confidence.
+10. Keep UI acceptance thresholds independent from model self-confidence.
 
 The deterministic evidence index additionally records bounded constants,
 global identifiers, outgoing calls with their arguments and arguments observed
@@ -46,8 +50,8 @@ proofs.
 ## Budgets
 
 - no more than two read-only tools and one follow-up for one function;
-- three functions at most per local-model batch, ordered by semantic anchors;
-- generation outcomes are versioned independently (v3), cached in the local
+- six functions at most per local-model batch, ordered by semantic anchors;
+- generation outcomes are versioned independently (protocol version 7), cached in the local
   project archive and invalidated when the agent protocol changes;
 - failed or interrupted work remains resumable through the existing
   per-address project cache;

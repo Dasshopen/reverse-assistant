@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticReview {
+    Useful,
+    Incorrect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NamingBenchmarkCase {
@@ -16,6 +23,10 @@ pub struct NamingBenchmarkCase {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub model_calls: u32,
+    /// Optional human review of behavioral usefulness. This is deliberately
+    /// separate from exact symbol recovery and is never inferred by code.
+    #[serde(default)]
+    pub semantic_review: Option<SemanticReview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +51,10 @@ pub struct NamingBenchmarkReport {
     pub proposal_coverage_per_mille: u16,
     pub proposal_precision_per_mille: u16,
     pub automatic_precision_per_mille: u16,
+    pub semantically_reviewed: usize,
+    pub semantically_useful: usize,
+    pub semantically_incorrect: usize,
+    pub semantic_precision_per_mille: Option<u16>,
     pub elapsed_ms: u64,
     pub model_calls: u32,
 }
@@ -119,6 +134,16 @@ pub fn evaluate_suite(suite: &NamingBenchmarkSuite) -> Result<NamingBenchmarkRep
         .filter(|case| case.automatically_applied && proposal_is_correct(case))
         .count();
     let total_functions = suite.cases.len();
+    let semantically_reviewed = suite
+        .cases
+        .iter()
+        .filter(|case| case.semantic_review.is_some())
+        .count();
+    let semantically_useful = suite
+        .cases
+        .iter()
+        .filter(|case| case.semantic_review == Some(SemanticReview::Useful))
+        .count();
 
     Ok(NamingBenchmarkReport {
         suite_name: suite.name.clone(),
@@ -136,6 +161,11 @@ pub fn evaluate_suite(suite: &NamingBenchmarkSuite) -> Result<NamingBenchmarkRep
             correct_automatic_names,
             automatically_applied,
         ),
+        semantically_reviewed,
+        semantically_useful,
+        semantically_incorrect: semantically_reviewed.saturating_sub(semantically_useful),
+        semantic_precision_per_mille: (semantically_reviewed > 0)
+            .then(|| ratio_per_mille(semantically_useful, semantically_reviewed)),
         elapsed_ms: suite.cases.iter().map(|case| case.elapsed_ms).sum(),
         model_calls: suite.cases.iter().map(|case| case.model_calls).sum(),
     })
@@ -158,6 +188,7 @@ mod tests {
             automatically_applied,
             elapsed_ms: 10,
             model_calls: 1,
+            semantic_review: None,
         }
     }
 
@@ -199,5 +230,19 @@ mod tests {
             cases: vec![case("main", None, true)],
         };
         assert!(evaluate_suite(&suite).is_err());
+    }
+
+    #[test]
+    fn human_semantic_review_is_reported_without_weakening_exact_matching() {
+        let mut paraphrase = case("authenticate", Some("validate_credentials"), false);
+        paraphrase.semantic_review = Some(SemanticReview::Useful);
+        let suite = NamingBenchmarkSuite {
+            name: "semantic-review".to_owned(),
+            cases: vec![paraphrase],
+        };
+        let report = evaluate_suite(&suite).expect("valid suite");
+        assert_eq!(report.correct_proposals, 0);
+        assert_eq!(report.semantically_useful, 1);
+        assert_eq!(report.semantic_precision_per_mille, Some(1_000));
     }
 }

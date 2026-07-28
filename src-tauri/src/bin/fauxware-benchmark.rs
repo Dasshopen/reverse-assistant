@@ -9,7 +9,9 @@
 use std::time::Instant;
 
 use reverse_assistant_lib::models::ghidra_export::GhidraExport;
-use reverse_assistant_lib::services::ai_provider::{ChatCompletionProvider, OpenAiCompatibleProvider};
+use reverse_assistant_lib::services::ai_provider::{
+    ChatCompletionProvider, OpenAiCompatibleProvider,
+};
 use reverse_assistant_lib::services::naming_benchmark::{
     evaluate_suite, NamingBenchmarkCase, NamingBenchmarkSuite,
 };
@@ -85,7 +87,42 @@ fn run_one(
         }
     }
 
-    naming_generation::calibrate_confidence(&context, &mut result);
+    let verification_candidates = vec![(
+        target.entry_address.to_owned(),
+        context.clone(),
+        result.clone(),
+    )];
+    let verification_request =
+        naming_generation::build_name_verification_batch_request(&verification_candidates, MODEL);
+    model_calls += 1;
+    match provider
+        .complete(&verification_request)
+        .and_then(|response| {
+            naming_generation::parse_name_verification_batch_response(
+                &response,
+                std::slice::from_ref(&target.entry_address.to_owned()),
+            )
+        }) {
+        Ok(verifications) => {
+            println!(
+                "  verification brute: {}",
+                serde_json::to_string(&verifications[0])
+                    .expect("a verification result must serialize")
+            );
+            naming_generation::calibrate_confidence_with_verification(
+                &context,
+                &mut result,
+                &verifications[0],
+            )
+        }
+        Err(error) => {
+            eprintln!(
+                "{}: contradictory verifier failed ({error}); using conservative confidence",
+                target.entry_address
+            );
+            naming_generation::calibrate_confidence(&context, &mut result);
+        }
+    }
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
     println!(
@@ -108,6 +145,7 @@ fn run_one(
             && result.confidence >= AUTOMATIC_THRESHOLD,
         elapsed_ms,
         model_calls,
+        semantic_review: None,
     })
 }
 

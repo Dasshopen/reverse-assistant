@@ -617,6 +617,76 @@ fn synthesize_generation_answers(
     }
 }
 
+fn verify_and_calibrate_generation_batch(
+    provider: &services::ai_provider::OpenAiCompatibleProvider,
+    model: &str,
+    contexts: &[(String, naming_generation::GenerationContext)],
+    results: &mut [naming_generation::GenerationBatchResult],
+) -> Result<(), String> {
+    if let Some(item) = results.iter().find(|item| {
+        !contexts
+            .iter()
+            .any(|(address, _)| address == &item.entry_address)
+    }) {
+        return Err(format!(
+            "no deterministic context exists for verifier result '{}'",
+            item.entry_address
+        ));
+    }
+    let candidates = results
+        .iter()
+        .filter(|item| item.result.suggested_name.is_some())
+        .filter_map(|item| {
+            let context = contexts
+                .iter()
+                .find(|(address, _)| address == &item.entry_address)?
+                .1
+                .clone();
+            Some((item.entry_address.clone(), context, item.result.clone()))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        for item in results {
+            if let Some((_, context)) = contexts
+                .iter()
+                .find(|(address, _)| address == &item.entry_address)
+            {
+                naming_generation::calibrate_confidence(context, &mut item.result);
+            }
+        }
+        return Ok(());
+    }
+    let expected = candidates
+        .iter()
+        .map(|(address, _, _)| address.clone())
+        .collect::<Vec<_>>();
+    let request = naming_generation::build_name_verification_batch_request(&candidates, model);
+    let verifications = provider.complete(&request).and_then(|response| {
+        naming_generation::parse_name_verification_batch_response(&response, &expected)
+    })?;
+    for item in results {
+        let Some((_, context)) = contexts
+            .iter()
+            .find(|(address, _)| address == &item.entry_address)
+        else {
+            continue;
+        };
+        if let Some(verification) = verifications
+            .iter()
+            .find(|verification| verification.entry_address == item.entry_address)
+        {
+            naming_generation::calibrate_confidence_with_verification(
+                context,
+                &mut item.result,
+                verification,
+            );
+        } else {
+            naming_generation::calibrate_confidence(context, &mut item.result);
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command(async)]
 fn generate_identification_suggestions(
     app: AppHandle,
@@ -736,18 +806,30 @@ fn generate_identification_suggestions(
                         errors.push(format!("{} (investigation tools): {error}", secrets.label))
                     }
                 }
-                for item in results {
-                    let mut result = item.result;
-                    if let Some((_, context)) = contexts
-                        .iter()
-                        .find(|(address, _)| address == &item.entry_address)
-                    {
-                        naming_generation::calibrate_confidence(context, &mut result);
+                if let Err(error) = verify_and_calibrate_generation_batch(
+                    &provider,
+                    &secrets.model,
+                    &contexts,
+                    &mut results,
+                ) {
+                    errors.push(format!(
+                        "{} (contradictory verifier): {error}",
+                        secrets.label
+                    ));
+                    for item in &mut results {
+                        if let Some((_, context)) = contexts
+                            .iter()
+                            .find(|(address, _)| address == &item.entry_address)
+                        {
+                            naming_generation::calibrate_confidence(context, &mut item.result);
+                        }
                     }
+                }
+                for item in results {
                     by_address
                         .entry(item.entry_address)
                         .or_default()
-                        .push((secrets.label.clone(), result));
+                        .push((secrets.label.clone(), item.result));
                 }
             }
             Err(error) => errors.push(format!("{}: {error}", secrets.label)),
@@ -831,19 +913,41 @@ fn refine_identification_suggestions(
         .map(|seed| seed.entry_address.clone())
         .collect::<Vec<_>>();
     let response = provider.complete(&request)?;
-    let results = naming_generation::parse_generation_batch_response(&response, &expected)?;
+    let mut results = naming_generation::parse_generation_batch_response(&response, &expected)?;
+    let verification_contexts = contexts
+        .iter()
+        .map(|(address, context, _)| (address.clone(), context.clone()))
+        .collect::<Vec<_>>();
+    if let Err(error) = verify_and_calibrate_generation_batch(
+        &provider,
+        &provider_secrets.model,
+        &verification_contexts,
+        &mut results,
+    ) {
+        eprintln!(
+            "{} contradictory verifier failed during refinement: {error}",
+            provider_secrets.label
+        );
+        for item in &mut results {
+            if let Some((_, context)) = verification_contexts
+                .iter()
+                .find(|(address, _)| address == &item.entry_address)
+            {
+                naming_generation::calibrate_confidence(context, &mut item.result);
+            }
+        }
+    }
     results
         .into_iter()
         .map(|item| {
-            let context = contexts
+            let _context = contexts
                 .iter()
                 .find(|(address, _, _)| address == &item.entry_address)
                 .map(|(_, context, _)| context)
                 .ok_or_else(|| {
                     format!("no refinement context exists for '{}'", item.entry_address)
                 })?;
-            let mut result = item.result;
-            naming_generation::calibrate_confidence(context, &mut result);
+            let result = item.result;
             Ok(GenerationBatchOutcome {
                 entry_address: item.entry_address,
                 suggested_name: result.suggested_name,
@@ -941,7 +1045,26 @@ fn generate_identification_suggestion(
                         }
                     }
                 }
-                naming_generation::calibrate_confidence(&context, &mut result);
+                let mut batch = vec![naming_generation::GenerationBatchResult {
+                    entry_address: entry_address.clone(),
+                    result,
+                }];
+                if let Err(error) = verify_and_calibrate_generation_batch(
+                    &provider,
+                    &secrets.model,
+                    &[(entry_address.clone(), context.clone())],
+                    &mut batch,
+                ) {
+                    errors.push(format!(
+                        "{} (contradictory verifier): {error}",
+                        secrets.label
+                    ));
+                    naming_generation::calibrate_confidence(&context, &mut batch[0].result);
+                }
+                let result = batch
+                    .pop()
+                    .expect("the single-function verification batch keeps its item")
+                    .result;
                 answers.push((secrets.label, result));
             }
             Err(error) => errors.push(format!("{}: {error}", secrets.label)),
