@@ -149,7 +149,7 @@ fn main() -> Result<(), String> {
         buckets[result.confidence as usize] += 1;
         if result.confidence >= 65 && examples.len() < 20 {
             examples.push((outcome.entry_address, name, result.confidence));
-        } else if result.confidence == 60 && partial_examples.len() < 100 {
+        } else if result.confidence <= 60 && partial_examples.len() < 160 {
             let summary = result
                 .evidence
                 .iter()
@@ -184,7 +184,7 @@ fn main() -> Result<(), String> {
     for (address, name, confidence) in examples {
         println!("  {address} -> {name} ({confidence}%)");
     }
-    println!("examples blocked at 60%:");
+    println!("examples blocked at 60% or below:");
     for (address, name, summary, imports, strings, callees) in partial_examples {
         println!(
             "  {address} -> {name} | {summary} | imports={imports:?} strings={strings:?} callees={callees:?}"

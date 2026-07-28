@@ -938,7 +938,12 @@ interface ApplyRenamesResult {
   let generationErrors = $state(new Map<string, string>());
   let generatingAddresses = $state(new Set<string>());
   let isBackgroundGenerating = $state(false);
+  let isBackgroundRefining = $state(false);
   let isBackgroundAiRunning = $state(false);
+
+  let generationRefinementPending = $derived.by(
+    () => generationRefinementPlan().pending.length,
+  );
 
   // Ghidra's bundled FunctionID databases already discard matches below
   // 14.6. Keep that native threshold, then add the more important unique-name
@@ -3330,7 +3335,7 @@ interface ApplyRenamesResult {
     await runBackgroundGeneration();
   }
 
-  async function runBackgroundRefinement() {
+  function generationRefinementPlan() {
     const provisionalNames = [
       ...[...arbitrationResults.entries()]
         .filter(([, result]) => result.chosen_name !== null && result.confidence >= 65)
@@ -3367,6 +3372,14 @@ interface ApplyRenamesResult {
         ((result.suggested_name !== null && result.confidence < 65) ||
           (result.suggested_name === null && connectedToAnchor.has(entryAddress))),
       );
+    return { provisionalNames, pending };
+  }
+
+  async function runBackgroundRefinement() {
+    if (isBackgroundRefining) return;
+    isBackgroundRefining = true;
+    try {
+    const { provisionalNames, pending } = generationRefinementPlan();
     if (pending.length === 0) return;
     const batchSize = 6;
     for (let start = 0; start < pending.length; start += batchSize) {
@@ -3425,6 +3438,29 @@ interface ApplyRenamesResult {
           });
         }
       }
+    }
+    } finally {
+      isBackgroundRefining = false;
+    }
+  }
+
+  async function resumeGenerationVerification(): Promise<void> {
+    if (isBackgroundAiRunning || isBackgroundRefining || generationRefinementPending === 0) return;
+    if (!aiProviders.some((provider) => provider.enabled)) {
+      analyzeError = "Aucun fournisseur IA n'est activé dans les Paramètres.";
+      return;
+    }
+    analysisProgressVisible = true;
+    analysisProgressMinimized = true;
+    try {
+      await runBackgroundRefinement();
+      analysisProgress = {
+        stage: "complete",
+        message: "Seconde vérification IA terminée.",
+        completed_percent: 100,
+      };
+    } catch (error) {
+      analyzeError = `La seconde vérification IA a échoué : ${String(error)}`;
     }
   }
 
@@ -5334,6 +5370,20 @@ interface ApplyRenamesResult {
           </section>
           {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
           {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
+
+          {#if generationRefinementPending > 0}
+            <section class="identification-verification-resume">
+              <div>
+                <strong>Vérification IA incomplète : {generationRefinementPending} fonction(s) restante(s)</strong>
+                <span>Le total « à vérifier » est provisoire tant que la seconde passe contextuelle n'est pas terminée. La reprise conserve tous les résultats déjà contrôlés.</span>
+              </div>
+              <button
+                type="button"
+                disabled={isBackgroundAiRunning || isBackgroundRefining}
+                onclick={resumeGenerationVerification}
+              >{isBackgroundRefining ? "Vérification en cours…" : "Reprendre la vérification"}</button>
+            </section>
+          {/if}
 
           {#if automaticRenameCandidatesWithEvidence.length > 0}
           <section class="automatic-choice-preview">
@@ -9702,6 +9752,27 @@ interface ApplyRenamesResult {
   .automatic-rename-panel > button { flex: 0 0 auto; padding: 0.5rem 0.7rem; background: #6d28d9; color: white; font-size: 0.66rem; }
   .automatic-rename-panel > button:hover:not(:disabled) { background: #7c3aed; }
   .automatic-rename-panel .prudence-options button:hover:not(.active) { background: #17263d; color: #d7e1ef; }
+  .identification-verification-resume {
+    margin: 0 0.8rem 0.65rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid #31577b;
+    border-radius: 0.55rem;
+    background: #0c1b2d;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .identification-verification-resume > div { display: grid; gap: 0.2rem; }
+  .identification-verification-resume strong { color: #67e8f9; font-size: 0.74rem; }
+  .identification-verification-resume span { color: #9db0c8; font-size: 0.63rem; }
+  .identification-verification-resume button {
+    flex: 0 0 auto;
+    background: #155e75;
+    color: #ecfeff;
+    font-size: 0.66rem;
+  }
+  .identification-verification-resume button:hover:not(:disabled) { background: #0e7490; }
 
   .automatic-choice-preview {
     border: 1px solid #22324a;
