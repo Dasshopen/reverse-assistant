@@ -37,7 +37,17 @@ surface. The upstream review is recorded in `docs/reva-security-review.md`.
    meaningful word in the proposed identifier to an observable citation.
 9. Validate every verifier citation against the deterministic Rust fact sheet;
    missing or invented facts cannot raise confidence.
-10. Keep UI acceptance thresholds independent from model self-confidence.
+10. Derive a small, audited behavior vocabulary from exact APIs and literals
+    (for example `GetEnvironmentStringsW` -> `environment_variables_get_set`)
+    so local-model synonyms can be checked without trusting its prose.
+11. Keep UI acceptance thresholds independent from model self-confidence.
+
+Every verifier source now has a stable catalogue identifier (`import:0`,
+`string:2`, `behavior:1`, etc.). The model cites that identifier and Rust
+resolves it back to the original fact; a free-form or stale citation cannot
+raise confidence. Imports, callees, callsites, constants and derived behavior
+labels remain one machine-code evidence family, so two views of the same API
+call are never counted as two independent confirmations.
 
 The deterministic evidence index additionally records bounded constants,
 global identifiers, outgoing calls with their arguments and arguments observed
@@ -51,7 +61,7 @@ proofs.
 
 - no more than two read-only tools and one follow-up for one function;
 - six functions at most per local-model batch, ordered by semantic anchors;
-- generation outcomes are versioned independently (protocol version 7), cached in the local
+- generation outcomes are versioned independently (protocol version 8), cached in the local
   project archive and invalidated when the agent protocol changes;
 - failed or interrupted work remains resumable through the existing
   per-address project cache;

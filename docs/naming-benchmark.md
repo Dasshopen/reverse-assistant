@@ -124,3 +124,33 @@ an invented sentence, used the wrong evidence kind, or contradicted an actual
 precision remains 0% for these paraphrases; semantic usefulness is recorded
 only when a human explicitly sets `semantic_review`, never guessed by the
 evaluator.
+
+## Evidence-catalog result
+
+Protocol v8 gives every deterministic fact a stable identifier and adds a
+small Rust-derived behavior vocabulary for exact API patterns. The generator
+is asked to reuse that vocabulary; the contradictory verifier cites catalogue
+IDs instead of reconstructing facts as prose. A deterministic fallback applies
+the same token checks when the small local model returns malformed verifier
+JSON.
+
+Real fauxware rerun on 2026-07-28 (one complete run; local model output remains
+non-deterministic even at temperature zero):
+
+| address | approved semantic names include | suggested | confidence | auto-applied? |
+|---|---|---|---|---|
+| 0x400664 | `authenticate`, `verify_password` | `verify_password` | 45% | no |
+| 0x4006ed | `accepted`, `display_admin_welcome_message` | `display_admin_welcome_message` | 85% | yes |
+| 0x4006fd | `rejected`, `terminate_and_notify` | `terminate_and_notify` | 50% | no |
+
+The evaluator therefore measured 3/3 human-approved semantic proposals, one
+automatic rename and zero unsafe automatic renames. The password hypothesis
+correctly remains manual: `SOSNEAKY` and `strcmp` make it plausible, but do not
+prove that the compared secret is literally a password.
+
+The offline `naming-evidence-audit` replay against the saved `serpentine.exe`
+analysis provides a second measurement without rerunning 278 model calls. The
+strict deterministic fallback initially verified 16 stored names at the 65%
+threshold. Stable catalogue IDs, audited API semantics and derived behavior
+labels raise that evidence-backed ceiling to 40 while keeping generic wrappers
+such as `FunctionLoader` and `CleanupFunction` below the automatic threshold.

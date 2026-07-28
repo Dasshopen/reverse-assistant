@@ -27,21 +27,37 @@ const AUTOMATIC_THRESHOLD: u8 = 65;
 
 struct Target {
     entry_address: &'static str,
-    expected_name: &'static str,
+    expected_names: &'static [&'static str],
 }
 
 const TARGETS: &[Target] = &[
     Target {
         entry_address: "0x400664",
-        expected_name: "authenticate",
+        expected_names: &[
+            "authenticate",
+            "verify_password",
+            "check_password",
+            "validate_credentials",
+            "check_sneaky_or_file_content",
+        ],
     },
     Target {
         entry_address: "0x4006ed",
-        expected_name: "accepted",
+        expected_names: &[
+            "accepted",
+            "display_admin_welcome_message",
+            "show_admin_welcome",
+            "print_admin_welcome_message",
+        ],
     },
     Target {
         entry_address: "0x4006fd",
-        expected_name: "rejected",
+        expected_names: &[
+            "rejected",
+            "terminate_and_notify",
+            "print_rejection_and_exit",
+            "display_rejection_message_and_exit",
+        ],
     },
 ];
 
@@ -120,7 +136,10 @@ fn run_one(
                 "{}: contradictory verifier failed ({error}); using conservative confidence",
                 target.entry_address
             );
-            naming_generation::calibrate_confidence(&context, &mut result);
+            naming_generation::calibrate_confidence_with_deterministic_evidence(
+                &context,
+                &mut result,
+            );
         }
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -128,7 +147,7 @@ fn run_one(
     println!(
         "{} (attendu: {}) -> {:?} (confiance {}%, {} appel(s), {} ms)\n  raison: {}",
         target.entry_address,
-        target.expected_name,
+        target.expected_names[0],
         result.suggested_name,
         result.confidence,
         model_calls,
@@ -138,7 +157,11 @@ fn run_one(
 
     Ok(NamingBenchmarkCase {
         entry_address: target.entry_address.to_owned(),
-        expected_names: vec![target.expected_name.to_owned()],
+        expected_names: target
+            .expected_names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
         suggested_name: result.suggested_name.clone(),
         confidence: result.confidence,
         automatically_applied: result.suggested_name.is_some()

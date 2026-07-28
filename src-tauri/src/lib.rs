@@ -821,7 +821,10 @@ fn generate_identification_suggestions(
                             .iter()
                             .find(|(address, _)| address == &item.entry_address)
                         {
-                            naming_generation::calibrate_confidence(context, &mut item.result);
+                            naming_generation::calibrate_confidence_with_deterministic_evidence(
+                                context,
+                                &mut item.result,
+                            );
                         }
                     }
                 }
@@ -933,7 +936,10 @@ fn refine_identification_suggestions(
                 .iter()
                 .find(|(address, _)| address == &item.entry_address)
             {
-                naming_generation::calibrate_confidence(context, &mut item.result);
+                naming_generation::calibrate_confidence_with_deterministic_evidence(
+                    context,
+                    &mut item.result,
+                );
             }
         }
     }
@@ -1059,7 +1065,10 @@ fn generate_identification_suggestion(
                         "{} (contradictory verifier): {error}",
                         secrets.label
                     ));
-                    naming_generation::calibrate_confidence(&context, &mut batch[0].result);
+                    naming_generation::calibrate_confidence_with_deterministic_evidence(
+                        &context,
+                        &mut batch[0].result,
+                    );
                 }
                 let result = batch
                     .pop()
