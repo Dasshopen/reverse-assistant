@@ -1680,6 +1680,45 @@ pub fn build_generation_request(context: &GenerationContext, model: &str) -> Cha
     }
 }
 
+/// Builds one bounded correction request after the model returned a vague or
+/// malformed name.  Retrying the original prompt verbatim is ineffective for
+/// deterministic local models: they simply return the same answer forever.
+pub fn build_generation_repair_request(
+    context: &GenerationContext,
+    rejected_response: &str,
+    validation_error: &str,
+    model: &str,
+) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "{SYSTEM_PROMPT} Tu corriges une proposition refusee par le validateur. \
+Ne repete jamais le nom refuse. Choisis un nom precis action_objet dont chaque mot est relie \
+a un fait de la fiche. Si la fiche ne permet pas d'etre plus precis, retourne suggested_name: \
+null, confidence: 0 et explique l'abstention. requested_tools doit etre vide."
+                ),
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: format!(
+                    "FICHE DE LA FONCTION:\n{}\n\nREPONSE REFUSEE:\n{}\n\nMOTIF DU REFUS:\n{}",
+                    format_context(context),
+                    bounded_text(rejected_response, 4_000),
+                    bounded_text(validation_error, 1_000)
+                ),
+            },
+        ],
+        temperature: Some(0.0),
+        require_json_object: true,
+        // Unlike the first pass, an explicit abstention is a valid repaired
+        // outcome. It is persisted and therefore does not become a retry loop.
+        response_schema: Some(generation_result_schema(None, false)),
+    }
+}
+
 fn is_plausible_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     let starts_ok = chars
@@ -1758,6 +1797,37 @@ pub fn parse_generation_response(
             .take(2)
             .collect(),
     })
+}
+
+/// Converts a syntactically valid but still unusable repaired answer into an
+/// explicit abstention. Malformed JSON remains an actual provider failure.
+pub fn parse_repaired_generation_response(
+    response: &ChatCompletionResponse,
+) -> Result<GenerationResult, String> {
+    match parse_generation_response(response) {
+        Ok(mut result) => {
+            if result.suggested_name.is_none() {
+                result.confidence = 0;
+            }
+            Ok(result)
+        }
+        Err(validation_error) => {
+            let parsed: GenerationResponseJson = serde_json::from_str(strip_markdown_json_fence(
+                &response.content,
+            ))
+            .map_err(|error| format!("invalid repaired generation response JSON: {error}"))?;
+            Ok(GenerationResult {
+                suggested_name: None,
+                reasoning: format!(
+                    "Abstention apres correction : {} Motif technique : {}",
+                    parsed.reasoning, validation_error
+                ),
+                confidence: 0,
+                evidence: parsed.evidence,
+                requested_tools: Vec::new(),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1870,6 +1940,48 @@ mod tests {
 
         assert_eq!(result.suggested_name, Some("open_config_file".to_owned()));
         assert!(result.reasoning.contains("CreateFileA"));
+    }
+
+    #[test]
+    fn repair_prompt_explains_the_rejection_and_allows_abstention() {
+        let request = build_generation_repair_request(
+            &sample_context(),
+            r#"{"suggested_name":"process_data"}"#,
+            "name is too generic",
+            "qwen2.5-coder:7b",
+        );
+
+        assert!(request.messages[1].content.contains("process_data"));
+        assert!(request.messages[1].content.contains("name is too generic"));
+        let suggested_name =
+            &request.response_schema.expect("repair schema")["properties"]["suggested_name"];
+        assert!(suggested_name.get("anyOf").is_some());
+    }
+
+    #[test]
+    fn a_still_generic_repaired_answer_becomes_an_explicit_abstention() {
+        let response = ChatCompletionResponse {
+            content: r#"{"suggested_name":"process_data","confidence":60,"evidence":["boucle"],"reasoning":"Role observe : traitement indistinct."}"#.to_owned(),
+        };
+
+        let result = parse_repaired_generation_response(&response)
+            .expect("a valid repaired JSON must not cause an endless retry");
+
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
+        assert!(result.reasoning.contains("Abstention apres correction"));
+    }
+
+    #[test]
+    fn an_explicit_repair_abstention_cannot_keep_a_misleading_confidence() {
+        let response = ChatCompletionResponse {
+            content: r#"{"suggested_name":null,"confidence":50,"evidence":["appel opaque"],"reasoning":"Contexte insuffisant."}"#.to_owned(),
+        };
+
+        let result = parse_repaired_generation_response(&response).expect("valid abstention");
+
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
     }
 
     #[test]

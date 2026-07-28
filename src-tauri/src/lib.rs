@@ -973,6 +973,32 @@ fn refine_identification_suggestions(
 // answer inherently less safe than a closed-set arbitration choice. It
 // carries confidence/evidence so the frontend can enforce the user's
 // prudence threshold rather than presenting it as a verified fact.
+fn complete_generation_with_one_repair(
+    provider: &services::ai_provider::OpenAiCompatibleProvider,
+    model: &str,
+    context: &naming_generation::GenerationContext,
+) -> Result<naming_generation::GenerationResult, String> {
+    let request = naming_generation::build_generation_request(context, model);
+    let response = provider.complete(&request)?;
+    match naming_generation::parse_generation_response(&response) {
+        Ok(result) => Ok(result),
+        Err(initial_error) => {
+            let repair_request = naming_generation::build_generation_repair_request(
+                context,
+                &response.content,
+                &initial_error,
+                model,
+            );
+            let repaired_response = provider.complete(&repair_request).map_err(|error| {
+                format!(
+                    "initial answer was rejected ({initial_error}); correction request failed: {error}"
+                )
+            })?;
+            naming_generation::parse_repaired_generation_response(&repaired_response)
+        }
+    }
+}
+
 #[tauri::command(async)]
 fn generate_identification_suggestion(
     app: AppHandle,
@@ -1005,11 +1031,7 @@ fn generate_identification_suggestion(
             base_url: secrets.base_url,
             api_key: secrets.api_key,
         };
-        let request = naming_generation::build_generation_request(&context, &secrets.model);
-        match provider
-            .complete(&request)
-            .and_then(|response| naming_generation::parse_generation_response(&response))
-        {
+        match complete_generation_with_one_repair(&provider, &secrets.model, &context) {
             Ok(mut result) => {
                 if !result.requested_tools.is_empty() {
                     match services::semantic_memory::execute_investigation_tools(

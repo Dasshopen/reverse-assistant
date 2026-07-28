@@ -34,11 +34,16 @@ fn main() -> Result<(), String> {
     export.validate()?;
     let index = semantic_memory::build_semantic_index(&export);
     if std::env::args().any(|argument| argument == "--probe") {
+        let requested = std::env::args()
+            .skip_while(|argument| argument != "--probe")
+            .skip(1)
+            .collect::<std::collections::HashSet<_>>();
         let contexts = export
             .functions
             .iter()
             .filter(|function| function.decompiled_code.is_some())
             .filter(|function| semantic_memory::is_generic_function_name(&function.name))
+            .filter(|function| requested.is_empty() || requested.contains(&function.entry_address))
             .take(3)
             .map(|function| {
                 naming_generation::build_context_for_function_from_index(
@@ -61,8 +66,59 @@ fn main() -> Result<(), String> {
             .iter()
             .map(|(address, _)| address.clone())
             .collect::<Vec<_>>();
-        let parsed = naming_generation::parse_generation_batch_response(&response, &expected)?;
-        println!("parsed {} batch result(s)", parsed.len());
+        match naming_generation::parse_generation_batch_response(&response, &expected) {
+            Ok(parsed) => println!("parsed {} batch result(s)", parsed.len()),
+            Err(error) => println!("batch parse error: {error}"),
+        }
+        for (address, context) in &contexts {
+            let request = naming_generation::build_generation_request(context, "qwen2.5-coder:7b");
+            match provider.complete(&request) {
+                Ok(response) => {
+                    println!(
+                        "raw individual response for {address}:\n{}",
+                        response.content
+                    );
+                    match naming_generation::parse_generation_response(&response) {
+                        Ok(result) => println!(
+                            "parsed individual result for {address}: name={:?}, confidence={}",
+                            result.suggested_name, result.confidence
+                        ),
+                        Err(error) => {
+                            println!("individual parse error for {address}: {error}");
+                            let repair = naming_generation::build_generation_repair_request(
+                                context,
+                                &response.content,
+                                &error,
+                                "qwen2.5-coder:7b",
+                            );
+                            match provider.complete(&repair) {
+                                Ok(repaired) => {
+                                    println!(
+                                        "raw repaired response for {address}:\n{}",
+                                        repaired.content
+                                    );
+                                    match naming_generation::parse_repaired_generation_response(
+                                        &repaired,
+                                    ) {
+                                        Ok(result) => println!(
+                                            "parsed repaired result for {address}: name={:?}, confidence={}",
+                                            result.suggested_name, result.confidence
+                                        ),
+                                        Err(error) => println!(
+                                            "repaired parse error for {address}: {error}"
+                                        ),
+                                    }
+                                }
+                                Err(error) => {
+                                    println!("repair provider error for {address}: {error}")
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => println!("individual provider error for {address}: {error}"),
+            }
+        }
         return Ok(());
     }
     let outcomes: Vec<StoredGenerationOutcome> =
