@@ -15,6 +15,12 @@
 // project (argument construction is tested; the actual external process
 // is not launched from committed tests).
 
+use std::io;
+use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +33,90 @@ use serde_json::{json, Value};
 // case: 6 functions arbitrated, then no further progress for as long as
 // the app stayed open, because call #7 never returned.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const OLLAMA_START_TIMEOUT: Duration = Duration::from_secs(8);
+const OLLAMA_PORT: u16 = 11_434;
+static OLLAMA_START_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn is_local_ollama_url(base_url: &str) -> bool {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    normalized == "http://localhost:11434/v1"
+        || normalized == "http://127.0.0.1:11434/v1"
+        || normalized == "http://[::1]:11434/v1"
+}
+
+fn ollama_is_listening() -> bool {
+    TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], OLLAMA_PORT)),
+        Duration::from_millis(150),
+    )
+    .is_ok()
+}
+
+fn ollama_executable() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let installed = PathBuf::from(local_app_data)
+            .join("Programs")
+            .join("Ollama")
+            .join("ollama.exe");
+        if installed.is_file() {
+            return Some(installed);
+        }
+    }
+    Some(PathBuf::from(if cfg!(target_os = "windows") {
+        "ollama.exe"
+    } else {
+        "ollama"
+    }))
+}
+
+fn spawn_ollama_server(executable: &PathBuf) -> io::Result<()> {
+    let mut command = Command::new(executable);
+    command
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command.spawn().map(|_| ())
+}
+
+fn ensure_local_ollama_running(base_url: &str) -> Result<(), String> {
+    if !is_local_ollama_url(base_url) || ollama_is_listening() {
+        return Ok(());
+    }
+    let lock = OLLAMA_START_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| "the Ollama startup lock was poisoned".to_owned())?;
+    if ollama_is_listening() {
+        return Ok(());
+    }
+    let executable = ollama_executable().ok_or_else(|| {
+        "Ollama local is configured but its executable could not be found".to_owned()
+    })?;
+    spawn_ollama_server(&executable).map_err(|error| {
+        format!(
+            "Ollama local is configured but could not be started from '{}': {error}",
+            executable.display()
+        )
+    })?;
+    let started = std::time::Instant::now();
+    while started.elapsed() < OLLAMA_START_TIMEOUT {
+        if ollama_is_listening() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    Err(format!(
+        "Ollama was launched but did not listen on port {OLLAMA_PORT} within {} seconds",
+        OLLAMA_START_TIMEOUT.as_secs()
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChatMessage {
@@ -149,6 +239,7 @@ pub(crate) fn parse_response_body_json(body: &str) -> Result<ChatCompletionRespo
 
 impl ChatCompletionProvider for OpenAiCompatibleProvider {
     fn complete(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse, String> {
+        ensure_local_ollama_running(&self.base_url)?;
         let url = self.endpoint_url();
         let body = build_request_body_json(request);
 
@@ -207,6 +298,14 @@ mod tests {
             provider.endpoint_url(),
             "https://api.openai.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn only_the_standard_loopback_ollama_endpoint_is_auto_managed() {
+        assert!(is_local_ollama_url("http://localhost:11434/v1/"));
+        assert!(is_local_ollama_url("http://127.0.0.1:11434/v1"));
+        assert!(!is_local_ollama_url("https://api.openai.com/v1"));
+        assert!(!is_local_ollama_url("http://localhost:8080/v1"));
     }
 
     #[test]

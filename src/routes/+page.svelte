@@ -713,6 +713,21 @@ interface ApplyRenamesResult {
           (generationResults.has(func.entry_address) || generationErrors.has(func.entry_address)),
       ).length,
   );
+  let generationFailed = $derived.by(
+    () =>
+      unidentifiedFunctions.filter(
+        (func) => hasNoEvidenceAtAll(func) && generationErrors.has(func.entry_address),
+      ).length,
+  );
+  let generationSucceeded = $derived.by(
+    () =>
+      unidentifiedFunctions.filter(
+        (func) => hasNoEvidenceAtAll(func) && generationResults.has(func.entry_address),
+      ).length,
+  );
+  let firstGenerationError = $derived.by(
+    () => [...generationErrors.values()][0] ?? "",
+  );
   let generationProposed = $derived.by(
     () => [...generationResults.values()].filter((result) => result.suggested_name !== null).length,
   );
@@ -3309,6 +3324,12 @@ interface ApplyRenamesResult {
     }
   }
 
+  async function retryFailedGeneration(): Promise<void> {
+    if (isBackgroundGenerating || generationFailed === 0) return;
+    generationErrors = new Map();
+    await runBackgroundGeneration();
+  }
+
   async function runBackgroundRefinement() {
     const provisionalNames = [
       ...[...arbitrationResults.entries()]
@@ -5421,6 +5442,12 @@ interface ApplyRenamesResult {
                     Génération IA en arrière-plan : {generationResolved} / {generationTotal} traitée(s)…
                   {:else if generationResolved < generationTotal}
                     {generationTotal - generationResolved} fonction(s) sans preuve en attente de suggestion IA.
+                  {:else if generationFailed > 0}
+                    <span>
+                      Analyse IA interrompue : {generationSucceeded} résultat(s), {generationFailed} échec(s).
+                      <small title={firstGenerationError}>{firstGenerationError}</small>
+                    </span>
+                    <button type="button" onclick={retryFailedGeneration}>Relancer les échecs</button>
                   {:else}
                     Analyse IA terminée : {generationResolved} examinée(s), {generationProposed} nom(s) proposé(s).
                   {/if}
@@ -9911,6 +9938,32 @@ interface ApplyRenamesResult {
   .arbitration-result small { color: #71829d; font-size: 0.62rem; }
   .arbitration-status { margin: 0; color: #8192ad; font-size: 0.68rem; line-height: 1.45; }
   .arbitration-queue-status { margin: 0.4rem 0.95rem 0; color: #67e8f9; font-size: 0.66rem; }
+  .generation-queue-status:has(button) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.7rem;
+    color: #fda4af;
+  }
+  .generation-queue-status span { min-width: 0; }
+  .generation-queue-status small {
+    display: block;
+    max-width: 42rem;
+    overflow: hidden;
+    color: #94a3b8;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .generation-queue-status button {
+    flex: 0 0 auto;
+    border: 1px solid #475569;
+    border-radius: 0.45rem;
+    background: #172033;
+    color: #e2e8f0;
+    font: inherit;
+    font-weight: 800;
+    padding: 0.38rem 0.65rem;
+  }
   .link-button { padding: 0; border: none; background: none; color: #67e8f9; font-size: 0.66rem; text-align: left; text-decoration: underline; cursor: pointer; width: fit-content; }
   .evidence-source-group small { color: #8292ad; font-size: 0.54rem; }
   .evidence-source-group code { color: #a7f3d0; font-size: 0.58rem; }
