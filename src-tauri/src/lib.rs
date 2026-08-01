@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::AppHandle;
@@ -510,6 +511,8 @@ struct GenerationOutcome {
     evidence: Vec<String>,
     #[serde(default)]
     analysis_pass: u8,
+    #[serde(default)]
+    verification_tier: naming_generation::NameVerificationTier,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -521,6 +524,8 @@ struct GenerationBatchOutcome {
     confidence: u8,
     evidence: Vec<String>,
     analysis_pass: u8,
+    #[serde(default)]
+    verification_tier: naming_generation::NameVerificationTier,
 }
 
 fn synthesize_generation_answers(
@@ -556,52 +561,64 @@ fn synthesize_generation_answers(
         left_support.total_cmp(&right_support)
     });
 
-    let (suggested_name, confidence, evidence, reasoning) = if let Some((_, winner)) = best {
-        let winner_name = winner.suggested_name.as_deref().unwrap_or_default();
-        let agreeing: Vec<_> = named
-            .iter()
-            .filter(|(_, answer)| {
-                naming_generation::semantic_name_similarity(
-                    winner_name,
-                    answer.suggested_name.as_deref().unwrap_or_default(),
-                ) >= 0.34
-            })
-            .collect();
-        let base_confidence = agreeing
-            .iter()
-            .map(|(_, answer)| u16::from(answer.confidence))
-            .sum::<u16>()
-            / agreeing.len().max(1) as u16;
-        let agreement_factor = 0.75 + 0.25 * agreeing.len() as f64 / named.len().max(1) as f64;
-        let confidence = (f64::from(base_confidence) * agreement_factor).round() as u8;
-        let evidence = agreeing
-            .iter()
-            .flat_map(|(_, answer)| answer.evidence.clone())
-            .take(12)
-            .collect();
-        let reasoning = agreeing
-            .iter()
-            .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        (
-            winner.suggested_name.clone(),
-            confidence,
-            evidence,
-            reasoning,
-        )
-    } else {
-        (
-            None,
-            0,
-            Vec::new(),
-            answers
+    let (suggested_name, confidence, evidence, reasoning, verification_tier) =
+        if let Some((_, winner)) = best {
+            let winner_name = winner.suggested_name.as_deref().unwrap_or_default();
+            let agreeing: Vec<_> = named
+                .iter()
+                .filter(|(_, answer)| {
+                    naming_generation::semantic_name_similarity(
+                        winner_name,
+                        answer.suggested_name.as_deref().unwrap_or_default(),
+                    ) >= 0.34
+                })
+                .collect();
+            let base_confidence = agreeing
+                .iter()
+                .map(|(_, answer)| u16::from(answer.confidence))
+                .sum::<u16>()
+                / agreeing.len().max(1) as u16;
+            let agreement_factor = 0.75 + 0.25 * agreeing.len() as f64 / named.len().max(1) as f64;
+            let confidence = (f64::from(base_confidence) * agreement_factor).round() as u8;
+            let evidence = agreeing
+                .iter()
+                .flat_map(|(_, answer)| answer.evidence.clone())
+                .take(12)
+                .collect();
+            let reasoning = agreeing
                 .iter()
                 .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
                 .collect::<Vec<_>>()
-                .join(" | "),
-        )
-    };
+                .join(" | ");
+            // An agreeing provider whose own per-word verification is weaker
+            // must not be laundered into a stronger merged tier just because
+            // another provider proposed a similar-sounding name -- take the
+            // safest (minimum) tier among the answers that actually agree.
+            let verification_tier = agreeing
+                .iter()
+                .map(|(_, answer)| answer.verification_tier)
+                .min()
+                .unwrap_or_default();
+            (
+                winner.suggested_name.clone(),
+                confidence,
+                evidence,
+                reasoning,
+                verification_tier,
+            )
+        } else {
+            (
+                None,
+                0,
+                Vec::new(),
+                answers
+                    .iter()
+                    .map(|(label, answer)| format!("{label}: {}", answer.reasoning))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+                naming_generation::NameVerificationTier::default(),
+            )
+        };
     GenerationBatchOutcome {
         entry_address: entry_address.to_owned(),
         suggested_name,
@@ -614,6 +631,7 @@ fn synthesize_generation_answers(
         confidence,
         evidence,
         analysis_pass,
+        verification_tier,
     }
 }
 
@@ -633,27 +651,40 @@ fn verify_and_calibrate_generation_batch(
             item.entry_address
         ));
     }
+    let original_results = results
+        .iter()
+        .map(|item| (item.entry_address.clone(), item.result.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    // Rust gets the first and last word on confidence. Obvious API/string/RTTI
+    // matches can be certified locally; empty or already-strong outcomes do
+    // not justify another model call. The adversarial verifier is reserved
+    // for the genuinely ambiguous middle.
+    for item in results.iter_mut() {
+        if let Some((_, context)) = contexts
+            .iter()
+            .find(|(address, _)| address == &item.entry_address)
+        {
+            naming_generation::calibrate_confidence_with_deterministic_evidence(
+                context,
+                &mut item.result,
+            );
+        }
+    }
     let candidates = results
         .iter()
         .filter(|item| item.result.suggested_name.is_some())
+        .filter(|item| (35..80).contains(&item.result.confidence))
         .filter_map(|item| {
             let context = contexts
                 .iter()
                 .find(|(address, _)| address == &item.entry_address)?
                 .1
                 .clone();
-            Some((item.entry_address.clone(), context, item.result.clone()))
+            let original = original_results.get(&item.entry_address)?.clone();
+            Some((item.entry_address.clone(), context, original))
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
-        for item in results {
-            if let Some((_, context)) = contexts
-                .iter()
-                .find(|(address, _)| address == &item.entry_address)
-            {
-                naming_generation::calibrate_confidence(context, &mut item.result);
-            }
-        }
         return Ok(());
     }
     let expected = candidates
@@ -675,6 +706,13 @@ fn verify_and_calibrate_generation_batch(
             .iter()
             .find(|verification| verification.entry_address == item.entry_address)
         {
+            // Deterministic calibration above selected the ambiguous cases;
+            // it must not become a permanent ceiling before the independent
+            // verifier examines them. Recalibrate from the model's original
+            // score, with Rust still applying the final evidence caps.
+            if let Some(original) = original_results.get(&item.entry_address) {
+                item.result = original.clone();
+            }
             naming_generation::calibrate_confidence_with_verification(
                 context,
                 &mut item.result,
@@ -694,6 +732,7 @@ fn generate_identification_suggestions(
     semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     entry_addresses: Vec<String>,
     provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
+    expected_program_sha256: Option<String>,
 ) -> Result<Vec<GenerationBatchOutcome>, String> {
     if entry_addresses.is_empty() || entry_addresses.len() > 6 {
         return Err("a generation batch must contain between 1 and 6 functions".to_owned());
@@ -703,6 +742,11 @@ fn generate_identification_suggestions(
         .map_err(|_| "the analysis export lock was poisoned".to_owned())?
         .clone()
         .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    if let Some(expected_sha256) = expected_program_sha256 {
+        if export.program.sha256 != expected_sha256 {
+            return Err("the loaded analysis changed while AI naming was running".to_owned());
+        }
+    }
     // Building caller/thunk/string evidence is whole-program work. Reuse one
     // immutable index for the complete batch instead of rebuilding it once
     // per function (six times for a normal background-agent request).
@@ -816,17 +860,8 @@ fn generate_identification_suggestions(
                         "{} (contradictory verifier): {error}",
                         secrets.label
                     ));
-                    for item in &mut results {
-                        if let Some((_, context)) = contexts
-                            .iter()
-                            .find(|(address, _)| address == &item.entry_address)
-                        {
-                            naming_generation::calibrate_confidence_with_deterministic_evidence(
-                                context,
-                                &mut item.result,
-                            );
-                        }
-                    }
+                    // Deterministic calibration already ran before the
+                    // optional verifier request and remains the safe result.
                 }
                 for item in results {
                     by_address
@@ -867,9 +902,12 @@ fn refine_identification_suggestions(
     semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     seeds: Vec<naming_generation::RefinementSeed>,
     provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
+    project_id: Option<String>,
 ) -> Result<Vec<GenerationBatchOutcome>, String> {
-    if seeds.is_empty() || seeds.len() > 6 {
-        return Err("a refinement batch must contain between 1 and 6 functions".to_owned());
+    if seeds.is_empty() || seeds.len() > 4 {
+        return Err(
+            "a contextual refinement request must contain between 1 and 4 functions".to_owned(),
+        );
     }
     let export = export_state
         .lock()
@@ -915,8 +953,100 @@ fn refine_identification_suggestions(
         .iter()
         .map(|seed| seed.entry_address.clone())
         .collect::<Vec<_>>();
-    let response = provider.complete(&request)?;
-    let mut results = naming_generation::parse_generation_batch_response(&response, &expected)?;
+    let response = match provider.complete(&request) {
+        Ok(response) => response,
+        Err(error) if services::ai_provider::is_output_limit_error(&error) && seeds.len() == 1 => {
+            persist_generation_diagnostic_best_effort(
+                &app,
+                project_id.as_deref(),
+                &seeds[0].entry_address,
+                "contextual_refinement_output_limit",
+                1,
+                &error,
+                None,
+            );
+            let compact_request = naming_generation::build_compact_refinement_request(
+                &contexts[0],
+                &seeds[0],
+                &provider_secrets.model,
+            );
+            provider.complete(&compact_request).map_err(|retry_error| {
+                let reason = format!(
+                    "contextual answer hit its output limit; compact retry failed: {retry_error}"
+                );
+                persist_generation_diagnostic_best_effort(
+                    &app,
+                    project_id.as_deref(),
+                    &seeds[0].entry_address,
+                    generation_diagnostic_stage("contextual_compact_retry", &retry_error),
+                    2,
+                    &reason,
+                    None,
+                );
+                reason
+            })?
+        }
+        Err(error) => {
+            persist_generation_diagnostic_best_effort(
+                &app,
+                project_id.as_deref(),
+                &seeds[0].entry_address,
+                generation_diagnostic_stage("contextual_refinement", &error),
+                1,
+                &error,
+                None,
+            );
+            return Err(error);
+        }
+    };
+    let mut results = match naming_generation::parse_generation_batch_response(&response, &expected)
+    {
+        Ok(results) => results,
+        Err(initial_error) => {
+            let repair_request = naming_generation::build_refinement_repair_request(
+                &contexts[0],
+                &seeds[0],
+                &response.content,
+                &initial_error,
+                &provider_secrets.model,
+            );
+            let repaired_response = provider.complete(&repair_request).map_err(|error| {
+                let reason = format!(
+                    "contextual answer was rejected ({initial_error}); correction request failed: {error}"
+                );
+                persist_generation_diagnostic_best_effort(
+                    &app,
+                    project_id.as_deref(),
+                    &seeds[0].entry_address,
+                    generation_diagnostic_stage("contextual_repair", &error),
+                    2,
+                    &reason,
+                    Some(&response.content),
+                );
+                reason
+            })?;
+            naming_generation::parse_generation_batch_response(&repaired_response, &expected)
+                .map_err(|repair_error| {
+                    let reason = format!(
+                        "contextual answer was rejected ({initial_error}); corrected answer was also rejected: {repair_error}"
+                    );
+                    let raw = format!(
+                        "INITIAL RESPONSE:\n{}\n\nREPAIR RESPONSE:\n{}",
+                        response.content, repaired_response.content
+                    );
+                    persist_generation_diagnostic_best_effort(
+                        &app,
+                        project_id.as_deref(),
+                        &seeds[0].entry_address,
+                        "contextual_repair",
+                        2,
+                        &reason,
+                        Some(&raw),
+                    );
+                    reason
+                })?
+        }
+    };
     let verification_contexts = contexts
         .iter()
         .map(|(address, context, _)| (address.clone(), context.clone()))
@@ -931,17 +1061,8 @@ fn refine_identification_suggestions(
             "{} contradictory verifier failed during refinement: {error}",
             provider_secrets.label
         );
-        for item in &mut results {
-            if let Some((_, context)) = verification_contexts
-                .iter()
-                .find(|(address, _)| address == &item.entry_address)
-            {
-                naming_generation::calibrate_confidence_with_deterministic_evidence(
-                    context,
-                    &mut item.result,
-                );
-            }
-        }
+        // Results were already calibrated deterministically before this
+        // optional verifier call.
     }
     results
         .into_iter()
@@ -962,6 +1083,7 @@ fn refine_identification_suggestions(
                 confidence: result.confidence,
                 evidence: result.evidence,
                 analysis_pass: 2,
+                verification_tier: result.verification_tier,
             })
         })
         .collect()
@@ -974,12 +1096,46 @@ fn refine_identification_suggestions(
 // carries confidence/evidence so the frontend can enforce the user's
 // prudence threshold rather than presenting it as a verified fact.
 fn complete_generation_with_one_repair(
+    app: &AppHandle,
+    project_id: Option<&str>,
+    entry_address: &str,
     provider: &services::ai_provider::OpenAiCompatibleProvider,
     model: &str,
     context: &naming_generation::GenerationContext,
 ) -> Result<naming_generation::GenerationResult, String> {
     let request = naming_generation::build_generation_request(context, model);
-    let response = provider.complete(&request)?;
+    let response = match provider.complete(&request) {
+        Ok(response) => response,
+        Err(error) if services::ai_provider::is_output_limit_error(&error) => {
+            persist_generation_diagnostic_best_effort(
+                app,
+                project_id,
+                entry_address,
+                "initial_generation_output_limit",
+                1,
+                &error,
+                None,
+            );
+            let compact_request =
+                naming_generation::build_compact_generation_request(context, model);
+            provider.complete(&compact_request).map_err(|retry_error| {
+                let reason = format!(
+                    "initial answer hit the provider capacity limit; compact retry failed: {retry_error}"
+                );
+                persist_generation_diagnostic_best_effort(
+                    app,
+                    project_id,
+                    entry_address,
+                    generation_diagnostic_stage("initial_compact_retry", &retry_error),
+                    2,
+                    &reason,
+                    None,
+                );
+                reason
+            })?
+        }
+        Err(error) => return Err(error),
+    };
     match naming_generation::parse_generation_response(&response) {
         Ok(result) => Ok(result),
         Err(initial_error) => {
@@ -990,11 +1146,41 @@ fn complete_generation_with_one_repair(
                 model,
             );
             let repaired_response = provider.complete(&repair_request).map_err(|error| {
-                format!(
+                let reason = format!(
                     "initial answer was rejected ({initial_error}); correction request failed: {error}"
-                )
+                );
+                persist_generation_diagnostic_best_effort(
+                    app,
+                    project_id,
+                    entry_address,
+                    generation_diagnostic_stage("initial_repair", &error),
+                    2,
+                    &reason,
+                    Some(&response.content),
+                );
+                reason
             })?;
-            naming_generation::parse_repaired_generation_response(&repaired_response)
+            naming_generation::parse_repaired_generation_response(&repaired_response).map_err(
+                |repair_error| {
+                    let reason = format!(
+                        "initial answer was rejected ({initial_error}); corrected answer was also rejected: {repair_error}"
+                    );
+                    let raw = format!(
+                        "INITIAL RESPONSE:\n{}\n\nREPAIR RESPONSE:\n{}",
+                        response.content, repaired_response.content
+                    );
+                    persist_generation_diagnostic_best_effort(
+                        app,
+                        project_id,
+                        entry_address,
+                        "initial_repair",
+                        2,
+                        &reason,
+                        Some(&raw),
+                    );
+                    reason
+                },
+            )
         }
     }
 }
@@ -1005,6 +1191,7 @@ fn generate_identification_suggestion(
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
     semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     entry_address: String,
+    project_id: Option<String>,
 ) -> Result<GenerationOutcome, String> {
     let export = export_state
         .lock()
@@ -1031,7 +1218,14 @@ fn generate_identification_suggestion(
             base_url: secrets.base_url,
             api_key: secrets.api_key,
         };
-        match complete_generation_with_one_repair(&provider, &secrets.model, &context) {
+        match complete_generation_with_one_repair(
+            &app,
+            project_id.as_deref(),
+            &entry_address,
+            &provider,
+            &secrets.model,
+            &context,
+        ) {
             Ok(mut result) => {
                 if !result.requested_tools.is_empty() {
                     match services::semantic_memory::execute_investigation_tools(
@@ -1087,10 +1281,7 @@ fn generate_identification_suggestion(
                         "{} (contradictory verifier): {error}",
                         secrets.label
                     ));
-                    naming_generation::calibrate_confidence_with_deterministic_evidence(
-                        &context,
-                        &mut batch[0].result,
-                    );
+                    // The deterministic result is already present.
                 }
                 let result = batch
                     .pop()
@@ -1116,6 +1307,7 @@ fn generate_identification_suggestion(
         confidence: synthesized.confidence,
         evidence: synthesized.evidence,
         analysis_pass: 1,
+        verification_tier: synthesized.verification_tier,
     })
 }
 
@@ -1158,6 +1350,7 @@ fn save_generation_result(
         context_complete: true,
         agent_version: naming_generation::NAMING_GENERATION_VERSION,
         analysis_pass: outcome.analysis_pass.max(1),
+        verification_tier: outcome.verification_tier,
     };
     match results
         .iter_mut()
@@ -1190,6 +1383,7 @@ fn save_generation_results(
             context_complete: true,
             agent_version: naming_generation::NAMING_GENERATION_VERSION,
             analysis_pass: outcome.analysis_pass.max(1),
+            verification_tier: outcome.verification_tier,
         };
         match results
             .iter_mut()
@@ -1208,6 +1402,138 @@ fn get_generation_results(
     project_id: String,
 ) -> Result<Vec<naming_generation::StoredGenerationOutcome>, String> {
     project_storage::load_project_generation(&app, &project_id)
+}
+
+const MAX_GENERATION_DIAGNOSTIC_TEXT_BYTES: usize = 16 * 1024;
+const MAX_GENERATION_DIAGNOSTICS_PER_PROJECT: usize = 2_000;
+
+fn bounded_diagnostic_text(value: &str) -> String {
+    if value.len() <= MAX_GENERATION_DIAGNOSTIC_TEXT_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_GENERATION_DIAGNOSTIC_TEXT_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[truncated]", &value[..end])
+}
+
+fn persist_generation_diagnostic_best_effort(
+    app: &AppHandle,
+    project_id: Option<&str>,
+    entry_address: &str,
+    stage: &str,
+    attempt: u8,
+    validation_error: &str,
+    raw_response: Option<&str>,
+) {
+    let Some(project_id) = project_id else {
+        return;
+    };
+    if let Err(error) = save_generation_diagnostic_inner(
+        app,
+        project_id,
+        entry_address,
+        stage,
+        attempt,
+        validation_error,
+        raw_response,
+    ) {
+        eprintln!("failed to persist AI naming diagnostic: {error}");
+    }
+}
+
+fn generation_diagnostic_stage<'a>(fallback: &'a str, error: &str) -> &'a str {
+    let lower = error.to_ascii_lowercase();
+    if services::ai_provider::is_output_limit_error(error) {
+        "provider_capacity"
+    } else if lower.contains("network error")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection attempt failed")
+    {
+        "network"
+    } else {
+        fallback
+    }
+}
+
+fn save_generation_diagnostic_inner(
+    app: &AppHandle,
+    project_id: &str,
+    entry_address: &str,
+    stage: &str,
+    attempt: u8,
+    validation_error: &str,
+    raw_response: Option<&str>,
+) -> Result<(), String> {
+    let mut diagnostics = project_storage::load_project_generation_diagnostics(app, project_id)?;
+    let created_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before the Unix epoch: {error}"))?
+        .as_secs();
+    let diagnostic = naming_generation::StoredGenerationDiagnostic {
+        entry_address: entry_address.to_owned(),
+        stage: stage.to_owned(),
+        attempt,
+        validation_error: bounded_diagnostic_text(validation_error),
+        raw_response: raw_response.map(bounded_diagnostic_text),
+        agent_version: naming_generation::NAMING_GENERATION_VERSION,
+        created_at_unix_seconds,
+    };
+    // The backend records the exact raw rejection while the frontend records
+    // the user-visible command error. They describe the same failed attempt;
+    // merge them rather than creating two confusing rows, retaining the raw
+    // backend response whenever it exists.
+    if let Some(existing) = diagnostics.iter_mut().rev().find(|existing| {
+        existing.entry_address == entry_address
+            && existing.stage == stage
+            && existing.attempt == attempt
+            && created_at_unix_seconds.saturating_sub(existing.created_at_unix_seconds) <= 60
+    }) {
+        if diagnostic.raw_response.is_some() {
+            existing.raw_response = diagnostic.raw_response;
+            existing.validation_error = diagnostic.validation_error;
+        } else if existing.raw_response.is_none() {
+            existing.validation_error = diagnostic.validation_error;
+        }
+        existing.created_at_unix_seconds = created_at_unix_seconds;
+    } else {
+        diagnostics.push(diagnostic);
+    }
+    if diagnostics.len() > MAX_GENERATION_DIAGNOSTICS_PER_PROJECT {
+        diagnostics.drain(..diagnostics.len() - MAX_GENERATION_DIAGNOSTICS_PER_PROJECT);
+    }
+    project_storage::replace_project_generation_diagnostics(app, project_id, &diagnostics)
+}
+
+#[tauri::command]
+fn save_generation_diagnostic(
+    app: AppHandle,
+    project_id: String,
+    entry_address: String,
+    stage: String,
+    attempt: u8,
+    validation_error: String,
+    raw_response: Option<String>,
+) -> Result<(), String> {
+    save_generation_diagnostic_inner(
+        &app,
+        &project_id,
+        &entry_address,
+        &stage,
+        attempt,
+        &validation_error,
+        raw_response.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn get_generation_diagnostics(
+    app: AppHandle,
+    project_id: String,
+) -> Result<Vec<naming_generation::StoredGenerationDiagnostic>, String> {
+    project_storage::load_project_generation_diagnostics(&app, &project_id)
 }
 
 #[tauri::command]
@@ -1716,6 +2042,8 @@ pub fn run() {
             save_generation_result,
             save_generation_results,
             get_generation_results,
+            save_generation_diagnostic,
+            get_generation_diagnostics,
             get_managed_setup_plan,
             install_managed_setup,
             adopt_existing_ghidra,
@@ -1751,15 +2079,24 @@ mod tests {
     use std::time::Duration;
 
     use super::{synthesize_generation_answers, DecompileCoordinator};
-    use crate::services::naming_generation::GenerationResult;
+    use crate::services::naming_generation::{GenerationResult, NameVerificationTier};
 
     fn generated(name: Option<&str>, confidence: u8) -> GenerationResult {
+        generated_with_tier(name, confidence, NameVerificationTier::Unsupported)
+    }
+
+    fn generated_with_tier(
+        name: Option<&str>,
+        confidence: u8,
+        verification_tier: NameVerificationTier,
+    ) -> GenerationResult {
         GenerationResult {
             suggested_name: name.map(str::to_owned),
             reasoning: "raison observable".to_owned(),
             confidence,
             evidence: vec!["preuve".to_owned()],
             requested_tools: Vec::new(),
+            verification_tier,
         }
     }
 
@@ -1798,6 +2135,45 @@ mod tests {
 
         assert_eq!(result.suggested_name, None);
         assert_eq!(result.confidence, 0);
+    }
+
+    #[test]
+    fn generation_synthesis_never_upgrades_the_weakest_agreeing_tier() {
+        // Two providers agree on essentially the same name. One verified it
+        // thoroughly (Strong, high confidence); the other could not back a
+        // single word of it (Unsupported, lower confidence). Averaging the
+        // numbers alone would land well above the Unsupported ceiling of
+        // 45% -- exactly the mismatch that would let an unverified name
+        // slip past a confidence-only gate. The merged tier must stay the
+        // safe (weakest) one regardless of what the blended number says.
+        let answers = vec![
+            (
+                "agent A".to_owned(),
+                generated_with_tier(Some("open_config_file"), 85, NameVerificationTier::Strong),
+            ),
+            (
+                "agent B".to_owned(),
+                generated_with_tier(
+                    Some("open_config_file"),
+                    60,
+                    NameVerificationTier::Unsupported,
+                ),
+            ),
+        ];
+
+        let result = synthesize_generation_answers("0x3", &answers, 1);
+
+        assert!(
+            result.confidence > 45,
+            "the blended confidence ({}) must be the scenario this test exercises: \
+             numerically above the Unsupported ceiling despite the tier staying Unsupported",
+            result.confidence
+        );
+        assert_eq!(
+            result.verification_tier,
+            NameVerificationTier::Unsupported,
+            "a weak agreeing answer must not be laundered into a stronger merged tier"
+        );
     }
 
     #[test]

@@ -27,7 +27,9 @@ pub use crate::services::naming_arbitration::ArbitrationContext;
 
 /// Bumped independently from closed-set FunctionID arbitration so projects
 /// recompute only open-ended suggestions when the semantic agent changes.
-pub const NAMING_GENERATION_VERSION: u32 = 8;
+/// Bumped to 10 for `verification_tier`: the frontend must not trust that
+/// field on a record stamped below this version (see `NameVerificationTier`).
+pub const NAMING_GENERATION_VERSION: u32 = 10;
 
 fn default_analysis_pass() -> u8 {
     1
@@ -114,11 +116,26 @@ pub fn build_context_for_function_with_index_and_provisional_names(
         .chain(context.semantic_facts.callees.iter())
         .map(|neighbor| neighbor.entry_address.as_str())
         .collect::<std::collections::HashSet<_>>();
-    context.provisional_neighbors = provisional_names
+    context.provisional_neighbors =
+        select_provisional_neighbors(entry_address, &direct_neighbors, provisional_names);
+    Ok(context)
+}
+
+fn select_provisional_neighbors(
+    entry_address: &str,
+    direct_neighbors: &std::collections::HashSet<&str>,
+    provisional_names: &[ProvisionalFunctionName],
+) -> Vec<ProvisionalNeighborName> {
+    let mut selected = provisional_names
         .iter()
         .filter(|provisional| {
             provisional.entry_address != entry_address
-                && provisional.confidence >= 45
+                // A neighbour name is useful vocabulary, but it is still an
+                // AI hypothesis.  Weak hypotheses used to contaminate the
+                // contextual pass by being copied across similar CRT helper
+                // functions.  Only strong, directly-connected anchors are
+                // allowed into this context.
+                && provisional.confidence >= 80
                 && direct_neighbors.contains(provisional.entry_address.as_str())
                 && !semantic_memory::is_generic_function_name(&provisional.name)
         })
@@ -128,15 +145,49 @@ pub fn build_context_for_function_with_index_and_provisional_names(
             confidence: provisional.confidence,
             source: provisional.source.clone(),
         })
-        .collect();
-    context.provisional_neighbors.sort_by(|left, right| {
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
         right
             .confidence
             .cmp(&left.confidence)
             .then_with(|| left.entry_address.cmp(&right.entry_address))
     });
-    context.provisional_neighbors.truncate(12);
-    Ok(context)
+    // A local 7B model loses focus when a function is surrounded by a long
+    // vocabulary list.  Two direct anchors are enough to establish graph
+    // context without turning hypotheses into a naming dictionary.
+    selected.truncate(2);
+    selected
+}
+
+/// A deterministic, Rust-computed classification of how well the words of a
+/// proposed name are backed by real evidence -- never the model's own
+/// self-reported verdict (`VerificationVerdict` below), which is a claim to
+/// be checked, not a fact. Computed once in `calibrate_confidence_with_verification`
+/// from the same token-coverage analysis that already bounds `confidence`,
+/// so the two can never disagree about which case a result falls into.
+///
+/// `Unsupported` is the safe default (see `Default` impl): a value that was
+/// never actually classified -- a freshly parsed model answer before
+/// calibration runs, or a project file saved before this field existed --
+/// must never be mistaken for a verified result. Declared weakest-first so
+/// the derived `Ord` can pick the safe (minimum) tier when merging several
+/// providers' answers for the same function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NameVerificationTier {
+    /// No meaningful word of the proposed name is backed by any real
+    /// evidence. Must never be auto-applied and must never become a
+    /// second-pass anchor.
+    #[default]
+    Unsupported,
+    /// Some, but not all, meaningful words are backed by real evidence.
+    Partial,
+    /// Every meaningful word is backed by real evidence from a single
+    /// evidence category (e.g. imports alone).
+    Supported,
+    /// Every meaningful word is backed by real evidence spanning at least
+    /// two independent evidence categories.
+    Strong,
 }
 
 /// A generative naming answer, persisted alongside the project so it
@@ -160,6 +211,27 @@ pub struct StoredGenerationOutcome {
     /// hypotheses after high-confidence neighbours have become available.
     #[serde(default = "default_analysis_pass")]
     pub analysis_pass: u8,
+    /// Absent on any record saved before this field existed, which
+    /// `#[serde(default)]` resolves to `Unsupported` -- the frontend must
+    /// additionally gate this on `agent_version` (see `NAMING_GENERATION_VERSION`)
+    /// before trusting it, since a value of `Unsupported` is ambiguous between
+    /// "genuinely unsupported" and "never classified".
+    #[serde(default)]
+    pub verification_tier: NameVerificationTier,
+}
+
+/// A bounded, durable record of an AI naming attempt that did not produce a
+/// usable result. These records are observability data only: loading them must
+/// never change scheduling, confidence calibration or rename eligibility.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredGenerationDiagnostic {
+    pub entry_address: String,
+    pub stage: String,
+    pub attempt: u8,
+    pub validation_error: String,
+    pub raw_response: Option<String>,
+    pub agent_version: u32,
+    pub created_at_unix_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +246,12 @@ pub struct GenerationResult {
     /// Optional read-only investigations requested by the first model pass.
     /// The backend enforces a maximum of two and performs at most one follow-up.
     pub requested_tools: Vec<InvestigationTool>,
+    /// Defaults to `Unsupported` (never classified) until a calibration pass
+    /// -- `calibrate_confidence_with_verification` or
+    /// `calibrate_confidence_with_deterministic_evidence` -- actually
+    /// computes it. Every real pipeline runs one of those before this result
+    /// is returned to the frontend or persisted.
+    pub verification_tier: NameVerificationTier,
 }
 
 /// Small local models regularly report near-certainty for a plausible-sounding
@@ -804,6 +882,7 @@ pub fn calibrate_confidence_with_verification(
     let generator_confidence = result.confidence;
     calibrate_confidence(context, result);
     let Some(name) = result.suggested_name.as_deref() else {
+        result.verification_tier = NameVerificationTier::Unsupported;
         return;
     };
     let tokens = meaningful_name_tokens(name);
@@ -868,15 +947,21 @@ pub fn calibrate_confidence_with_verification(
         && tokens.iter().all(|token| covered.contains(token))
         && unsupported.is_empty();
 
-    let mut cap = if all_tokens_covered && kinds.len() >= 2 {
-        85
+    // The tier is computed from exactly the same classification as the
+    // numeric cap below, so the two can never disagree about which case a
+    // result falls into -- gating (auto-apply, second-pass anchors) must use
+    // this tier, never a numeric confidence threshold alone, since the cap
+    // values are free to be retuned independently later.
+    let (mut cap, tier) = if all_tokens_covered && kinds.len() >= 2 {
+        (85, NameVerificationTier::Strong)
     } else if all_tokens_covered && kinds.len() == 1 {
-        70
+        (70, NameVerificationTier::Supported)
     } else if valid_claims > 0 || !covered.is_empty() {
-        60
+        (60, NameVerificationTier::Partial)
     } else {
-        45
+        (45, NameVerificationTier::Unsupported)
     };
+    result.verification_tier = tier;
     let raw_tokens = name_tokens(name);
     let contains_structural_placeholder = raw_tokens.iter().any(|token| {
         matches!(
@@ -1291,6 +1376,7 @@ Il doit y avoir exactement une entree par adresse, dans le meme ordre."
             ChatMessage { role: "user".to_owned(), content: items },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(2_048),
         require_json_object: true,
         response_schema: Some(generation_batch_schema(contexts)),
     }
@@ -1348,6 +1434,7 @@ requested_tools doit obligatoirement etre vide et il doit y avoir exactement une
             },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(2_048),
         require_json_object: true,
         response_schema: Some(generation_batch_schema(
             &contexts
@@ -1390,6 +1477,7 @@ pub fn build_name_verification_batch_request(
             },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(2_048),
         require_json_object: true,
         // Ollama's grammar compiler rejects this nested claim schema on some
         // versions. JSON-object mode plus strict serde parsing below is both
@@ -1453,9 +1541,10 @@ pub struct RefinementSeed {
     pub reasoning: String,
 }
 
-/// A compact second-pass request. It does not start another open-ended tool
-/// loop: the application already performs the bounded caller/callee inquiry
-/// before this request. One provider and one response are therefore enough.
+/// A compact second-pass request for one function or a tiny set of functions
+/// whose direct graph neighbourhoods do not overlap. It does not start another
+/// open-ended tool loop: the application already performs the bounded
+/// caller/callee inquiry before this request.
 pub fn build_refinement_batch_request(
     contexts: &[(String, GenerationContext, Vec<ToolFinding>)],
     seeds: &[RefinementSeed],
@@ -1487,16 +1576,22 @@ pub fn build_refinement_batch_request(
         .iter()
         .map(|(address, context, _)| (address.clone(), context.clone()))
         .collect::<Vec<_>>();
+    let scope_instruction = if contexts.len() == 1 {
+        "Tu effectues une SECONDE PASSE LEGERE sur UNE SEULE FONCTION."
+    } else {
+        "Tu effectues une SECONDE PASSE LEGERE sur quelques FONCTIONS INDEPENDANTES. Analyse chaque adresse isolement : n'utilise jamais le nom ou les faits d'une entree pour une autre."
+    };
+    let output_budget = (contexts.len() as u32 * 512 + 256).min(2_048);
     ChatCompletionRequest {
         model: model.to_owned(),
         messages: vec![
             ChatMessage {
                 role: "system".to_owned(),
                 content: format!(
-                    "{SYSTEM_PROMPT} Tu effectues une SECONDE PASSE LEGERE. Une premiere passe a deja propose un nom. \
+                    "{SYSTEM_PROMPT} {scope_instruction} Une premiere passe a deja propose un nom. \
 Utilise les nouveaux noms provisoires voisins et l'enquete caller/callee pour conserver, preciser ou remplacer ce nom. \
 Les noms provisoires restent des hypotheses : ne les cite jamais comme preuve independante et ne propage pas leur erreur. \
-Ne demande aucun outil. Retourne uniquement l'objet JSON results attendu, une entree par adresse, dans le meme ordre."
+Ne demande aucun outil. Retourne uniquement l'objet JSON results attendu, exactement une entree par adresse et dans le meme ordre."
                 ),
             },
             ChatMessage {
@@ -1505,8 +1600,122 @@ Ne demande aucun outil. Retourne uniquement l'objet JSON results attendu, une en
             },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(output_budget),
         require_json_object: true,
         response_schema: Some(generation_batch_schema(&schema_contexts)),
+    }
+}
+
+/// Emergency retry used only when the provider explicitly reports that the
+/// normal contextual answer hit its output limit. The semantic facts remain
+/// real, but the prompt is deliberately much smaller so the retry cannot
+/// reproduce the same context/output spiral.
+pub fn build_compact_refinement_request(
+    context: &(String, GenerationContext, Vec<ToolFinding>),
+    seed: &RefinementSeed,
+    model: &str,
+) -> ChatCompletionRequest {
+    let (address, original_context, findings) = context;
+    let mut compact = original_context.clone();
+    compact.base.decompiled_code = compact
+        .base
+        .decompiled_code
+        .as_deref()
+        .map(|code| bounded_text(code, 1_500));
+    compact.base.caller_names.truncate(4);
+    compact.base.callee_names.truncate(4);
+    compact.base.referenced_strings.truncate(6);
+    compact.semantic_facts.callers.truncate(4);
+    compact.semantic_facts.callees.truncate(4);
+    compact.semantic_facts.imported_symbols.truncate(6);
+    compact.semantic_facts.referenced_strings.truncate(6);
+    compact.semantic_facts.rtti_class_names.truncate(4);
+    compact.semantic_facts.numeric_constants.truncate(6);
+    compact.semantic_facts.global_references.truncate(6);
+    compact.semantic_facts.incoming_callsite_arguments.truncate(4);
+    compact.semantic_facts.callsite_arguments.truncate(4);
+    compact.provisional_neighbors.truncate(2);
+    let finding = findings
+        .first()
+        .map(|finding| bounded_text(&finding.content, 1_200))
+        .unwrap_or_else(|| "aucun resultat supplementaire".to_owned());
+    let previous_name = seed.suggested_name.as_deref().unwrap_or("aucune");
+    let schema_context = vec![(address.clone(), compact.clone())];
+
+    ChatCompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "Retourne uniquement un petit objet JSON pour {address}: \
+{{\"results\":[{{\"entry_address\":\"{address}\",\"suggested_name\":\"nom_action_objet\" ou null,\"confidence\":65,\"evidence\":[],\"reasoning\":\"Role observe : ...\",\"requested_tools\":[]}}]}}. \
+N'invente rien et retourne null avec confiance 0 si les faits sont insuffisants."
+                ),
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: format!(
+                    "PROPOSITION PRECEDENTE: {previous_name} ({}%)\n{}\nENQUETE: {finding}",
+                    seed.confidence,
+                    format_batch_context(&compact)
+                ),
+            },
+        ],
+        temperature: Some(0.0),
+        max_tokens: Some(384),
+        require_json_object: true,
+        response_schema: Some(generation_batch_schema(&schema_context)),
+    }
+}
+
+/// Builds the single bounded correction allowed after a contextual-refinement
+/// answer was rejected. Ollama can return valid HTTP/JSON while still omitting
+/// the requested address or producing an invalid identifier. Repeating the
+/// same deterministic prompt would reproduce the same error, so the rejected
+/// answer and the exact validation reason are supplied explicitly.
+pub fn build_refinement_repair_request(
+    context: &(String, GenerationContext, Vec<ToolFinding>),
+    seed: &RefinementSeed,
+    rejected_response: &str,
+    validation_error: &str,
+    model: &str,
+) -> ChatCompletionRequest {
+    let (address, generation_context, findings) = context;
+    let previous = format!(
+        "PROPOSITION PASSE 1 : {} (confiance {}%)\nRAISON PASSE 1 : {}",
+        seed.suggested_name.as_deref().unwrap_or("aucune"),
+        seed.confidence,
+        seed.reasoning
+    );
+    let schema_context = vec![(address.clone(), generation_context.clone())];
+    ChatCompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "{SYSTEM_PROMPT} Tu corriges UNE reponse de seconde passe refusee par le validateur. \
+Retourne uniquement {{\"results\":[{{\"entry_address\":\"{address}\",\"suggested_name\":\"nom\" ou null,\"confidence\":65,\"evidence\":[],\"reasoning\":\"...\",\"requested_tools\":[]}}]}}. \
+L'adresse doit etre recopiee exactement. Le nom doit etre un identifiant action_objet ASCII sans ponctuation. \
+Ne repete pas un nom explicitement refuse. Si aucun nom precis n'est defendable, retourne null avec confiance 0."
+                ),
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: format!(
+                    "ADRESSE {address}\n{previous}\n\n{}\n\nENQUETE CONTEXTUELLE AUTOMATIQUE\n{}\n\nREPONSE REFUSEE\n{}\n\nMOTIF DU REFUS\n{}",
+                    format_batch_context(generation_context),
+                    format_tool_findings(findings),
+                    bounded_text(rejected_response, 4_000),
+                    bounded_text(validation_error, 1_000)
+                ),
+            },
+        ],
+        temperature: Some(0.0),
+        max_tokens: Some(512),
+        require_json_object: true,
+        response_schema: Some(generation_batch_schema(&schema_context)),
     }
 }
 
@@ -1584,25 +1793,24 @@ pub fn parse_generation_batch_response(
             .ok_or_else(|| {
                 format!("the model omitted function '{expected}' from its batch response")
             })?;
-        let suggested_name = match &item.suggested_name {
-            Some(name) if !is_plausible_identifier(name) => {
-                return Err(format!("the model suggested invalid identifier '{name}'"))
-            }
-            Some(name) if item.confidence == 0 => {
-                return Err(format!(
-                    "the model suggested '{name}' for '{expected}' with zero confidence"
-                ))
-            }
-            Some(name) => Some(name.clone()),
-            None => None,
+        let suggested_name = if item.confidence == 0 {
+            None
+        } else {
+            normalize_model_identifier(item.suggested_name.as_deref())?
+        };
+        let confidence = if suggested_name.is_some() && item.confidence > 0 {
+            item.confidence.min(100)
+        } else {
+            0
         };
         results.push(GenerationBatchResult {
             entry_address: expected.clone(),
             result: GenerationResult {
                 suggested_name,
                 reasoning: item.reasoning.clone(),
-                confidence: item.confidence.min(100),
+                confidence,
                 evidence: item.evidence.clone(),
+                verification_tier: NameVerificationTier::default(),
                 requested_tools: item
                     .requested_tools
                     .iter()
@@ -1672,12 +1880,45 @@ pub fn build_generation_request(context: &GenerationContext, model: &str) -> Cha
             },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(768),
         require_json_object: true,
         response_schema: Some(generation_result_schema(
             None,
             context.base.decompiled_code.is_some(),
         )),
     }
+}
+
+/// Capacity-safe retry for a single first-pass function. It is only used
+/// after the provider explicitly reports truncation or a stopped model
+/// runner; the original failure remains persisted in the project journal.
+pub fn build_compact_generation_request(
+    context: &GenerationContext,
+    model: &str,
+) -> ChatCompletionRequest {
+    let mut compact = context.clone();
+    compact.base.decompiled_code = compact
+        .base
+        .decompiled_code
+        .as_deref()
+        .map(|code| bounded_text(code, 1_500));
+    compact.base.caller_names.truncate(4);
+    compact.base.callee_names.truncate(4);
+    compact.base.referenced_strings.truncate(6);
+    compact.semantic_facts.callers.truncate(4);
+    compact.semantic_facts.callees.truncate(4);
+    compact.semantic_facts.imported_symbols.truncate(6);
+    compact.semantic_facts.referenced_strings.truncate(6);
+    compact.semantic_facts.rtti_class_names.truncate(4);
+    compact.semantic_facts.numeric_constants.truncate(6);
+    compact.semantic_facts.global_references.truncate(6);
+    compact.semantic_facts.incoming_callsite_arguments.truncate(4);
+    compact.semantic_facts.callsite_arguments.truncate(4);
+    compact.provisional_neighbors.truncate(2);
+
+    let mut request = build_generation_request(&compact, model);
+    request.max_tokens = Some(384);
+    request
 }
 
 /// Builds one bounded correction request after the model returned a vague or
@@ -1712,6 +1953,7 @@ null, confidence: 0 et explique l'abstention. requested_tools doit etre vide."
             },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(512),
         require_json_object: true,
         // Unlike the first pass, an explicit abstention is a valid repaired
         // outcome. It is persisted and therefore does not become a retry loop.
@@ -1748,6 +1990,63 @@ fn is_plausible_identifier(name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
+fn is_deliberate_abstention_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    let compact = normalized.replace('_', "");
+    semantic_memory::is_generic_function_name(name)
+        || normalized.starts_with("unknown_")
+        || normalized.ends_with("_unknown")
+        || normalized.ends_with("_function")
+        || matches!(compact.as_str(), "utilityfunction" | "genericfunction")
+        || matches!(
+            normalized.as_str(),
+            "function"
+                | "func"
+                | "sub"
+                | "helper"
+                | "process_data"
+                | "handle_data"
+                | "unknown_function"
+        )
+}
+
+/// Converts only mechanically equivalent spellings into a Ghidra-safe bare
+/// identifier. It never shortens a vague semantic label into a more precise
+/// claim: placeholders and generic names become an explicit abstention.
+fn normalize_model_identifier(name: Option<&str>) -> Result<Option<String>, String> {
+    let Some(original) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+        return Ok(None);
+    };
+
+    let mut without_annotation = original;
+    if let Some((base, suffix)) = original.rsplit_once("@0x") {
+        if !base.is_empty() && !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
+        {
+            without_annotation = base;
+        }
+    }
+
+    let normalized = without_annotation
+        .replace("::", "_")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_whitespace() || character == '-' {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+
+    if is_deliberate_abstention_name(&normalized) {
+        return Ok(None);
+    }
+    if !is_plausible_identifier(&normalized) {
+        return Err(format!("the model suggested invalid identifier '{original}'"));
+    }
+    Ok(Some(normalized))
+}
+
 #[derive(Deserialize)]
 struct GenerationResponseJson {
     suggested_name: Option<String>,
@@ -1772,24 +2071,24 @@ pub fn parse_generation_response(
         serde_json::from_str(strip_markdown_json_fence(&response.content))
             .map_err(|error| format!("invalid generation response JSON: {error}"))?;
 
-    let suggested_name = match parsed.suggested_name {
-        Some(name) if !is_plausible_identifier(&name) => {
-            return Err(format!(
-                "the model suggested '{name}', which is not a valid identifier shape"
-            ))
-        }
-        Some(name) if parsed.confidence == 0 => {
-            return Err(format!("the model suggested '{name}' with zero confidence"))
-        }
-        Some(name) => Some(name),
-        None => None,
+    let suggested_name = if parsed.confidence == 0 && parsed.suggested_name.is_some() {
+        None
+    } else {
+        normalize_model_identifier(parsed.suggested_name.as_deref())
+            .map_err(|error| format!("{error}, which is not a valid identifier shape"))?
+    };
+    let confidence = if suggested_name.is_some() && parsed.confidence > 0 {
+        parsed.confidence.min(100)
+    } else {
+        0
     };
 
     Ok(GenerationResult {
         suggested_name,
         reasoning: parsed.reasoning,
-        confidence: parsed.confidence.min(100),
+        confidence,
         evidence: parsed.evidence,
+        verification_tier: NameVerificationTier::default(),
         requested_tools: parsed
             .requested_tools
             .iter()
@@ -1824,6 +2123,7 @@ pub fn parse_repaired_generation_response(
                 ),
                 confidence: 0,
                 evidence: parsed.evidence,
+                verification_tier: NameVerificationTier::default(),
                 requested_tools: Vec::new(),
             })
         }
@@ -1901,6 +2201,7 @@ mod tests {
 
         assert_eq!(chat_request.model, "qwen2.5-coder:7b");
         assert_eq!(chat_request.messages.len(), 2);
+        assert_eq!(chat_request.max_tokens, Some(768));
         let user_message = &chat_request.messages[1].content;
         assert!(user_message.contains("FUN_140009a10"));
         assert!(user_message.contains("CreateFileA"));
@@ -1969,7 +2270,83 @@ mod tests {
 
         assert_eq!(result.suggested_name, None);
         assert_eq!(result.confidence, 0);
-        assert!(result.reasoning.contains("Abstention apres correction"));
+        assert!(result.reasoning.contains("traitement indistinct"));
+    }
+
+    #[test]
+    fn contextual_repair_receives_the_rejected_answer_and_exact_address() {
+        let context = (
+            "0x140009a10".to_owned(),
+            sample_context(),
+            vec![ToolFinding {
+                tool: InvestigationTool::BehaviorSignals,
+                content: "appel: CreateFileA(path)".to_owned(),
+            }],
+        );
+        let seed = RefinementSeed {
+            entry_address: "0x140009a10".to_owned(),
+            suggested_name: Some("open_file".to_owned()),
+            confidence: 55,
+            reasoning: "Hypothese de premiere passe.".to_owned(),
+        };
+
+        let request = build_refinement_repair_request(
+            &context,
+            &seed,
+            r#"{"results":[]}"#,
+            "the model omitted the requested function",
+            "qwen2.5-coder:7b",
+        );
+
+        assert_eq!(request.max_tokens, Some(512));
+        assert!(request.messages[0].content.contains("0x140009a10"));
+        assert!(request.messages[1].content.contains(r#"{"results":[]}"#));
+        assert!(request.messages[1]
+            .content
+            .contains("the model omitted the requested function"));
+        assert!(request.messages[1].content.contains("CreateFileA"));
+        assert!(
+            request.response_schema.expect("repair schema")["properties"]["results"].is_object()
+        );
+    }
+
+    #[test]
+    fn compact_refinement_retry_has_a_small_bounded_prompt_and_output() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some("A".repeat(20_000));
+        let request = build_compact_refinement_request(
+            &(
+                "0x140009a10".to_owned(),
+                context,
+                vec![ToolFinding {
+                    tool: InvestigationTool::BehaviorSignals,
+                    content: "B".repeat(10_000),
+                }],
+            ),
+            &RefinementSeed {
+                entry_address: "0x140009a10".to_owned(),
+                suggested_name: Some("open_file".to_owned()),
+                confidence: 55,
+                reasoning: "hypothese".to_owned(),
+            },
+            "qwen2.5-coder:7b",
+        );
+
+        assert_eq!(request.max_tokens, Some(384));
+        assert!(request.messages[1].content.len() < 8_000);
+        assert!(request.messages[1].content.contains("contexte tronque"));
+    }
+
+    #[test]
+    fn compact_initial_retry_bounds_large_pseudocode_and_output() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some("A".repeat(20_000));
+
+        let request = build_compact_generation_request(&context, "qwen2.5-coder:7b");
+
+        assert_eq!(request.max_tokens, Some(384));
+        assert!(request.messages[1].content.len() < 8_000);
+        assert!(request.messages[1].content.contains("contexte tronque"));
     }
 
     #[test]
@@ -2007,23 +2384,21 @@ mod tests {
     }
 
     #[test]
-    fn a_namespaced_name_is_rejected_as_not_a_bare_identifier() {
+    fn a_namespaced_name_is_mechanically_normalized() {
         let response = ChatCompletionResponse {
-            content: r#"{"suggested_name": "std::open_config_file", "reasoning": "..."}"#
+            content: r#"{"suggested_name": "std::open_config_file", "confidence": 65, "reasoning": "..."}"#
                 .to_owned(),
         };
 
-        let error = parse_generation_response(&response)
-            .expect_err("a namespaced name is not a bare identifier shape");
-
-        assert!(error.contains("std::open_config_file"));
-        assert!(error.contains("not a valid identifier shape"));
+        let result = parse_generation_response(&response)
+            .expect("a C++ namespace separator has a lossless Ghidra-safe spelling");
+        assert_eq!(result.suggested_name.as_deref(), Some("std_open_config_file"));
     }
 
     #[test]
     fn a_name_with_punctuation_is_rejected() {
         let response = ChatCompletionResponse {
-            content: r#"{"suggested_name": "open-config-file!", "reasoning": "..."}"#.to_owned(),
+            content: r#"{"suggested_name": "open-config-file!", "confidence": 65, "reasoning": "..."}"#.to_owned(),
         };
 
         let error = parse_generation_response(&response)
@@ -2035,7 +2410,7 @@ mod tests {
     #[test]
     fn a_name_starting_with_a_digit_is_rejected() {
         let response = ChatCompletionResponse {
-            content: r#"{"suggested_name": "1_open_file", "reasoning": "..."}"#.to_owned(),
+            content: r#"{"suggested_name": "1_open_file", "confidence": 65, "reasoning": "..."}"#.to_owned(),
         };
 
         let error = parse_generation_response(&response)
@@ -2045,32 +2420,57 @@ mod tests {
     }
 
     #[test]
-    fn a_vague_placeholder_name_is_rejected() {
+    fn a_vague_placeholder_name_becomes_an_abstention() {
         let response = ChatCompletionResponse {
             content: r#"{"suggested_name":"process_data","confidence":90,"evidence":[],"reasoning":"Nom vague."}"#.to_owned(),
         };
-        let error = parse_generation_response(&response).expect_err("generic names are not useful");
-        assert!(error.contains("not a valid identifier shape"));
+        let result = parse_generation_response(&response).expect("generic names abstain cleanly");
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
     }
 
     #[test]
-    fn a_generated_ghidra_placeholder_is_rejected() {
+    fn a_generated_ghidra_placeholder_becomes_an_abstention() {
         let response = ChatCompletionResponse {
             content: r#"{"suggested_name":"FUN_140009ca0","confidence":65,"evidence":["appel"],"reasoning":"Nom recopie."}"#.to_owned(),
         };
-        let error = parse_generation_response(&response)
-            .expect_err("a generated Ghidra placeholder is not a useful proposal");
-        assert!(error.contains("not a valid identifier shape"));
+        let result = parse_generation_response(&response)
+            .expect("a copied Ghidra placeholder is an abstention, not a provider failure");
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
     }
 
     #[test]
-    fn a_named_answer_with_zero_confidence_is_rejected() {
+    fn a_named_answer_with_zero_confidence_becomes_an_abstention() {
         let response = ChatCompletionResponse {
             content: r#"{"suggested_name":"handle_file_operations","confidence":0,"evidence":[],"reasoning":"Aucun signal."}"#.to_owned(),
         };
-        let error = parse_generation_response(&response)
-            .expect_err("zero-confidence text is an abstention, not a proposal");
-        assert!(error.contains("zero confidence"));
+        let result = parse_generation_response(&response)
+            .expect("zero-confidence text is an abstention, not a provider failure");
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
+    }
+
+    #[test]
+    fn address_annotations_are_removed_without_changing_the_name() {
+        let response = ChatCompletionResponse {
+            content: r#"{"suggested_name":"__castguard_check_failure_os_handled@0x140014bf0","confidence":80,"evidence":["voisin"],"reasoning":"Nom voisin annoté."}"#.to_owned(),
+        };
+        let result = parse_generation_response(&response).expect("the address is metadata");
+        assert_eq!(
+            result.suggested_name.as_deref(),
+            Some("__castguard_check_failure_os_handled")
+        );
+    }
+
+    #[test]
+    fn spaces_are_normalized_then_vague_function_labels_abstain() {
+        let response = ChatCompletionResponse {
+            content: r#"{"suggested_name":"Memory Allocation Function","confidence":80,"evidence":[],"reasoning":"Trop vague."}"#.to_owned(),
+        };
+        let result = parse_generation_response(&response).expect("a vague label should abstain");
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
     }
 
     #[test]
@@ -2173,6 +2573,7 @@ mod tests {
             confidence: 95,
             evidence: vec!["boucle de remise a zero".to_owned()],
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 35);
@@ -2191,6 +2592,7 @@ mod tests {
             confidence: 96,
             evidence: vec!["CreateFileA".to_owned(), "rb".to_owned()],
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 55);
@@ -2228,6 +2630,7 @@ mod tests {
             confidence: 90,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2244,6 +2647,49 @@ mod tests {
     }
 
     #[test]
+    fn contextual_refinement_keeps_only_two_strong_direct_name_anchors() {
+        let direct_neighbors = std::collections::HashSet::from(["0x2", "0x3", "0x4", "0x5"]);
+        let provisional_names = vec![
+            ProvisionalFunctionName {
+                entry_address: "0x2".to_owned(),
+                name: "weak_neighbor".to_owned(),
+                confidence: 79,
+                source: "generation".to_owned(),
+            },
+            ProvisionalFunctionName {
+                entry_address: "0x3".to_owned(),
+                name: "strongest_neighbor".to_owned(),
+                confidence: 95,
+                source: "FunctionID".to_owned(),
+            },
+            ProvisionalFunctionName {
+                entry_address: "0x4".to_owned(),
+                name: "second_neighbor".to_owned(),
+                confidence: 90,
+                source: "BSim".to_owned(),
+            },
+            ProvisionalFunctionName {
+                entry_address: "0x5".to_owned(),
+                name: "third_neighbor".to_owned(),
+                confidence: 85,
+                source: "generation".to_owned(),
+            },
+            ProvisionalFunctionName {
+                entry_address: "0x99".to_owned(),
+                name: "unrelated_neighbor".to_owned(),
+                confidence: 100,
+                source: "FunctionID".to_owned(),
+            },
+        ];
+
+        let selected = select_provisional_neighbors("0x1", &direct_neighbors, &provisional_names);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].name, "strongest_neighbor");
+        assert_eq!(selected[1].name, "second_neighbor");
+    }
+
+    #[test]
     fn token_level_verified_evidence_can_raise_a_name_above_the_automatic_threshold() {
         let mut context = sample_context();
         context.semantic_facts.referenced_strings = vec!["config_file".to_owned()];
@@ -2253,6 +2699,7 @@ mod tests {
             confidence: 95,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -2279,6 +2726,7 @@ mod tests {
         calibrate_confidence_with_verification(&context, &mut result, &verification);
 
         assert_eq!(result.confidence, 85);
+        assert_eq!(result.verification_tier, NameVerificationTier::Strong);
         assert!(result
             .evidence
             .iter()
@@ -2294,6 +2742,7 @@ mod tests {
             confidence: 100,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -2311,7 +2760,106 @@ mod tests {
 
         calibrate_confidence_with_verification(&context, &mut result, &verification);
 
+        // The requirement this backs: a proposal at 45% must always be
+        // Unsupported -- the numeric cap and the tier come from the exact
+        // same branch, so a fabricated claim can neither raise the score nor
+        // smuggle in a stronger tier than the real evidence supports.
         assert_eq!(result.confidence, 45);
+        assert_eq!(result.verification_tier, NameVerificationTier::Unsupported);
+    }
+
+    #[test]
+    fn a_partly_verified_name_is_tagged_partial_not_unsupported() {
+        let context = sample_context();
+        let mut result = GenerationResult {
+            suggested_name: Some("open_encrypted_file".to_owned()),
+            reasoning: "Role observe : hypothese.".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+        };
+        let verification = NameVerificationResult {
+            entry_address: "0x140009a10".to_owned(),
+            verdict: VerificationVerdict::Partial,
+            confidence: 90,
+            claims: vec![VerificationClaim {
+                name_token: "open".to_owned(),
+                source_id: None,
+                kind: VerificationEvidenceKind::Import,
+                value: "CreateFileA".to_owned(),
+            }],
+            // "encrypted" is never backed by any real evidence in this
+            // context -- only "open" and "file" (via the raw catalogue
+            // scan) are, so the name as a whole must stay Partial.
+            unsupported_tokens: vec!["encrypted".to_owned()],
+            reasoning: "Un mot n'est pas relie a une source.".to_owned(),
+        };
+
+        calibrate_confidence_with_verification(&context, &mut result, &verification);
+
+        assert_eq!(result.confidence, 60);
+        assert_eq!(result.verification_tier, NameVerificationTier::Partial);
+    }
+
+    #[test]
+    fn a_fully_verified_single_category_name_is_tagged_supported_not_strong() {
+        let mut context = sample_context();
+        // Only the import stays as a matchable source, so both tokens can
+        // only ever be backed by one evidence category (Import) -- without
+        // this, "CreateFileA" also appears as a named callee and would
+        // silently supply a second independent category.
+        context.semantic_facts.callees.clear();
+        context.semantic_facts.referenced_strings.clear();
+        context.base.callee_names.clear();
+        let mut result = GenerationResult {
+            suggested_name: Some("open_file".to_owned()),
+            reasoning: "Role observe : hypothese.".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+        };
+        let verification = NameVerificationResult {
+            entry_address: "0x140009a10".to_owned(),
+            verdict: VerificationVerdict::Supported,
+            confidence: 90,
+            claims: vec![VerificationClaim {
+                name_token: "open".to_owned(),
+                source_id: None,
+                kind: VerificationEvidenceKind::Import,
+                value: "CreateFileA".to_owned(),
+            }],
+            unsupported_tokens: Vec::new(),
+            reasoning: "Tous les mots relies a une seule categorie.".to_owned(),
+        };
+
+        calibrate_confidence_with_verification(&context, &mut result, &verification);
+
+        assert_eq!(result.confidence, 70);
+        assert_eq!(result.verification_tier, NameVerificationTier::Supported);
+    }
+
+    #[test]
+    fn a_stored_record_saved_before_this_field_existed_defaults_to_unsupported() {
+        // Real shape of a generation-results.json entry written before
+        // verification_tier existed -- no such key at all.
+        let json = r#"{
+            "entry_address": "0x140009a10",
+            "suggested_name": "open_file",
+            "reasoning": "raison",
+            "provider_label": "Ollama (local)",
+            "confidence": 85,
+            "evidence": [],
+            "context_complete": true,
+            "agent_version": 9,
+            "analysis_pass": 1
+        }"#;
+
+        let stored: StoredGenerationOutcome =
+            serde_json::from_str(json).expect("a legacy record without the field must still parse");
+
+        assert_eq!(stored.verification_tier, NameVerificationTier::Unsupported);
     }
 
     #[test]
@@ -2323,6 +2871,7 @@ mod tests {
             confidence: 90,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -2376,6 +2925,7 @@ mod tests {
             confidence: 100,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -2400,6 +2950,7 @@ mod tests {
             confidence: 100,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -2418,6 +2969,7 @@ mod tests {
             confidence: 100,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -2436,6 +2988,7 @@ mod tests {
             confidence: 95,
             evidence: Vec::new(),
             requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),

@@ -234,6 +234,14 @@ interface StoredArbitrationOutcome extends ArbitrationOutcome {
   agent_version: number;
 }
 
+// Mirrors naming_generation::NameVerificationTier (Rust): a deterministic,
+// Rust-computed classification of how well the words of a proposed name are
+// backed by real evidence -- never the model's own free-form verdict.
+// "unsupported" must never be auto-applied and must never become a
+// second-pass anchor (see hasNoEvidenceAtAll's automatic-choice branch and
+// generationRefinementPlan below).
+type NameVerificationTier = "unsupported" | "partial" | "supported" | "strong";
+
 interface GenerationOutcome {
   suggested_name: string | null;
   reasoning: string;
@@ -241,6 +249,7 @@ interface GenerationOutcome {
   confidence: number;
   evidence: string[];
   analysis_pass?: number;
+  verification_tier: NameVerificationTier;
 }
 
 interface GenerationBatchOutcome extends GenerationOutcome {
@@ -251,6 +260,16 @@ interface StoredGenerationOutcome extends GenerationOutcome {
   entry_address: string;
   context_complete: boolean;
   agent_version: number;
+}
+
+interface StoredGenerationDiagnostic {
+  entry_address: string;
+  stage: string;
+  attempt: number;
+  validation_error: string;
+  raw_response: string | null;
+  agent_version: number;
+  created_at_unix_seconds: number;
 }
 
 interface AiProviderSummary {
@@ -518,14 +537,17 @@ interface ApplyRenamesResult {
     threshold: number;
   };
   const prudenceProfiles: PrudenceProfile[] = [
-    { value: 5, label: "Exploratoire", shortDescription: "Hypothèses issues du pseudocode, à relire", threshold: 45 },
-    { value: 7, label: "Équilibré", shortDescription: "Au moins un indice indépendant attendu", threshold: 65 },
-    { value: 9, label: "Strict", shortDescription: "Plusieurs indices cohérents exigés", threshold: 80 },
-    { value: 10, label: "Quasi certain", shortDescription: "Corroboration indépendante forte", threshold: 92 },
+    { value: 5, label: "Exploratoire", shortDescription: "Hypothèses issues du pseudocode, à relire", threshold: 30 },
+    { value: 7, label: "Équilibré", shortDescription: "Au moins un indice indépendant attendu", threshold: 45 },
+    { value: 9, label: "Strict", shortDescription: "Plusieurs indices cohérents exigés", threshold: 70 },
+    { value: 10, label: "Quasi certain", shortDescription: "Corroboration indépendante forte", threshold: 90 },
   ];
   let automaticPrudenceLevel = $state<PrudenceProfile["value"]>(7);
   let automaticIdentificationPage = $state(1);
   const automaticIdentificationPageSize = 12;
+  let automaticGenerationPage = $state(1);
+  const automaticGenerationPageSize = 10;
+  let includeBelowThresholdRenames = $state(false);
   let ignoredIdentificationAddresses = $state(new Set<string>());
   let isApplyingAutomaticRenames = $state(false);
   let automaticRenameError = $state("");
@@ -724,6 +746,18 @@ interface ApplyRenamesResult {
       unidentifiedFunctions.filter(
         (func) => hasNoEvidenceAtAll(func) && generationResults.has(func.entry_address),
       ).length,
+  );
+  let generationNetworkFailed = $derived.by(
+    () =>
+      [...generationErrors.values()].filter((error) => {
+        const lower = error.toLowerCase();
+        return (
+          lower.includes("network error") ||
+          lower.includes("timed out") ||
+          lower.includes("timeout") ||
+          lower.includes("connection attempt failed")
+        );
+      }).length,
   );
   let firstGenerationError = $derived.by(
     () => [...generationErrors.values()][0] ?? "",
@@ -936,10 +970,39 @@ interface ApplyRenamesResult {
   // with no FunctionID/BSim candidates at all -- see runBackgroundGeneration.
   let generationResults = $state(new Map<string, GenerationOutcome>());
   let generationErrors = $state(new Map<string, string>());
+  // Strong graph anchors that were already visible when pass 1 ran. Pass 2
+  // is useful only when at least one new direct anchor appeared afterwards.
+  let generationAnchorsSeen = $state(new Map<string, string[]>());
+  // Historical diagnostics are deliberately separate from active errors:
+  // reopening a project must expose past failures without changing the queue.
+  let generationDiagnostics = $state<StoredGenerationDiagnostic[]>([]);
   let generatingAddresses = $state(new Set<string>());
   let isBackgroundGenerating = $state(false);
   let isBackgroundRefining = $state(false);
   let isBackgroundAiRunning = $state(false);
+  type BackgroundAiRun = {
+    epoch: number;
+    projectId: string;
+    programSha256: string;
+  };
+  let backgroundAiEpoch = 0;
+  let backgroundAiActiveProjectId: string | null = null;
+  let backgroundAiActiveEpoch: number | null = null;
+  let backgroundAiQueuedProjectId: string | null = null;
+
+  function invalidateBackgroundAiRun(): void {
+    backgroundAiEpoch += 1;
+    backgroundAiQueuedProjectId = null;
+  }
+
+  function backgroundAiRunIsCurrent(run?: BackgroundAiRun): boolean {
+    if (!run) return true;
+    return (
+      run.epoch === backgroundAiEpoch &&
+      run.projectId === activeProjectId &&
+      run.programSha256 === importedExport?.program.sha256
+    );
+  }
 
   let generationRefinementPending = $derived.by(
     () => generationRefinementPlan().pending.length,
@@ -1251,7 +1314,12 @@ interface ApplyRenamesResult {
       // this name, not just that it did.
       if (hasNoEvidenceAtAll(func)) {
         const generation = generationResults.get(func.entry_address);
-        if (generation?.suggested_name) {
+        // "unsupported" means no meaningful word of the name is backed by
+        // any real evidence -- the model itself signalled it has nothing
+        // solid. Never automatic. The suggestion stays visible for manual
+        // review on the function's own detail panel; it simply never
+        // becomes an automatic-mode choice.
+        if (generation?.suggested_name && generation.verification_tier !== "unsupported") {
           const normalizedName = normalizedAutomaticSymbolName(generation.suggested_name);
           if (normalizedName) {
             const safeName = reserveUniqueAutomaticName(normalizedName, func.entry_address, reservedNames);
@@ -1464,6 +1532,13 @@ interface ApplyRenamesResult {
     automaticRenameEvaluation.choices.filter((choice) => choice.confidence < automaticConfidenceThreshold),
   );
   let automaticRenameRejections = $derived(automaticRenameEvaluation.rejections);
+  let automaticRenameApplicationCount = $derived(
+    Math.min(
+      500,
+      automaticRenameCandidates.length +
+        (includeBelowThresholdRenames ? automaticRenameReviewChoices.length : 0),
+    ),
+  );
   let automaticAmbiguousChoiceCount = $derived(
     automaticRenameCandidates.filter((choice) => choice.ambiguous).length,
   );
@@ -1476,6 +1551,18 @@ interface ApplyRenamesResult {
   // though it's still included in the same bulk "apply" action.
   let automaticRenameGenerationCandidates = $derived(
     automaticRenameCandidates.filter((choice) => choice.source === "generation"),
+  );
+  let automaticGenerationPageCount = $derived(
+    Math.max(1, Math.ceil(automaticRenameGenerationCandidates.length / automaticGenerationPageSize)),
+  );
+  let currentAutomaticGenerationPage = $derived(
+    Math.min(automaticGenerationPage, automaticGenerationPageCount),
+  );
+  let paginatedAutomaticGenerationCandidates = $derived(
+    automaticRenameGenerationCandidates.slice(
+      (currentAutomaticGenerationPage - 1) * automaticGenerationPageSize,
+      currentAutomaticGenerationPage * automaticGenerationPageSize,
+    ),
   );
   let automaticRenameCandidatesWithEvidence = $derived(
     automaticRenameCandidates.filter((choice) => choice.source !== "generation"),
@@ -2101,6 +2188,8 @@ interface ApplyRenamesResult {
       identificationQueueSearch = "";
       automaticIdentificationMode = false;
       automaticIdentificationPage = 1;
+      automaticGenerationPage = 1;
+      includeBelowThresholdRenames = false;
       automaticRenameError = "";
       automaticRenameSuccess = "";
     }
@@ -2123,6 +2212,15 @@ interface ApplyRenamesResult {
 
   $effect(() => {
     if (activeWorkspaceView !== "identification") return;
+    if (
+      identificationQueueFilter === "matched" &&
+      matchedIdentificationCount === 0 &&
+      remainingIdentificationFunctions.length > 0
+    ) {
+      identificationQueueFilter = "all";
+      identificationPage = 1;
+      return;
+    }
     const queue = identificationQueue;
     if (queue.length === 0) return;
     if (!queue.some((func) => func.entry_address === selectedFunctionAddress)) {
@@ -2152,15 +2250,25 @@ interface ApplyRenamesResult {
     }
   }
 
+  function canonicalAddressKey(address: string): string {
+    const match = /^0x([0-9a-f]+)$/i.exec(address.trim());
+    if (!match) return address.trim();
+    const digits = match[1].replace(/^0+(?=[0-9a-f])/, "").toLowerCase();
+    return `0x${digits}`;
+  }
+
   function installIdentificationEvidence(items: FunctionIdentification[]) {
     identifications = new Map(
-      items.map((identification) => [identification.entry_address, identification.candidates]),
+      items.map((identification) => [
+        canonicalAddressKey(identification.entry_address),
+        identification.candidates,
+      ]),
     );
     backgroundBsimResults = new Map(
       items
         .filter((identification) => identification.bsim_scanned)
         .map((identification) => [
-          identification.entry_address,
+          canonicalAddressKey(identification.entry_address),
           {
             status: "available" as const,
             matches: identification.bsim_candidates,
@@ -2187,7 +2295,20 @@ interface ApplyRenamesResult {
   }
 
   function bsimResultForAddress(entryAddress: string): BsimQueryResult | undefined {
-    return decompileCache.get(entryAddress)?.bsim ?? backgroundBsimResults.get(entryAddress);
+    const cached = decompileCache.get(entryAddress)?.bsim;
+    const background = backgroundBsimResults.get(entryAddress);
+    // An on-demand decompilation may have cached "unavailable" before the
+    // whole-program BSim pass completed. Once the background scan has real
+    // evidence (including a confirmed empty result), it is authoritative.
+    if (background?.status === "available") return background;
+    return cached ?? background;
+  }
+
+  function backgroundBsimIsCompleteForAi(): boolean {
+    const targets = unidentifiedFunctions.filter((func) => !func.is_external);
+    return targets.length === 0 || targets.every((func) =>
+      backgroundBsimResults.get(func.entry_address)?.status === "available"
+    );
   }
 
   async function runBackgroundBsimScan(projectId: string): Promise<boolean> {
@@ -2195,10 +2316,12 @@ interface ApplyRenamesResult {
       const evidence = await invoke<FunctionIdentification[]>("scan_project_with_bsim", {
         projectId,
       });
+      if (projectId !== activeProjectId) return false;
       installIdentificationEvidence(evidence);
-      await runBackgroundAiAnalysis();
+      await runBackgroundAiAnalysis(projectId);
       return true;
     } catch (error) {
+      if (projectId !== activeProjectId) return false;
       console.error("Background BSim scan failed", error);
       analyzeError = `Le balayage BSim en arrière-plan a échoué : ${String(error)}`;
       analysisProgress = {
@@ -2213,6 +2336,7 @@ interface ApplyRenamesResult {
   }
 
   async function openProject(id: string) {
+    invalidateBackgroundAiRun();
     projectActionError = "";
     importError = "";
     analyzeError = "";
@@ -2230,6 +2354,8 @@ interface ApplyRenamesResult {
     arbitrationErrors = new Map();
     generationResults = new Map();
     generationErrors = new Map();
+    generationAnchorsSeen = new Map();
+    generationDiagnostics = [];
     functionIdAnalysisAvailable = false;
 
     try {
@@ -2284,12 +2410,31 @@ interface ApplyRenamesResult {
               provider_label: stored.provider_label,
               confidence: stored.confidence ?? 0,
               evidence: stored.evidence ?? [],
-              analysis_pass: stored.analysis_pass ?? 1,
+              // Protocol v9 isolates contextual refinement per function.
+              // Keep the expensive v4-v8 first-pass proposal, but revisit an
+              // old pass-2 marker so cached contaminated batches are repaired
+              // without regenerating every function from scratch.
+              analysis_pass: stored.agent_version >= 9 ? (stored.analysis_pass ?? 1) : 1,
+              // Protocol v10 adds the deterministic verification tier. A
+              // record saved before it existed was never classified -- never
+              // trust a same-named field on it, treat it as "unsupported"
+              // (never automatic, never a second-pass anchor) until this
+              // function is recalculated.
+              verification_tier:
+                stored.agent_version >= 10 ? stored.verification_tier ?? "unsupported" : "unsupported",
             },
           ]),
         );
       } catch (error) {
         console.error("Failed to load stored generation results", error);
+      }
+      try {
+        generationDiagnostics = await invoke<StoredGenerationDiagnostic[]>(
+          "get_generation_diagnostics",
+          { projectId: id },
+        );
+      } catch (error) {
+        console.error("Failed to load AI naming diagnostics", error);
       }
       functionIdAnalysisAvailable = loaded.identifications !== null;
       // A currently-available session (Ghidra project files genuinely
@@ -2949,10 +3094,16 @@ interface ApplyRenamesResult {
       automaticRenameError = "Le mode automatique demande un projet Ghidra local actif.";
       return;
     }
-    const batch = automaticRenameCandidates.slice(0, 500);
+    const eligibleChoices = includeBelowThresholdRenames
+      ? [...automaticRenameCandidates, ...automaticRenameReviewChoices]
+      : automaticRenameCandidates;
+    const batch = eligibleChoices.slice(0, 500);
     if (batch.length === 0) return;
+    const warning = includeBelowThresholdRenames
+      ? `\n\n⚠ AVERTISSEMENT : ${Math.min(automaticRenameReviewChoices.length, Math.max(0, 500 - automaticRenameCandidates.length))} proposition(s) sous le seuil de ${automaticConfidenceThreshold} % seront aussi appliquées. Elles sont moins fiables et peuvent attribuer un mauvais rôle aux fonctions.`
+      : "";
     if (!window.confirm(
-      `Appliquer ${batch.length} nom(s) ayant atteint le niveau « ${activePrudenceProfile.label} » (${automaticConfidenceThreshold} % minimum) dans Ghidra ? Chaque choix et sa preuve restent visibles dans le tableau.`,
+      `Appliquer ${batch.length} renommage(s) dans le projet Ghidra ?${warning}\n\nLes preuves resteront consultables, mais vérifie les noms suspects avant de poursuivre ton analyse.`,
     )) return;
 
     automaticRenameError = "";
@@ -2978,6 +3129,18 @@ interface ApplyRenamesResult {
     } finally {
       isApplyingAutomaticRenames = false;
     }
+  }
+
+  function toggleBelowThresholdRenames() {
+    if (includeBelowThresholdRenames) {
+      includeBelowThresholdRenames = false;
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `⚠ AVERTISSEMENT — RENOMMAGES MOINS FIABLES\n\nTu vas ajouter ${automaticRenameReviewChoices.length} proposition(s) qui n'atteignent pas le seuil « ${activePrudenceProfile.label} » (${automaticConfidenceThreshold} %).\n\nCes noms sont techniquement valides, mais les preuves sont insuffisantes : certains peuvent être inexacts ou trompeurs. Ils seront écrits dans le projet Ghidra si tu confirmes ensuite l'application du lot.\n\nLes propositions rejetées pour nom invalide, collision ou absence de nom resteront exclues.\n\nActiver quand même cette option ?`,
+    );
+    if (confirmed) includeBelowThresholdRenames = true;
   }
 
   function selectFunctionRenameSuggestion(name: string) {
@@ -3102,7 +3265,8 @@ interface ApplyRenamesResult {
   // Runs automatically once an AI provider is enabled. Several independent
   // ties share one model request, while every returned choice retains its
   // own candidates, evidence and persisted outcome.
-  async function runBackgroundArbitration() {
+  async function runBackgroundArbitration(run?: BackgroundAiRun) {
+    if (!backgroundAiRunIsCurrent(run)) return;
     if (isBackgroundArbitrating) return;
     if (!aiProviders.some((provider) => provider.enabled)) return;
 
@@ -3120,6 +3284,7 @@ interface ApplyRenamesResult {
     try {
       const batchSize = 6;
       for (let start = 0; start < pending.length; start += batchSize) {
+        if (!backgroundAiRunIsCurrent(run)) return;
         const addresses = pending.slice(start, start + batchSize);
         for (const address of addresses) {
           arbitratingAddresses = new Set(arbitratingAddresses).add(address);
@@ -3133,6 +3298,7 @@ interface ApplyRenamesResult {
             "arbitrate_identification_ties",
             { items },
           );
+          if (!backgroundAiRunIsCurrent(run)) return;
           const nextResults = new Map(arbitrationResults);
           for (const result of results) {
             nextResults.set(result.entry_address, result);
@@ -3148,7 +3314,10 @@ interface ApplyRenamesResult {
           arbitrationResults = nextResults;
         } catch (batchError) {
           console.warn("AI arbitration batch failed; retrying individually", batchError);
-          for (const address of addresses) await arbitrateFunction(address);
+          for (const address of addresses) {
+            if (!backgroundAiRunIsCurrent(run)) return;
+            await arbitrateFunction(address);
+          }
         } finally {
           const remaining = new Set(arbitratingAddresses);
           for (const address of addresses) remaining.delete(address);
@@ -3165,12 +3334,45 @@ interface ApplyRenamesResult {
   // Open-ended suggestions are kept distinct from evidence-backed names.
   // They may enter automatic mode only through the explicit confidence/
   // prudence threshold, and remain visibly labelled as AI suggestions.
-  async function generateSuggestionFor(entryAddress: string): Promise<void> {
-    if (!(await ensurePseudocodeForAi(entryAddress))) {
-      generationErrors = new Map(generationErrors).set(
+  async function recordGenerationDiagnostic(
+    entryAddress: string,
+    stage: string,
+    attempt: number,
+    validationError: string,
+  ): Promise<void> {
+    if (!activeProjectId) return;
+    const lowerError = validationError.toLowerCase();
+    const diagnosticStage =
+      lowerError.includes("network error") ||
+      lowerError.includes("timed out") ||
+      lowerError.includes("timeout") ||
+      lowerError.includes("connection attempt failed")
+        ? "network"
+        : stage;
+    try {
+      await invoke("save_generation_diagnostic", {
+        projectId: activeProjectId,
         entryAddress,
-        "Suggestion différée : aucun pseudocode exploitable n'a pu être obtenu.",
+        stage: diagnosticStage,
+        attempt,
+        validationError,
+        rawResponse: null,
+      });
+      generationDiagnostics = await invoke<StoredGenerationDiagnostic[]>(
+        "get_generation_diagnostics",
+        { projectId: activeProjectId },
       );
+    } catch (error) {
+      console.error("Failed to persist AI naming diagnostic", error);
+    }
+  }
+
+  async function generateSuggestionFor(entryAddress: string, run?: BackgroundAiRun): Promise<void> {
+    if (!backgroundAiRunIsCurrent(run)) return;
+    if (!(await ensurePseudocodeForAi(entryAddress))) {
+      const reason = "Suggestion différée : aucun pseudocode exploitable n'a pu être obtenu.";
+      generationErrors = new Map(generationErrors).set(entryAddress, reason);
+      await recordGenerationDiagnostic(entryAddress, "context_preparation", 1, reason);
       return;
     }
 
@@ -3178,21 +3380,28 @@ interface ApplyRenamesResult {
     const errorsWithoutThisAddress = new Map(generationErrors);
     errorsWithoutThisAddress.delete(entryAddress);
     generationErrors = errorsWithoutThisAddress;
+    rememberVisibleAnchors([entryAddress]);
 
     try {
       const result = await invoke<GenerationOutcome>("generate_identification_suggestion", {
         entryAddress,
+        projectId: run?.projectId ?? activeProjectId,
       });
+      if (!backgroundAiRunIsCurrent(run)) return;
       generationResults = new Map(generationResults).set(entryAddress, result);
-      if (activeProjectId) {
-        const projectId = activeProjectId;
+      if (run?.projectId ?? activeProjectId) {
+        const projectId = (run?.projectId ?? activeProjectId)!;
         void invoke("save_generation_result", { projectId, entryAddress, outcome: result }).catch(
           (error) => console.error("Failed to persist the generation result", error),
         );
       }
     } catch (error) {
-      generationErrors = new Map(generationErrors).set(entryAddress, String(error));
+      if (!backgroundAiRunIsCurrent(run)) return;
+      const reason = String(error);
+      generationErrors = new Map(generationErrors).set(entryAddress, reason);
+      await recordGenerationDiagnostic(entryAddress, "initial_generation", 1, reason);
     } finally {
+      if (!backgroundAiRunIsCurrent(run)) return;
       const remaining = new Set(generatingAddresses);
       remaining.delete(entryAddress);
       generatingAddresses = remaining;
@@ -3204,11 +3413,88 @@ interface ApplyRenamesResult {
     await generateSuggestionFor(selectedFunction.entry_address);
   }
 
+  function directGraphNeighborhoods(): Map<string, Set<string>> {
+    const neighborhoods = new Map<string, Set<string>>();
+    const ensure = (address: string) => {
+      let neighbors = neighborhoods.get(address);
+      if (!neighbors) {
+        neighbors = new Set([address]);
+        neighborhoods.set(address, neighbors);
+      }
+      return neighbors;
+    };
+    for (const func of importedExport?.functions ?? []) {
+      const source = ensure(func.entry_address);
+      const targets = func.calls
+        .map((call) => call.target_address)
+        .filter((address): address is string => address !== null);
+      if (func.thunk_target_address) targets.push(func.thunk_target_address);
+      for (const target of targets) {
+        source.add(target);
+        ensure(target).add(func.entry_address);
+      }
+    }
+    return neighborhoods;
+  }
+
+  function independentFunctionBatches(
+    addresses: string[],
+    maximumSize: number,
+    isolate: (address: string) => boolean = () => false,
+  ): string[][] {
+    const neighborhoods = directGraphNeighborhoods();
+    const batches: string[][] = [];
+    const overlaps = (left: string, right: string) => {
+      const leftSet = neighborhoods.get(left) ?? new Set([left]);
+      const rightSet = neighborhoods.get(right) ?? new Set([right]);
+      return [...leftSet].some((address) => rightSet.has(address));
+    };
+    for (const address of addresses) {
+      if (isolate(address)) {
+        batches.push([address]);
+        continue;
+      }
+      const compatible = batches.find(
+        (batch) =>
+          batch.length < maximumSize &&
+          batch.every((member) => !isolate(member) && !overlaps(address, member)),
+      );
+      if (compatible) compatible.push(address);
+      else batches.push([address]);
+    }
+    return batches;
+  }
+
+  function strongGenerationAnchors(): Set<string> {
+    return new Set([
+      ...[...arbitrationResults.entries()]
+        .filter(([, result]) => result.chosen_name !== null && result.confidence >= 80)
+        .map(([address]) => address),
+      ...[...generationResults.entries()]
+        .filter(([, result]) => result.suggested_name !== null && result.confidence >= 80)
+        .map(([address]) => address),
+    ]);
+  }
+
+  function rememberVisibleAnchors(addresses: string[]): void {
+    const anchors = strongGenerationAnchors();
+    const neighborhoods = directGraphNeighborhoods();
+    const next = new Map(generationAnchorsSeen);
+    for (const address of addresses) {
+      next.set(
+        address,
+        [...(neighborhoods.get(address) ?? [])].filter((neighbor) => anchors.has(neighbor)),
+      );
+    }
+    generationAnchorsSeen = next;
+  }
+
   // Mirrors runBackgroundArbitration: sequential, one real API call at a
   // time, gated on an enabled provider, skipping anything already resolved
   // or already failed so a reopen never re-spends a call on the same
   // function twice.
-  async function runBackgroundGeneration() {
+  async function runBackgroundGeneration(run?: BackgroundAiRun) {
+    if (!backgroundAiRunIsCurrent(run)) return;
     if (isBackgroundGenerating) return;
     if (!aiProviders.some((provider) => provider.enabled)) return;
 
@@ -3252,31 +3538,20 @@ interface ApplyRenamesResult {
       const functionsByAddress = new Map(
         unidentifiedFunctions.map((func) => [func.entry_address, func]),
       );
-      const batches: string[][] = [];
-      let compactBatch: string[] = [];
-      const flushCompactBatch = () => {
-        if (compactBatch.length > 0) batches.push(compactBatch);
-        compactBatch = [];
-      };
-      for (const address of pending) {
+      const isComplex = (address: string) => {
         const func = functionsByAddress.get(address);
         const code = decompileCache.get(address)?.decompiled_code ?? func?.decompiled_code ?? "";
-        const isComplex =
+        return (
           code.length > 3_000 ||
           (func?.calls.length ?? 0) > 7 ||
-          (func?.parameters.length ?? 0) > 6;
-        if (isComplex) {
-          flushCompactBatch();
-          batches.push([address]);
-        } else {
-          compactBatch.push(address);
-          if (compactBatch.length === 3) flushCompactBatch();
-        }
-      }
-      flushCompactBatch();
+          (func?.parameters.length ?? 0) > 6
+        );
+      };
+      const batches = independentFunctionBatches(pending, 4, isComplex);
 
       let completed = 0;
       for (const addresses of batches) {
+        if (!backgroundAiRunIsCurrent(run)) return;
         completed += addresses.length;
         analysisProgress = {
           stage: "ai-naming",
@@ -3286,6 +3561,7 @@ interface ApplyRenamesResult {
         for (const address of addresses) {
           generatingAddresses = new Set(generatingAddresses).add(address);
         }
+        rememberVisibleAnchors(addresses);
         try {
           const provisionalNames = [...generationResults.entries()]
             .filter(([, result]) => result.suggested_name !== null)
@@ -3297,16 +3573,21 @@ interface ApplyRenamesResult {
             }));
           const results = await invoke<GenerationBatchOutcome[]>(
             "generate_identification_suggestions",
-            { entryAddresses: addresses, provisionalNames },
+            {
+              entryAddresses: addresses,
+              provisionalNames,
+              expectedProgramSha256: run?.programSha256 ?? importedExport?.program.sha256,
+            },
           );
+          if (!backgroundAiRunIsCurrent(run)) return;
           const nextResults = new Map(generationResults);
           for (const result of results) {
             nextResults.set(result.entry_address, result);
           }
           generationResults = nextResults;
-          if (activeProjectId) {
+          if (run?.projectId ?? activeProjectId) {
             await invoke("save_generation_results", {
-              projectId: activeProjectId,
+              projectId: run?.projectId ?? activeProjectId,
               outcomes: results,
             });
           }
@@ -3316,9 +3597,11 @@ interface ApplyRenamesResult {
           // failed batch with the proven single-function path.
           console.warn("AI naming batch failed; retrying individually", batchError);
           for (const address of addresses) {
-            await generateSuggestionFor(address);
+            if (!backgroundAiRunIsCurrent(run)) return;
+            await generateSuggestionFor(address, run);
           }
         } finally {
+          if (!backgroundAiRunIsCurrent(run)) return;
           const remaining = new Set(generatingAddresses);
           for (const address of addresses) remaining.delete(address);
           generatingAddresses = remaining;
@@ -3331,22 +3614,44 @@ interface ApplyRenamesResult {
 
   async function retryFailedGeneration(): Promise<void> {
     if (isBackgroundGenerating || generationFailed === 0) return;
+    // A failed contextual pass already has a valid first-pass result. Reset
+    // only its pass marker so the retry actually targets refinement instead
+    // of silently excluding it from first-pass generation.
+    const retryableResults = new Map(generationResults);
+    for (const entryAddress of generationErrors.keys()) {
+      const previous = retryableResults.get(entryAddress);
+      if (previous && (previous.analysis_pass ?? 1) >= 2) {
+        retryableResults.set(entryAddress, { ...previous, analysis_pass: 1 });
+      }
+    }
+    generationResults = retryableResults;
     generationErrors = new Map();
     await runBackgroundGeneration();
+    await runBackgroundRefinement();
   }
 
   function generationRefinementPlan() {
     const provisionalNames = [
       ...[...arbitrationResults.entries()]
-        .filter(([, result]) => result.chosen_name !== null && result.confidence >= 65)
+        .filter(([, result]) => result.chosen_name !== null && result.confidence >= 80)
         .map(([entry_address, result]) => ({
           entry_address,
           name: result.chosen_name as string,
           confidence: result.confidence,
           source: result.provider_label,
         })),
+      // An "unsupported" name must never become a second-pass anchor for its
+      // neighbours, however high its blended confidence -- confidence alone
+      // is not a safe proxy for this once several providers can average
+      // together into a misleadingly high number (see
+      // generation_synthesis_never_upgrades_the_weakest_agreeing_tier).
       ...[...generationResults.entries()]
-        .filter(([, result]) => result.suggested_name !== null && result.confidence >= 65)
+        .filter(
+          ([, result]) =>
+            result.suggested_name !== null &&
+            result.confidence >= 80 &&
+            result.verification_tier !== "unsupported",
+        )
         .map(([entry_address, result]) => ({
           entry_address,
           name: result.suggested_name as string,
@@ -3355,57 +3660,39 @@ interface ApplyRenamesResult {
         })),
     ];
     const anchorAddresses = new Set(provisionalNames.map((item) => item.entry_address));
-    const connectedToAnchor = new Set<string>();
-    for (const func of importedExport?.functions ?? []) {
-      const targets = func.calls
-        .map((call) => call.target_address)
-        .filter((address): address is string => address !== null);
-      if (func.thunk_target_address) targets.push(func.thunk_target_address);
-      for (const target of targets) {
-        if (anchorAddresses.has(func.entry_address)) connectedToAnchor.add(target);
-        if (anchorAddresses.has(target)) connectedToAnchor.add(func.entry_address);
-      }
-    }
+    const neighborhoods = directGraphNeighborhoods();
     const pending = [...generationResults.entries()]
-      .filter(([entryAddress, result]) =>
-        (result.analysis_pass ?? 1) < 2 &&
-        ((result.suggested_name !== null && result.confidence < 65) ||
-          (result.suggested_name === null && connectedToAnchor.has(entryAddress))),
-      );
+      .filter(([entryAddress, result]) => {
+        const anchorsSeenDuringPassOne = new Set(generationAnchorsSeen.get(entryAddress) ?? []);
+        const hasNewDirectAnchor = [...(neighborhoods.get(entryAddress) ?? [])].some(
+          (neighbor) => anchorAddresses.has(neighbor) && !anchorsSeenDuringPassOne.has(neighbor),
+        );
+        return (
+          (result.analysis_pass ?? 1) < 2 &&
+          hasNewDirectAnchor &&
+          (result.suggested_name === null || result.confidence < 65)
+        );
+      });
     return { provisionalNames, pending };
   }
 
-  async function runBackgroundRefinement() {
+  async function runBackgroundRefinement(run?: BackgroundAiRun) {
+    if (!backgroundAiRunIsCurrent(run)) return;
     if (isBackgroundRefining) return;
     isBackgroundRefining = true;
     try {
-    const { provisionalNames, pending } = generationRefinementPlan();
-    if (pending.length === 0) return;
-    const batchSize = 6;
-    for (let start = 0; start < pending.length; start += batchSize) {
-      const batch = pending.slice(start, start + batchSize);
-      analysisProgress = {
-        stage: "ai-refinement",
-        message: `Seconde passe contextuelle : ${Math.min(start + batch.length, pending.length)} / ${pending.length} fonctions…`,
-        completed_percent: 90 + Math.round(9 * Math.min(start + batch.length, pending.length) / pending.length),
-      };
-      const seeds = batch.map(([entry_address, result]) => ({
-        entry_address,
-        suggested_name: result.suggested_name,
-        confidence: result.confidence,
-        reasoning: result.reasoning,
-      }));
-      try {
-        const refined = await invoke<GenerationBatchOutcome[]>(
-          "refine_identification_suggestions",
-          { seeds, provisionalNames },
-        );
+      const { provisionalNames, pending } = generationRefinementPlan();
+      if (pending.length === 0) return;
+
+      const applyRefinedResults = async (refined: GenerationBatchOutcome[]) => {
+        if (!backgroundAiRunIsCurrent(run)) return;
         const nextResults = new Map(generationResults);
+        const nextErrors = new Map(generationErrors);
         const persisted: GenerationBatchOutcome[] = [];
         for (const result of refined) {
           const previous = nextResults.get(result.entry_address);
           const accepted = previous &&
-            (result.suggested_name === null || result.confidence < previous.confidence)
+            (result.suggested_name === null || result.confidence <= previous.confidence)
             ? {
                 ...previous,
                 analysis_pass: 2,
@@ -3416,29 +3703,87 @@ interface ApplyRenamesResult {
               }
             : result;
           nextResults.set(result.entry_address, accepted);
+          nextErrors.delete(result.entry_address);
           persisted.push({ ...accepted, entry_address: result.entry_address });
         }
         generationResults = nextResults;
-        if (activeProjectId) {
+        generationErrors = nextErrors;
+        if ((run?.projectId ?? activeProjectId) && persisted.length > 0) {
           await invoke("save_generation_results", {
-            projectId: activeProjectId,
+            projectId: run?.projectId ?? activeProjectId,
             outcomes: persisted,
           });
         }
-      } catch (error) {
-        console.warn("Contextual refinement batch failed", error);
-        for (const [entryAddress, previous] of batch) {
-          generationErrors = new Map(generationErrors).set(
-            entryAddress,
-            `Seconde passe contextuelle indisponible : ${String(error)}`,
+      };
+
+      const markRefinementFailure = async (
+        entryAddress: string,
+        previous: GenerationOutcome,
+        error: unknown,
+      ) => {
+        const reason = `Seconde passe contextuelle indisponible : ${String(error)}`;
+        generationErrors = new Map(generationErrors).set(entryAddress, reason);
+        generationResults = new Map(generationResults).set(entryAddress, {
+          ...previous,
+          analysis_pass: 2,
+        });
+        await recordGenerationDiagnostic(entryAddress, "contextual_refinement", 2, reason);
+      };
+
+      const pendingByAddress = new Map(pending);
+      const batches = independentFunctionBatches(
+        pending.map(([entryAddress]) => entryAddress),
+        3,
+      ).map((addresses) => addresses.map((address) => [address, pendingByAddress.get(address)!] as const));
+      let completed = 0;
+
+      for (const batch of batches) {
+        if (!backgroundAiRunIsCurrent(run)) return;
+        analysisProgress = {
+          stage: "ai-refinement",
+          message: `Seconde passe contextuelle : ${Math.min(completed + batch.length, pending.length)} / ${pending.length} fonctions…`,
+          completed_percent: 90 + Math.round(9 * Math.min(completed + batch.length, pending.length) / pending.length),
+        };
+        const seeds = batch.map(([entry_address, result]) => ({
+          entry_address,
+          suggested_name: result.suggested_name,
+          confidence: result.confidence,
+          reasoning: result.reasoning,
+        }));
+
+        try {
+          const refined = await invoke<GenerationBatchOutcome[]>(
+            "refine_identification_suggestions",
+            { seeds, provisionalNames, projectId: run?.projectId ?? activeProjectId },
           );
-          generationResults = new Map(generationResults).set(entryAddress, {
-            ...previous,
-            analysis_pass: 2,
-          });
+          if (!backgroundAiRunIsCurrent(run)) return;
+          await applyRefinedResults(refined);
+        } catch (batchError) {
+          console.warn("Contextual refinement batch failed; retrying independently", batchError);
+          for (const [entryAddress, previous] of batch) {
+            if (!backgroundAiRunIsCurrent(run)) return;
+            try {
+              const refined = await invoke<GenerationBatchOutcome[]>(
+                "refine_identification_suggestions",
+                {
+                  seeds: [{
+                    entry_address: entryAddress,
+                    suggested_name: previous.suggested_name,
+                    confidence: previous.confidence,
+                    reasoning: previous.reasoning,
+                  }],
+                  provisionalNames,
+                  projectId: run?.projectId ?? activeProjectId,
+                },
+              );
+              await applyRefinedResults(refined);
+            } catch (individualError) {
+              await markRefinementFailure(entryAddress, previous, individualError);
+            }
+          }
         }
+        completed += batch.length;
       }
-    }
     } finally {
       isBackgroundRefining = false;
     }
@@ -3464,8 +3809,8 @@ interface ApplyRenamesResult {
     }
   }
 
-  async function prepareBackgroundAiContexts(): Promise<void> {
-    if (!activeProjectId || analysisSource !== "automatic") return;
+  async function prepareBackgroundAiContexts(run: BackgroundAiRun): Promise<void> {
+    if (!backgroundAiRunIsCurrent(run) || analysisSource !== "automatic") return;
     const addresses = unidentifiedFunctions
       .filter((func) => {
         if (func.is_external) return false;
@@ -3475,11 +3820,13 @@ interface ApplyRenamesResult {
       })
       .map((func) => func.entry_address);
     for (let start = 0; start < addresses.length; start += 500) {
+      if (!backgroundAiRunIsCurrent(run)) return;
       const batch = addresses.slice(start, start + 500);
       const prepared = await invoke<PreparedFunctionContext[]>("prepare_ai_function_contexts", {
-        projectId: activeProjectId,
+        projectId: run.projectId,
         entryAddresses: batch,
       });
+      if (!backgroundAiRunIsCurrent(run)) return;
       const nextCache = new Map(decompileCache);
       const nextErrors = new Map(decompileErrors);
       for (const item of prepared) {
@@ -3504,10 +3851,44 @@ interface ApplyRenamesResult {
     }
   }
 
-  async function runBackgroundAiAnalysis() {
-    if (isBackgroundAiRunning) return;
+  async function runBackgroundAiAnalysis(requestedProjectId: string | null = activeProjectId) {
+    if (!requestedProjectId || analysisSource !== "automatic") return;
+    // FunctionID/BSim are the cheap, deterministic first line. Do not build
+    // an AI plan from a partially populated BSim map: that previously made
+    // a 729-function firmware appear as a one-function AI job.
+    if (!backgroundBsimIsCompleteForAi()) {
+      backgroundAiQueuedProjectId = requestedProjectId;
+      return;
+    }
+    if (isBackgroundAiRunning) {
+      if (
+        backgroundAiActiveProjectId !== requestedProjectId ||
+        backgroundAiActiveEpoch !== backgroundAiEpoch
+      ) {
+        backgroundAiQueuedProjectId = requestedProjectId;
+        analysisProgress = {
+          stage: "ai-queued",
+          message: "Analyse IA mise en attente pour le projet courant...",
+          completed_percent: 61,
+        };
+        analysisProgressVisible = true;
+        analysisProgressMinimized = true;
+      }
+      return;
+    }
     if (!aiProviders.some((provider) => provider.enabled)) return;
+    if (requestedProjectId !== activeProjectId || !importedExport) return;
+    if (backgroundAiQueuedProjectId === requestedProjectId) {
+      backgroundAiQueuedProjectId = null;
+    }
+    const run: BackgroundAiRun = {
+      epoch: backgroundAiEpoch,
+      projectId: requestedProjectId,
+      programSha256: importedExport.program.sha256,
+    };
     isBackgroundAiRunning = true;
+    backgroundAiActiveProjectId = run.projectId;
+    backgroundAiActiveEpoch = run.epoch;
     analysisProgressVisible = true;
     analysisProgressMinimized = true;
     try {
@@ -3519,15 +3900,17 @@ interface ApplyRenamesResult {
         message: "Préparation groupée du pseudocode et du contexte IA…",
         completed_percent: 62,
       };
-      await prepareBackgroundAiContexts();
+      await prepareBackgroundAiContexts(run);
+      if (!backgroundAiRunIsCurrent(run)) return;
       analysisProgress = {
         stage: "ai-arbitration",
         message: "Arbitrage des correspondances FunctionID et BSim…",
         completed_percent: 68,
       };
-      await runBackgroundArbitration();
-      await runBackgroundGeneration();
-      await runBackgroundRefinement();
+      await runBackgroundArbitration(run);
+      await runBackgroundGeneration(run);
+      await runBackgroundRefinement(run);
+      if (!backgroundAiRunIsCurrent(run)) return;
       analysisProgress = {
         stage: "complete",
         message: "Reconnaissance et suggestions IA terminées.",
@@ -3537,6 +3920,7 @@ interface ApplyRenamesResult {
         if (!isBackgroundAiRunning) analysisProgressVisible = false;
       }, 1400);
     } catch (error) {
+      if (!backgroundAiRunIsCurrent(run)) return;
       console.error("Background AI analysis failed", error);
       analyzeError = `L'analyse IA en arrière-plan a échoué : ${String(error)}`;
       analysisProgress = {
@@ -3548,6 +3932,13 @@ interface ApplyRenamesResult {
       analysisProgressMinimized = false;
     } finally {
       isBackgroundAiRunning = false;
+      backgroundAiActiveProjectId = null;
+      backgroundAiActiveEpoch = null;
+      const queuedProjectId = backgroundAiQueuedProjectId;
+      backgroundAiQueuedProjectId = null;
+      if (queuedProjectId && queuedProjectId === activeProjectId) {
+        queueMicrotask(() => void runBackgroundAiAnalysis(queuedProjectId));
+      }
     }
   }
 
@@ -3880,10 +4271,23 @@ interface ApplyRenamesResult {
     aiProvidersError = "";
     try {
       aiProviders = await invoke<AiProviderSummary[]>("list_ai_providers");
+      if (aiProviders.some((provider) => provider.enabled) && activeProjectId && analysisSource === "automatic") {
+        void runBackgroundAiAnalysis(activeProjectId);
+      }
     } catch (error) {
       aiProviders = [];
       aiProvidersError = String(error);
     }
+  }
+
+  function retryCurrentProjectAiAnalysis(): void {
+    if (!activeProjectId || analysisSource !== "automatic") return;
+    if (!aiProviders.some((provider) => provider.enabled)) {
+      analyzeError = "Aucun fournisseur IA n'est activ\u00e9 dans les Param\u00e8tres.";
+      return;
+    }
+    analyzeError = "";
+    void runBackgroundAiAnalysis(activeProjectId);
   }
 
   async function addAiProvider() {
@@ -4034,6 +4438,7 @@ interface ApplyRenamesResult {
   }
 
   async function analyzeBinary(binaryPath: string) {
+    invalidateBackgroundAiRun();
     analyzeError = "";
     importSummary = null;
     importedExport = null;
@@ -4048,6 +4453,8 @@ interface ApplyRenamesResult {
     arbitrationErrors = new Map();
     generationResults = new Map();
     generationErrors = new Map();
+    generationAnchorsSeen = new Map();
+    generationDiagnostics = [];
     functionIdAnalysisAvailable = false;
     analysisTargetName = binaryPath.split(/[\\/]/).pop() ?? binaryPath;
 
@@ -4127,6 +4534,7 @@ interface ApplyRenamesResult {
   }
 
   async function importGhidraExport() {
+    invalidateBackgroundAiRun();
     importError = "";
     importSummary = null;
     importedExport = null;
@@ -5355,6 +5763,8 @@ interface ApplyRenamesResult {
                     onclick={() => {
                       automaticPrudenceLevel = profile.value;
                       automaticIdentificationPage = 1;
+                      automaticGenerationPage = 1;
+                      includeBelowThresholdRenames = false;
                       window.localStorage.setItem("automatic-rename-prudence", String(profile.value));
                     }}
                   >{profile.label}</button>
@@ -5364,9 +5774,9 @@ interface ApplyRenamesResult {
             </fieldset>
             <button
               type="button"
-              disabled={isApplyingAutomaticRenames || automaticRenameCandidates.length === 0 || analysisSource !== "automatic" || !activeProjectId}
+              disabled={isApplyingAutomaticRenames || automaticRenameApplicationCount === 0 || analysisSource !== "automatic" || !activeProjectId}
               onclick={applyAutomaticFunctionRenames}
-            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les propositions (${Math.min(automaticRenameCandidates.length, 500)})`}</button>
+            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les propositions (${automaticRenameApplicationCount})`}</button>
           </section>
           {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
           {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
@@ -5417,15 +5827,19 @@ interface ApplyRenamesResult {
           {/if}
 
           {#if automaticRenameGenerationCandidates.length > 0}
-          <section class="automatic-choice-preview generation-choice-preview">
-            <header>
+          <details class="automatic-choice-preview generation-choice-preview">
+            <summary>
               <div>
                 <h3>Propositions par IA générative</h3>
                 <span>Aucune preuve FunctionID/BSim pour ces fonctions — l'agent a inventé un nom à partir du pseudocode, des appelants/appelés et des chaînes. Ce sont des propositions, pas des faits vérifiés : relis le raisonnement avant de leur faire confiance.</span>
               </div>
-            </header>
+              <div class="generation-choice-summary-action">
+                <small>{automaticRenameGenerationCandidates.length} proposition(s) · page {currentAutomaticGenerationPage}/{automaticGenerationPageCount}</small>
+                <b>Afficher</b>
+              </div>
+            </summary>
             <div class="generation-choice-list">
-              {#each automaticRenameGenerationCandidates as item (item.func.entry_address)}
+              {#each paginatedAutomaticGenerationCandidates as item (item.func.entry_address)}
                 <article class="generation-choice-item">
                   <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
                   <div class="generation-choice-name">→ <b>{item.name}</b></div>
@@ -5433,7 +5847,12 @@ interface ApplyRenamesResult {
                 </article>
               {/each}
             </div>
-          </section>
+            <nav class="identification-pagination generation-choice-pagination" aria-label="Pages des propositions IA">
+              <button type="button" disabled={currentAutomaticGenerationPage === 1} onclick={() => (automaticGenerationPage = Math.max(1, currentAutomaticGenerationPage - 1))}>←</button>
+              <span>{currentAutomaticGenerationPage} / {automaticGenerationPageCount}</span>
+              <button type="button" disabled={currentAutomaticGenerationPage === automaticGenerationPageCount} onclick={() => (automaticGenerationPage = Math.min(automaticGenerationPageCount, currentAutomaticGenerationPage + 1))}>→</button>
+            </nav>
+          </details>
           {/if}
 
           {#if automaticRenameReviewChoices.length + automaticRenameRejections.length > 0}
@@ -5442,6 +5861,28 @@ interface ApplyRenamesResult {
                 <span><strong>{automaticRenameReviewChoices.length + automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Masquées par défaut pour ne pas imposer une longue liste répétitive</small></span>
                 <b>Voir les raisons</b>
               </summary>
+              {#if automaticRenameReviewChoices.length > 0}
+                <section class="below-threshold-warning" role="alert">
+                  <div class="below-threshold-warning-icon" aria-hidden="true">⚠</div>
+                  <div>
+                    <strong>Renommages sous le seuil : risque accru d'erreurs</strong>
+                    <p>
+                      Ces {automaticRenameReviewChoices.length} propositions sont techniquement utilisables, mais leurs preuves
+                      n'atteignent pas le niveau « {activePrudenceProfile.label} » ({automaticConfidenceThreshold} %).
+                      Les inclure peut attribuer un nom incorrect ou trompeur à certaines fonctions dans Ghidra.
+                    </p>
+                    <small>Les noms invalides, les collisions et les propositions sans nom restent toujours exclus.</small>
+                  </div>
+                  <button
+                    type="button"
+                    class:active={includeBelowThresholdRenames}
+                    aria-pressed={includeBelowThresholdRenames}
+                    onclick={toggleBelowThresholdRenames}
+                  >{includeBelowThresholdRenames
+                      ? `✓ Incluses dans le lot (${automaticRenameReviewChoices.length})`
+                      : `Inclure quand même (${automaticRenameReviewChoices.length})`}</button>
+                </section>
+              {/if}
               <div class="automatic-rejection-list">
                 {#each automaticRenameReviewChoices as item (item.func.entry_address)}
                   <article>
@@ -5491,10 +5932,13 @@ interface ApplyRenamesResult {
                   {#if isBackgroundGenerating}
                     Génération IA en arrière-plan : {generationResolved} / {generationTotal} traitée(s)…
                   {:else if generationResolved < generationTotal}
-                    {generationTotal - generationResolved} fonction(s) sans preuve en attente de suggestion IA.
+                    <span>{generationTotal - generationResolved} fonction(s) sans preuve en attente de suggestion IA.</span>
+                    {#if !isBackgroundAiRunning}
+                      <button type="button" onclick={retryCurrentProjectAiAnalysis}>Lancer l'analyse IA</button>
+                    {/if}
                   {:else if generationFailed > 0}
                     <span>
-                      Analyse IA interrompue : {generationSucceeded} résultat(s), {generationFailed} échec(s).
+                      Analyse IA interrompue : {generationSucceeded} résultat(s), {generationFailed} échec(s){generationNetworkFailed > 0 ? `, dont ${generationNetworkFailed} réseau` : ""}.
                       <small title={firstGenerationError}>{firstGenerationError}</small>
                     </span>
                     <button type="button" onclick={retryFailedGeneration}>Relancer les échecs</button>
@@ -5502,6 +5946,28 @@ interface ApplyRenamesResult {
                     Analyse IA terminée : {generationResolved} examinée(s), {generationProposed} nom(s) proposé(s).
                   {/if}
                 </p>
+              {/if}
+              {#if generationDiagnostics.length > 0}
+                <details class="generation-diagnostics">
+                  <summary>Journal IA persistant ({generationDiagnostics.length})</summary>
+                  <div class="generation-diagnostic-list">
+                    {#each generationDiagnostics.slice(-20).reverse() as diagnostic}
+                      <article>
+                        <header>
+                          <code>{diagnostic.entry_address}</code>
+                          <small>{diagnostic.stage} · tentative {diagnostic.attempt} · protocole v{diagnostic.agent_version} · {new Date(diagnostic.created_at_unix_seconds * 1000).toLocaleString("fr-FR")}</small>
+                        </header>
+                        <p>{diagnostic.validation_error}</p>
+                        {#if diagnostic.raw_response}
+                          <details>
+                            <summary>Réponse brute bornée</summary>
+                            <pre>{diagnostic.raw_response}</pre>
+                          </details>
+                        {/if}
+                      </article>
+                    {/each}
+                  </div>
+                </details>
               {/if}
               <div class="identification-queue-tools">
                 <div role="group" aria-label="Filtrer la file de renommage">
@@ -9814,7 +10280,23 @@ interface ApplyRenamesResult {
   .no-automatic-choice strong { color: #cbd5e1; font-size: 0.78rem; }
   .no-automatic-choice span { font-size: 0.65rem; }
   .generation-choice-preview { border-color: #4a3a14; }
-  .generation-choice-preview > header { border-bottom-color: #4a3a14; }
+  .generation-choice-preview > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0.75rem;
+    cursor: pointer;
+    list-style: none;
+  }
+  .generation-choice-preview > summary::-webkit-details-marker { display: none; }
+  .generation-choice-preview[open] > summary { border-bottom: 1px solid #4a3a14; }
+  .generation-choice-preview > summary > div:first-child { display: grid; gap: 0.12rem; }
+  .generation-choice-summary-action { display: grid; justify-items: end; gap: 0.18rem; white-space: nowrap; }
+  .generation-choice-summary-action small { color: #cbb98a; font-size: 0.57rem; }
+  .generation-choice-summary-action b { color: #fbbf24; font-size: 0.62rem; }
+  .generation-choice-preview[open] .generation-choice-summary-action b { font-size: 0; }
+  .generation-choice-preview[open] .generation-choice-summary-action b::after { content: "Masquer"; font-size: 0.62rem; }
   .generation-choice-preview h3 { color: #fbbf24; }
   .generation-choice-list { display: grid; gap: 0.55rem; padding: 0.75rem; }
   .generation-choice-item { display: grid; gap: 0.25rem; padding: 0.6rem 0.7rem; border: 1px solid #4a3a14; border-radius: 6px; background: #1a1608; }
@@ -9823,6 +10305,7 @@ interface ApplyRenamesResult {
   .generation-choice-item code { color: #7db7e8; font-size: 0.56rem; }
   .generation-choice-name { color: #fbbf24; font-size: 0.7rem; }
   .generation-choice-reasoning { margin: 0; color: #cbb98a; font-size: 0.64rem; line-height: 1.5; }
+  .generation-choice-pagination { border-top: 1px solid #4a3a14; }
 
   .automatic-rejections {
     border: 1px solid #513444;
@@ -9850,6 +10333,44 @@ interface ApplyRenamesResult {
   .automatic-rejections[open] > summary b { font-size: 0; }
   .automatic-rejections[open] > summary b::after { font-size: 0.63rem; content: "Masquer"; }
 
+  .below-threshold-warning {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.8rem;
+    margin: 0.7rem;
+    padding: 0.75rem 0.85rem;
+    border: 1px solid #b45309;
+    border-radius: 7px;
+    background: linear-gradient(90deg, rgb(120 53 15 / 28%), rgb(31 22 18 / 78%));
+    box-shadow: inset 3px 0 0 #f59e0b;
+  }
+
+  .below-threshold-warning-icon {
+    color: #fbbf24;
+    font-size: 1.35rem;
+    line-height: 1;
+  }
+
+  .below-threshold-warning > div:nth-child(2) { display: grid; gap: 0.22rem; }
+  .below-threshold-warning strong { color: #fde68a; font-size: 0.72rem; }
+  .below-threshold-warning p { margin: 0; color: #f3d6b3; font-size: 0.62rem; line-height: 1.45; }
+  .below-threshold-warning small { color: #c9a77f; font-size: 0.57rem; }
+  .below-threshold-warning button {
+    padding: 0.5rem 0.65rem;
+    border: 1px solid #d97706;
+    background: #3b220d;
+    color: #fde68a;
+    font-size: 0.61rem;
+    white-space: nowrap;
+  }
+  .below-threshold-warning button:hover:not(:disabled) { background: #55300d; }
+  .below-threshold-warning button.active {
+    border-color: #f59e0b;
+    background: #92400e;
+    color: #fff7ed;
+  }
+
   .automatic-rejection-list {
     display: grid;
     max-height: 390px;
@@ -9876,6 +10397,8 @@ interface ApplyRenamesResult {
   .automatic-rejection-list button:hover:not(:disabled) { background: #392033; }
 
   @media (max-width: 1180px) {
+    .below-threshold-warning { grid-template-columns: auto 1fr; }
+    .below-threshold-warning button { grid-column: 1 / -1; }
     .automatic-rejection-list article { grid-template-columns: 1fr 1fr; }
   }
 
@@ -10035,6 +10558,13 @@ interface ApplyRenamesResult {
     font-weight: 800;
     padding: 0.38rem 0.65rem;
   }
+  .generation-diagnostics { margin: 0.4rem 0.95rem 0; border: 1px solid #334155; border-radius: 0.45rem; background: #0b1526; color: #94a3b8; font-size: 0.62rem; }
+  .generation-diagnostics > summary { padding: 0.45rem 0.6rem; cursor: pointer; color: #cbd5e1; font-weight: 700; }
+  .generation-diagnostic-list { display: grid; max-height: 16rem; overflow: auto; border-top: 1px solid #26364d; }
+  .generation-diagnostic-list > article { display: grid; gap: 0.25rem; padding: 0.55rem 0.6rem; border-bottom: 1px solid #1f2d42; }
+  .generation-diagnostic-list header { display: flex; justify-content: space-between; gap: 0.5rem; }
+  .generation-diagnostic-list p { margin: 0; color: #fda4af; line-height: 1.4; overflow-wrap: anywhere; }
+  .generation-diagnostic-list pre { max-height: 10rem; overflow: auto; white-space: pre-wrap; color: #cbd5e1; font-size: 0.58rem; }
   .link-button { padding: 0; border: none; background: none; color: #67e8f9; font-size: 0.66rem; text-align: left; text-decoration: underline; cursor: pointer; width: fit-content; }
   .evidence-source-group small { color: #8292ad; font-size: 0.54rem; }
   .evidence-source-group code { color: #a7f3d0; font-size: 0.58rem; }

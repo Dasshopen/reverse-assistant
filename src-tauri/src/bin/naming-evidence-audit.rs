@@ -144,6 +144,7 @@ fn main() -> Result<(), String> {
             confidence: 100,
             evidence: outcome.evidence,
             requested_tools: Vec::new(),
+            verification_tier: naming_generation::NameVerificationTier::default(),
         };
         naming_generation::calibrate_confidence_with_deterministic_evidence(&context, &mut result);
         buckets[result.confidence as usize] += 1;

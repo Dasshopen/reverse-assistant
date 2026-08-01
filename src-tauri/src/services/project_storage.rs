@@ -15,7 +15,7 @@ use crate::models::ghidra_session::AnalysisSession;
 use crate::models::project::ProjectMetadata;
 use crate::services::ghidra_headless::ghidra_analysis_root_dir;
 use crate::services::naming_arbitration::StoredArbitrationOutcome;
-use crate::services::naming_generation::StoredGenerationOutcome;
+use crate::services::naming_generation::{StoredGenerationDiagnostic, StoredGenerationOutcome};
 
 const PROJECTS_DIR_NAME: &str = "projects";
 const PROJECT_METADATA_FILE_NAME: &str = "project.json";
@@ -24,6 +24,7 @@ const PROJECT_DATA_ARCHIVE_FILE_NAME: &str = "analysis.zip";
 const PROJECT_IDENTIFICATIONS_FILE_NAME: &str = "identifications.json";
 const PROJECT_ARBITRATION_FILE_NAME: &str = "arbitration-results.json";
 const PROJECT_GENERATION_FILE_NAME: &str = "generation-results.json";
+const PROJECT_GENERATION_DIAGNOSTICS_FILE_NAME: &str = "generation-diagnostics.json";
 
 // `metadata.session` is the permanent reference to a project's original
 // Ghidra analysis; `session_available` is always computed fresh (never
@@ -154,12 +155,14 @@ fn replace_project_identifications_at(
     export.validate()?;
     let arbitration = read_stored_arbitration(&dir)?;
     let generation = read_stored_generation(&dir)?;
+    let diagnostics = read_stored_generation_diagnostics(&dir)?;
     write_project_archive(
         &dir,
         &export,
         Some(identifications),
         arbitration.as_deref(),
         generation.as_deref(),
+        diagnostics.as_deref(),
     )
 }
 
@@ -191,12 +194,14 @@ fn replace_project_arbitration_at(
         read_stored_identifications(&dir, None)?
     };
     let generation = read_stored_generation(&dir)?;
+    let diagnostics = read_stored_generation_diagnostics(&dir)?;
     write_project_archive(
         &dir,
         &export,
         identifications.as_deref(),
         Some(results),
         generation.as_deref(),
+        diagnostics.as_deref(),
     )
 }
 
@@ -280,13 +285,147 @@ fn replace_project_generation_at(
         read_stored_identifications(&dir, None)?
     };
     let arbitration = read_stored_arbitration(&dir)?;
+    let diagnostics = read_stored_generation_diagnostics(&dir)?;
     write_project_archive(
         &dir,
         &export,
         identifications.as_deref(),
         arbitration.as_deref(),
         Some(results),
+        diagnostics.as_deref(),
     )
+}
+
+pub fn replace_project_generation_diagnostics(
+    app: &AppHandle,
+    id: &str,
+    diagnostics: &[StoredGenerationDiagnostic],
+) -> Result<(), String> {
+    replace_project_generation_diagnostics_at(&real_projects_root_dir(app)?, id, diagnostics)
+}
+
+fn replace_project_generation_diagnostics_at(
+    root: &Path,
+    id: &str,
+    diagnostics: &[StoredGenerationDiagnostic],
+) -> Result<(), String> {
+    require_safe_project_id(id)?;
+    let dir = project_dir_at(root, id);
+    if !dir.is_dir() {
+        return Err(format!("no saved project exists with id '{id}'"));
+    }
+    let (export_json, archived_identifications) = read_project_payload(&dir)?;
+    let export: GhidraExport = serde_json::from_str(&export_json)
+        .map_err(|error| format!("invalid saved project export: {error}"))?;
+    export.validate()?;
+    let identifications = if archived_identifications.is_some() {
+        archived_identifications
+    } else {
+        read_stored_identifications(&dir, None)?
+    };
+    let arbitration = read_stored_arbitration(&dir)?;
+    let generation = read_stored_generation(&dir)?;
+    write_project_archive(
+        &dir,
+        &export,
+        identifications.as_deref(),
+        arbitration.as_deref(),
+        generation.as_deref(),
+        Some(diagnostics),
+    )
+}
+
+pub fn load_project_generation_diagnostics(
+    app: &AppHandle,
+    id: &str,
+) -> Result<Vec<StoredGenerationDiagnostic>, String> {
+    require_safe_project_id(id)?;
+    let dir = project_dir_at(&real_projects_root_dir(app)?, id);
+    if !dir.is_dir() {
+        return Err(format!("no saved project exists with id '{id}'"));
+    }
+    Ok(read_stored_generation_diagnostics(&dir)?.unwrap_or_default())
+}
+
+fn read_stored_generation_diagnostics(
+    dir: &Path,
+) -> Result<Option<Vec<StoredGenerationDiagnostic>>, String> {
+    let archive_path = dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME);
+    if !archive_path.is_file() {
+        return Ok(None);
+    }
+    let file = fs::File::open(&archive_path).map_err(|error| {
+        format!(
+            "failed to open project archive '{}': {error}",
+            archive_path.display()
+        )
+    })?;
+    let mut archive = ZipArchive::new(file).map_err(|error| {
+        format!(
+            "invalid project archive '{}': {error}",
+            archive_path.display()
+        )
+    })?;
+    let result = match archive.by_name(PROJECT_GENERATION_DIAGNOSTICS_FILE_NAME) {
+        Ok(mut entry) => {
+            let mut json = String::new();
+            entry
+                .read_to_string(&mut json)
+                .map_err(|error| format!("failed to inflate generation diagnostics: {error}"))?;
+            let diagnostics: Vec<StoredGenerationDiagnostic> = serde_json::from_str(&json)
+                .map_err(|error| format!("invalid stored generation diagnostics: {error}"))?;
+            Ok(Some(compact_generation_diagnostics(diagnostics)))
+        }
+        Err(zip::result::ZipError::FileNotFound) => Ok(None),
+        Err(error) => Err(format!("failed to read generation diagnostics: {error}")),
+    };
+    result
+}
+
+fn generation_diagnostic_family(stage: &str) -> &str {
+    if stage == "network" {
+        "network"
+    } else if stage.starts_with("contextual_") {
+        "contextual"
+    } else if stage.starts_with("initial_") || stage == "initial_generation" {
+        "initial"
+    } else {
+        stage
+    }
+}
+
+fn compact_generation_diagnostics(
+    diagnostics: Vec<StoredGenerationDiagnostic>,
+) -> Vec<StoredGenerationDiagnostic> {
+    let mut compacted: Vec<StoredGenerationDiagnostic> = Vec::new();
+    for diagnostic in diagnostics {
+        let family = generation_diagnostic_family(&diagnostic.stage);
+        let duplicate = compacted.iter_mut().rev().find(|existing| {
+            existing.entry_address == diagnostic.entry_address
+                && generation_diagnostic_family(&existing.stage) == family
+                && existing
+                    .created_at_unix_seconds
+                    .abs_diff(diagnostic.created_at_unix_seconds)
+                    <= 60
+        });
+        if let Some(existing) = duplicate {
+            let diagnostic_has_raw = diagnostic.raw_response.is_some();
+            if diagnostic_has_raw || existing.raw_response.is_none() {
+                existing.validation_error = diagnostic.validation_error;
+            }
+            if diagnostic_has_raw {
+                existing.raw_response = diagnostic.raw_response;
+                existing.stage = diagnostic.stage;
+            }
+            existing.attempt = existing.attempt.max(diagnostic.attempt);
+            existing.created_at_unix_seconds = existing
+                .created_at_unix_seconds
+                .max(diagnostic.created_at_unix_seconds);
+        } else {
+            compacted.push(diagnostic);
+        }
+    }
+    compacted
 }
 
 pub fn load_project_generation(
@@ -351,12 +490,14 @@ fn replace_project_export_at(root: &Path, id: &str, export: &GhidraExport) -> Re
     let identifications = read_stored_identifications(&dir, None)?;
     let arbitration = read_stored_arbitration(&dir)?;
     let generation = read_stored_generation(&dir)?;
+    let diagnostics = read_stored_generation_diagnostics(&dir)?;
     write_project_archive(
         &dir,
         export,
         identifications.as_deref(),
         arbitration.as_deref(),
         generation.as_deref(),
+        diagnostics.as_deref(),
     )
 }
 
@@ -458,7 +599,7 @@ fn save_project_at_with_identifications(
     };
 
     write_metadata(&dir, &metadata)?;
-    write_project_archive(&dir, export, identifications, None, None)?;
+    write_project_archive(&dir, export, identifications, None, None, None)?;
 
     Ok(metadata)
 }
@@ -481,6 +622,7 @@ fn write_project_archive(
     identifications: Option<&[FunctionIdentification]>,
     arbitration: Option<&[StoredArbitrationOutcome]>,
     generation: Option<&[StoredGenerationOutcome]>,
+    diagnostics: Option<&[StoredGenerationDiagnostic]>,
 ) -> Result<(), String> {
     let export_json = serde_json::to_vec(export)
         .map_err(|error| format!("failed to serialize the analysis export: {error}"))?;
@@ -496,6 +638,10 @@ fn write_project_archive(
         .map(serde_json::to_vec)
         .transpose()
         .map_err(|error| format!("failed to serialize generation results: {error}"))?;
+    let diagnostics_json = diagnostics
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|error| format!("failed to serialize generation diagnostics: {error}"))?;
 
     let archive_path = dir.join(PROJECT_DATA_ARCHIVE_FILE_NAME);
     let temporary_path = dir.join(format!("{PROJECT_DATA_ARCHIVE_FILE_NAME}.tmp"));
@@ -536,6 +682,16 @@ fn write_project_archive(
         archive
             .write_all(&json)
             .map_err(|error| format!("failed to compress generation results: {error}"))?;
+    }
+    if let Some(json) = diagnostics_json {
+        archive
+            .start_file(PROJECT_GENERATION_DIAGNOSTICS_FILE_NAME, options)
+            .map_err(|error| {
+                format!("failed to start the generation diagnostics entry: {error}")
+            })?;
+        archive
+            .write_all(&json)
+            .map_err(|error| format!("failed to compress generation diagnostics: {error}"))?;
     }
     archive
         .finish()
@@ -1584,7 +1740,63 @@ mod tests {
             context_complete: true,
             agent_version: crate::services::naming_generation::NAMING_GENERATION_VERSION,
             analysis_pass: 1,
+            verification_tier: crate::services::naming_generation::NameVerificationTier::default(),
         }
+    }
+
+    fn sample_generation_diagnostic(entry_address: &str) -> StoredGenerationDiagnostic {
+        StoredGenerationDiagnostic {
+            entry_address: entry_address.to_owned(),
+            stage: "contextual_repair".to_owned(),
+            attempt: 2,
+            validation_error: "the model repeated a rejected generic name".to_owned(),
+            raw_response: Some("{\"suggested_name\":\"FUN_140001f20\"}".to_owned()),
+            agent_version: crate::services::naming_generation::NAMING_GENERATION_VERSION,
+            created_at_unix_seconds: 1_785_300_000,
+        }
+    }
+
+    #[test]
+    fn generation_diagnostics_round_trip_and_survive_result_updates() {
+        let root = isolated_root("generation-diagnostics-round-trip");
+        let export = sample_export("sample.exe");
+        let saved = save_project_at(&root, "Diagnosed", &export, None).expect("saving");
+        let diagnostics = vec![sample_generation_diagnostic("0x140001f20")];
+
+        replace_project_generation_diagnostics_at(&root, &saved.id, &diagnostics)
+            .expect("storing diagnostics should succeed");
+        replace_project_generation_at(
+            &root,
+            &saved.id,
+            &[sample_generation("0x140009a10", Some("open_config_file"))],
+        )
+        .expect("updating results should preserve diagnostics");
+
+        let dir = project_dir_at(&root, &saved.id);
+        assert_eq!(
+            read_stored_generation_diagnostics(&dir).expect("loading should succeed"),
+            Some(diagnostics)
+        );
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn backend_and_frontend_diagnostics_for_one_failure_are_compacted() {
+        let mut raw = sample_generation_diagnostic("0x140001f20");
+        raw.stage = "contextual_repair".to_owned();
+        raw.created_at_unix_seconds = 100;
+        let mut displayed = sample_generation_diagnostic("0x140001f20");
+        displayed.stage = "contextual_refinement".to_owned();
+        displayed.raw_response = None;
+        displayed.created_at_unix_seconds = 101;
+
+        let compacted = compact_generation_diagnostics(vec![raw.clone(), displayed]);
+
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].stage, "contextual_repair");
+        assert_eq!(compacted[0].raw_response, raw.raw_response);
+        assert_eq!(compacted[0].created_at_unix_seconds, 101);
     }
 
     #[test]
@@ -1616,6 +1828,46 @@ mod tests {
         let loaded = load_project_generation_at(&root, &saved.id)
             .expect("loading the stored generation results should succeed");
         assert_eq!(loaded, results);
+
+        fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
+    }
+
+    #[test]
+    fn the_verification_tier_survives_a_project_save_and_reopen() {
+        use crate::services::naming_generation::NameVerificationTier;
+
+        // sample_generation() always uses the default tier, which would not
+        // catch a round trip that silently resets the field back to that
+        // same default -- use a non-default value so a real loss is visible.
+        let root = isolated_root("generation-tier-round-trip");
+        let export = sample_export("sample.exe");
+        let saved = save_project_at(&root, "Generated", &export, None).expect("saving");
+
+        let mut strong = sample_generation("0x140009a10", Some("open_config_file"));
+        strong.verification_tier = NameVerificationTier::Strong;
+        let mut partial = sample_generation("0x140009a40", Some("guess_name"));
+        partial.verification_tier = NameVerificationTier::Partial;
+        replace_project_generation_at(&root, &saved.id, &[strong.clone(), partial.clone()])
+            .expect("storing generation results should succeed");
+
+        let loaded = load_project_generation_at(&root, &saved.id)
+            .expect("reopening the project should succeed");
+        let reloaded_strong = loaded
+            .iter()
+            .find(|item| item.entry_address == "0x140009a10")
+            .expect("the strong-tier result must still be present");
+        let reloaded_partial = loaded
+            .iter()
+            .find(|item| item.entry_address == "0x140009a40")
+            .expect("the partial-tier result must still be present");
+        assert_eq!(
+            reloaded_strong.verification_tier,
+            NameVerificationTier::Strong
+        );
+        assert_eq!(
+            reloaded_partial.verification_tier,
+            NameVerificationTier::Partial
+        );
 
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");
     }
