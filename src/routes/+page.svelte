@@ -1091,6 +1091,47 @@ interface ApplyRenamesResult {
     return chosenName;
   }
 
+  // Mirrors naming_generation::is_reserved_entry_point_name (Rust) -- kept
+  // as a frontend defensive check too, since a project's generation-results.json
+  // can hold a suggestion saved before that backend rule existed.
+  const RESERVED_ENTRY_POINT_NAMES = new Set([
+    "main",
+    "wmain",
+    "winmain",
+    "wwinmain",
+    "dllmain",
+    "_start",
+    "start",
+    "entry",
+    "moduleentrypoint",
+    "uefimain",
+    "efimain",
+    "driverentry",
+  ]);
+
+  function isReservedEntryPointName(name: string): boolean {
+    return RESERVED_ENTRY_POINT_NAMES.has(name.trim().toLowerCase());
+  }
+
+  function isRealEntryPointAddress(entryAddress: string): boolean {
+    return (importedExport?.program.external_entry_points ?? []).some(
+      (entry) => entry.kind === "function" && entry.address === entryAddress,
+    );
+  }
+
+  // Unlike reserveUniqueAutomaticName (which disambiguates a real, evidenced
+  // name by suffixing it), an AI-invented name that collides with one
+  // already used elsewhere is itself the sign of a low-quality guess (see
+  // the "main" proposed for 15 different functions in one real binary).
+  // Suffixing it into uniqueness would hide that signal behind a
+  // technically-unique but still-wrong name. Reserve on success; leave the
+  // set untouched and let the caller fall back to manual review otherwise.
+  function reserveNameIfGloballyUnique(name: string, reservedNames: Set<string>): boolean {
+    if (reservedNames.has(name)) return false;
+    reservedNames.add(name);
+    return true;
+  }
+
   function identificationSourceLabel(
     source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation",
   ): string {
@@ -1321,11 +1362,23 @@ interface ApplyRenamesResult {
         // becomes an automatic-mode choice.
         if (generation?.suggested_name && generation.verification_tier !== "unsupported") {
           const normalizedName = normalizedAutomaticSymbolName(generation.suggested_name);
-          if (normalizedName) {
-            const safeName = reserveUniqueAutomaticName(normalizedName, func.entry_address, reservedNames);
+          // A reserved runtime entry-point name (main, _start, DriverEntry...)
+          // may only be assigned to the function that actually holds that
+          // role -- and a name that collides with one already used
+          // elsewhere in the project is left for manual review rather than
+          // silently disambiguated into a differently-wrong unique name.
+          const isEntryPointNameMisused =
+            normalizedName !== null &&
+            isReservedEntryPointName(normalizedName) &&
+            !isRealEntryPointAddress(func.entry_address);
+          if (
+            normalizedName &&
+            !isEntryPointNameMisused &&
+            reserveNameIfGloballyUnique(normalizedName, reservedNames)
+          ) {
             choices.push({
               func,
-              name: safeName,
+              name: normalizedName,
               source: "generation",
               scoreLabel: "invention IA",
               evidenceLabel: `${generation.provider_label} · confiance calibrée ${generation.confidence}% : ${generation.reasoning}${generation.evidence.length > 0 ? ` · Indices : ${generation.evidence.join(" ; ")}` : ""}`,

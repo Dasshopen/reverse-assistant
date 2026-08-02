@@ -258,7 +258,46 @@ pub struct GenerationResult {
 /// name even when their only evidence is a short body calling another generic
 /// function.  Confidence used by automatic rename must therefore be bounded by
 /// deterministic facts, not trusted verbatim from the model.
+/// Runtime entry-point identifiers the model tends to reach for whenever a
+/// function's pseudocode merely *looks* like a top-level orchestrator (long,
+/// sequential, calls many helpers) -- real data on a UEFI binary with a
+/// single true entry point showed the same "main" suggested for 15 different
+/// functions, only one of which actually was the entry point. These names
+/// carry a specific runtime meaning; they must never be handed to a function
+/// that does not actually hold that role.
+fn is_reserved_entry_point_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "main"
+            | "wmain"
+            | "winmain"
+            | "wwinmain"
+            | "dllmain"
+            | "_start"
+            | "start"
+            | "entry"
+            | "moduleentrypoint"
+            | "uefimain"
+            | "efimain"
+            | "driverentry"
+    )
+}
+
 pub fn calibrate_confidence(context: &GenerationContext, result: &mut GenerationResult) {
+    if let Some(name) = result.suggested_name.as_deref() {
+        if is_reserved_entry_point_name(name) && !context.semantic_facts.is_entry_point {
+            let reason = format!(
+                "Abstention : « {name} » est reserve au veritable point d'entree du programme ; \
+cette fonction n'en est pas un."
+            );
+            if !result.reasoning.is_empty() {
+                result.reasoning.push_str(" | ");
+            }
+            result.reasoning.push_str(&reason);
+            result.evidence.push(reason);
+            result.suggested_name = None;
+        }
+    }
     if result.suggested_name.is_none() {
         result.confidence = 0;
         return;
@@ -2557,6 +2596,69 @@ mod tests {
                 ["anyOf"]
                 .is_array()
         );
+    }
+
+    #[test]
+    fn a_reserved_entry_point_name_is_rejected_for_a_non_entry_function() {
+        let context = sample_context();
+        assert!(
+            !context.semantic_facts.is_entry_point,
+            "the sample context must represent an ordinary, non-entry function"
+        );
+        let mut result = GenerationResult {
+            suggested_name: Some("main".to_owned()),
+            reasoning: "Role observe : orchestre plusieurs appels.".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+        };
+
+        calibrate_confidence(&context, &mut result);
+
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0);
+        assert!(result
+            .reasoning
+            .contains("reserve au veritable point d'entree"));
+    }
+
+    #[test]
+    fn a_reserved_entry_point_name_is_allowed_for_the_real_entry_point() {
+        let mut context = sample_context();
+        context.semantic_facts.is_entry_point = true;
+        let mut result = GenerationResult {
+            suggested_name: Some("main".to_owned()),
+            reasoning: "Role observe : point d'entree du programme.".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+        };
+
+        calibrate_confidence(&context, &mut result);
+
+        assert_eq!(result.suggested_name.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn other_reserved_runtime_entry_aliases_are_also_rejected_off_the_entry_point() {
+        let context = sample_context();
+        for reserved in ["_start", "WinMain", "DriverEntry", "EfiMain", "DllMain"] {
+            let mut result = GenerationResult {
+                suggested_name: Some(reserved.to_owned()),
+                reasoning: "hypothese".to_owned(),
+                confidence: 80,
+                evidence: Vec::new(),
+                requested_tools: Vec::new(),
+                verification_tier: NameVerificationTier::default(),
+            };
+            calibrate_confidence(&context, &mut result);
+            assert_eq!(
+                result.suggested_name, None,
+                "'{reserved}' must be rejected off the real entry point"
+            );
+        }
     }
 
     #[test]
