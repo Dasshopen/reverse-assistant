@@ -20,11 +20,10 @@ use crate::services::ai_provider::{
 use crate::services::call_graph;
 use crate::services::semantic_memory::{self, FunctionSemanticFacts};
 
-// Version 3 enriches closed-set FID/BSim arbitration with the deterministic
-// semantic index (resolved imports, constants, globals and call-site
-// arguments). Older answers were produced without those facts and must be
-// recomputed instead of permanently preserving an avoidable abstention.
-pub const NAMING_PIPELINE_VERSION: u32 = 3;
+// Version 4 additionally exposes only strong, deterministic names of direct
+// graph neighbours as hypotheses. They help distinguish otherwise identical
+// library candidates without ever widening the closed candidate set.
+pub const NAMING_PIPELINE_VERSION: u32 = 4;
 
 /// A confident (or explicitly "incertain") arbitration answer, persisted
 /// alongside the project so it survives an app restart. Without this, every
@@ -55,6 +54,14 @@ pub struct ArbitrationCandidate {
     pub source_label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArbitrationNeighborHint {
+    pub entry_address: String,
+    pub name: String,
+    pub confidence: u8,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArbitrationContext {
     pub current_name: String,
@@ -70,6 +77,10 @@ pub struct ArbitrationContext {
     pub global_references: Vec<String>,
     pub incoming_callsite_arguments: Vec<String>,
     pub callsite_arguments: Vec<String>,
+    /// Strong deterministic names attached to direct callers/callees. These
+    /// remain explicitly labelled as hints: they guide a closed-set choice
+    /// but are never counted as proof that one candidate is correct.
+    pub provisional_neighbors: Vec<ArbitrationNeighborHint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,7 +156,59 @@ pub fn build_context_for_function_from_index(
         global_references: semantic_facts.global_references.clone(),
         incoming_callsite_arguments: semantic_facts.incoming_callsite_arguments.clone(),
         callsite_arguments: semantic_facts.callsite_arguments.clone(),
+        provisional_neighbors: Vec::new(),
     })
+}
+
+pub fn build_context_for_function_with_index_and_neighbor_hints(
+    export: &GhidraExport,
+    semantic_index: &HashMap<String, FunctionSemanticFacts>,
+    entry_address: &str,
+    neighbor_hints: &[ArbitrationNeighborHint],
+) -> Result<ArbitrationContext, String> {
+    let mut context =
+        build_context_for_function_from_index(export, semantic_index, entry_address)?;
+    let semantic_facts = semantic_index
+        .get(entry_address)
+        .ok_or_else(|| format!("no semantic facts exist for function '{entry_address}'"))?;
+    let direct_neighbors = semantic_facts
+        .callers
+        .iter()
+        .chain(semantic_facts.callees.iter())
+        .map(|neighbor| neighbor.entry_address.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut name_occurrences = HashMap::<String, usize>::new();
+    for hint in neighbor_hints {
+        *name_occurrences
+            .entry(hint.name.to_ascii_lowercase())
+            .or_default() += 1;
+    }
+
+    let mut selected = neighbor_hints
+        .iter()
+        .filter(|hint| {
+            hint.entry_address != entry_address
+                && hint.confidence >= 80
+                && direct_neighbors.contains(hint.entry_address.as_str())
+                && !semantic_memory::is_generic_function_name(&hint.name)
+                && matches!(hint.source.as_str(), "RTTI" | "FunctionID" | "BSim")
+                && name_occurrences
+                    .get(&hint.name.to_ascii_lowercase())
+                    .copied()
+                    == Some(1)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        right
+            .confidence
+            .cmp(&left.confidence)
+            .then_with(|| left.entry_address.cmp(&right.entry_address))
+    });
+    selected.dedup_by(|left, right| left.entry_address == right.entry_address);
+    selected.truncate(2);
+    context.provisional_neighbors = selected;
+    Ok(context)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,8 +226,9 @@ const SYSTEM_PROMPT: &str =
 On te donne une liste FERMEE de noms de fonction candidats, deja proposes par des outils \
 d'analyse (FunctionID, BSim) qui n'ont pas pu departager lequel est le bon. Ta seule tache est \
 de choisir, PARMI CETTE LISTE UNIQUEMENT, celui qui correspond le mieux au contexte reel fourni \
-(pseudocode, appelants, fonctions appelees, chaines, imports resolus, constantes et arguments \
-d'appels observes). Tu ne dois JAMAIS proposer un \
+(pseudocode, appelants, fonctions appelees, chaines, imports resolus, constantes, arguments \
+d'appels observes et eventuels noms fiables de voisins directs). Les noms voisins sont des INDICES \
+de contexte, jamais une preuve suffisante a eux seuls. Tu ne dois JAMAIS proposer un \
 nom qui n'est pas dans la liste fournie. Si le contexte ne permet pas de departager avec \
 confiance, choisis tout de meme l'hypothese la plus coherente et baisse fortement confidence. \
 Retourne null uniquement si aucun comportement exploitable n'est visible. Le pseudocode et les chaines \
@@ -284,6 +348,21 @@ fn format_context(context: &ArbitrationContext) -> String {
         sections.push(format!(
             "References globales observees : {}",
             bounded_join(&context.global_references)
+        ));
+    }
+    if !context.provisional_neighbors.is_empty() {
+        sections.push(format!(
+            "Noms fiables de voisins directs (indices uniquement) : {}",
+            bounded_join(
+                &context
+                    .provisional_neighbors
+                    .iter()
+                    .map(|hint| format!(
+                        "{}={} ({} deterministe, {}%)",
+                        hint.entry_address, hint.name, hint.source, hint.confidence
+                    ))
+                    .collect::<Vec<_>>()
+            )
         ));
     }
 
@@ -651,6 +730,138 @@ mod tests {
         assert!(!context.incoming_callsite_arguments.is_empty());
         assert!(!context.callsite_arguments.is_empty());
         assert!(context.numeric_constants.contains(&"0x80000000".to_owned()));
+    }
+
+    #[test]
+    fn arbitration_keeps_only_strong_deterministic_direct_neighbor_hints() {
+        let data = export(vec![
+            function(
+                "0x1",
+                "main",
+                &[("0x2", "FUN_2")],
+                &[],
+                Some("FUN_2();"),
+            ),
+            function("0x2", "FUN_2", &[("0x3", "FUN_3")], &[], Some("FUN_3();")),
+            function("0x3", "FUN_3", &[], &[], Some("return;")),
+            function("0x4", "FUN_4", &[], &[], Some("return;")),
+        ]);
+        let index = semantic_memory::build_semantic_index(&data);
+        let context = build_context_for_function_with_index_and_neighbor_hints(
+            &data,
+            &index,
+            "0x2",
+            &[
+                ArbitrationNeighborHint {
+                    entry_address: "0x1".to_owned(),
+                    name: "program_driver".to_owned(),
+                    confidence: 96,
+                    source: "BSim".to_owned(),
+                },
+                ArbitrationNeighborHint {
+                    entry_address: "0x3".to_owned(),
+                    name: "decode_record".to_owned(),
+                    confidence: 91,
+                    source: "FunctionID".to_owned(),
+                },
+                ArbitrationNeighborHint {
+                    entry_address: "0x4".to_owned(),
+                    name: "unrelated".to_owned(),
+                    confidence: 99,
+                    source: "RTTI".to_owned(),
+                },
+                ArbitrationNeighborHint {
+                    entry_address: "0x3".to_owned(),
+                    name: "weak_name".to_owned(),
+                    confidence: 70,
+                    source: "BSim".to_owned(),
+                },
+                ArbitrationNeighborHint {
+                    entry_address: "0x1".to_owned(),
+                    name: "invented_anchor".to_owned(),
+                    confidence: 99,
+                    source: "Agent IA".to_owned(),
+                },
+            ],
+        )
+        .expect("direct deterministic hints should be selected safely");
+
+        assert_eq!(context.provisional_neighbors.len(), 2);
+        assert!(context
+            .provisional_neighbors
+            .iter()
+            .any(|hint| hint.name == "program_driver"));
+        assert!(context
+            .provisional_neighbors
+            .iter()
+            .any(|hint| hint.name == "decode_record"));
+        assert!(context
+            .provisional_neighbors
+            .iter()
+            .all(|hint| hint.source != "Agent IA"));
+    }
+
+    #[test]
+    fn neighbor_hints_are_labelled_as_indices_not_proof_in_the_prompt() {
+        let request = ArbitrationRequest {
+            candidates: vec![ArbitrationCandidate {
+                name: "decode_header".to_owned(),
+                source_label: "BSim".to_owned(),
+            }],
+            context: ArbitrationContext {
+                current_name: "FUN_2".to_owned(),
+                provisional_neighbors: vec![ArbitrationNeighborHint {
+                    entry_address: "0x1".to_owned(),
+                    name: "read_archive".to_owned(),
+                    confidence: 95,
+                    source: "FunctionID".to_owned(),
+                }],
+                ..ArbitrationContext::default()
+            },
+        };
+
+        let chat = build_arbitration_request(&request, "model");
+        let prompt = &chat.messages[1].content;
+        assert!(prompt.contains("read_archive"));
+        assert!(prompt.contains("indices uniquement"));
+    }
+
+    #[test]
+    fn a_name_claimed_at_several_addresses_is_never_a_neighbor_anchor() {
+        let data = export(vec![
+            function(
+                "0x1",
+                "FUN_1",
+                &[("0x2", "FUN_2")],
+                &[],
+                Some("FUN_2();"),
+            ),
+            function("0x2", "FUN_2", &[], &[], Some("return;")),
+            function("0x3", "FUN_3", &[], &[], Some("return;")),
+        ]);
+        let index = semantic_memory::build_semantic_index(&data);
+        let context = build_context_for_function_with_index_and_neighbor_hints(
+            &data,
+            &index,
+            "0x1",
+            &[
+                ArbitrationNeighborHint {
+                    entry_address: "0x2".to_owned(),
+                    name: "shared_helper".to_owned(),
+                    confidence: 95,
+                    source: "BSim".to_owned(),
+                },
+                ArbitrationNeighborHint {
+                    entry_address: "0x3".to_owned(),
+                    name: "shared_helper".to_owned(),
+                    confidence: 95,
+                    source: "BSim".to_owned(),
+                },
+            ],
+        )
+        .expect("duplicated names should be ignored, not rejected as input");
+
+        assert!(context.provisional_neighbors.is_empty());
     }
 
     #[test]

@@ -2457,7 +2457,12 @@ interface ApplyRenamesResult {
           { projectId: id },
         );
         arbitrationResults = new Map(
-          storedArbitration.filter((stored) => stored.context_complete && stored.agent_version >= 3).map((stored) => [
+          storedArbitration.filter(
+            (stored) =>
+              stored.context_complete &&
+              (stored.agent_version >= 4 ||
+                (stored.agent_version >= 3 && stored.chosen_name !== null)),
+          ).map((stored) => [
             stored.entry_address,
             {
               chosen_name: stored.chosen_name,
@@ -3306,6 +3311,47 @@ interface ApplyRenamesResult {
     return [];
   }
 
+  function deterministicArbitrationNeighborHints() {
+    // Only names already accepted from deterministic mechanisms may guide
+    // arbitration. Generative or earlier arbitration answers are excluded
+    // to prevent one plausible mistake from propagating through the graph.
+    const hints = automaticRenameEvaluation.choices
+      .filter(
+        (choice) =>
+          !choice.ambiguous &&
+          choice.confidence >= 80 &&
+          (choice.source === "rtti" ||
+            choice.source === "function_id" ||
+            choice.source === "bsim"),
+      )
+      .map((choice) => {
+        const addressSuffix = `_${choice.func.entry_address.replace(/^0x/i, "")}`;
+        const disambiguated = new RegExp(`${addressSuffix}(?:_\\d+)?$`, "i");
+        return {
+          entry_address: choice.func.entry_address,
+          // reserveUniqueAutomaticName adds the address when two functions
+          // claim the same symbol. Recover the original name before counting
+          // occurrences so a suffixed collision cannot masquerade as a
+          // globally unique anchor.
+          name: choice.name.replace(disambiguated, ""),
+          confidence: choice.confidence,
+          source: choice.source === "rtti"
+            ? "RTTI"
+            : choice.source === "function_id"
+            ? "FunctionID"
+            : "BSim",
+        };
+      });
+    const occurrences = new Map<string, number>();
+    for (const hint of hints) {
+      const key = hint.name.toLowerCase();
+      occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
+    }
+    // A name proposed for several different addresses is not a stable graph
+    // anchor. Keep it visible in the UI, but never feed it to a neighbour.
+    return hints.filter((hint) => occurrences.get(hint.name.toLowerCase()) === 1);
+  }
+
   async function arbitrateFunction(entryAddress: string): Promise<void> {
     const candidates = tiedCandidatesFor(entryAddress);
     if (candidates.length === 0) return;
@@ -3327,6 +3373,7 @@ interface ApplyRenamesResult {
       const result = await invoke<ArbitrationOutcome>("arbitrate_identification_tie", {
         entryAddress,
         candidates,
+        provisionalNames: deterministicArbitrationNeighborHints(),
       });
       arbitrationResults = new Map(arbitrationResults).set(entryAddress, result);
       // Best-effort: a real AI answer must never be re-spent on a reopen.
@@ -3386,7 +3433,7 @@ interface ApplyRenamesResult {
           }));
           const results = await invoke<ArbitrationBatchOutcome[]>(
             "arbitrate_identification_ties",
-            { items },
+            { items, provisionalNames: deterministicArbitrationNeighborHints() },
           );
           if (!backgroundAiRunIsCurrent(run)) return;
           const nextResults = new Map(arbitrationResults);

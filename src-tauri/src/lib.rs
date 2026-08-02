@@ -286,6 +286,20 @@ fn synthesize_arbitration_answers(
     }
 }
 
+fn arbitration_neighbor_hints(
+    provisional_names: &[naming_generation::ProvisionalFunctionName],
+) -> Vec<naming_arbitration::ArbitrationNeighborHint> {
+    provisional_names
+        .iter()
+        .map(|provisional| naming_arbitration::ArbitrationNeighborHint {
+            entry_address: provisional.entry_address.clone(),
+            name: provisional.name.clone(),
+            confidence: provisional.confidence,
+            source: provisional.source.clone(),
+        })
+        .collect()
+}
+
 #[tauri::command(async)]
 fn arbitrate_identification_tie(
     app: AppHandle,
@@ -293,6 +307,7 @@ fn arbitrate_identification_tie(
     semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     entry_address: String,
     candidates: Vec<ArbitrationCandidateInput>,
+    provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
 ) -> Result<ArbitrationOutcome, String> {
     if candidates.is_empty() {
         return Err("no candidates were provided to arbitrate between".to_owned());
@@ -313,10 +328,11 @@ fn arbitrate_identification_tie(
         .collect();
 
     let semantic_index = semantic_index_cache.get_or_build(&export)?;
-    let context = naming_arbitration::build_context_for_function_from_index(
+    let context = naming_arbitration::build_context_for_function_with_index_and_neighbor_hints(
         &export,
         semantic_index.as_ref(),
         &entry_address,
+        &arbitration_neighbor_hints(&provisional_names),
     )?;
 
     let enabled = ai_providers::enabled_providers_for_app(&app)?;
@@ -377,6 +393,7 @@ fn arbitrate_identification_ties(
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
     semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     items: Vec<ArbitrationBatchInput>,
+    provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
 ) -> Result<Vec<ArbitrationBatchOutcome>, String> {
     if items.is_empty() || items.len() > 6 {
         return Err("an arbitration batch must contain between 1 and 6 functions".to_owned());
@@ -387,6 +404,7 @@ fn arbitrate_identification_ties(
         .clone()
         .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
     let semantic_index = semantic_index_cache.get_or_build(&export)?;
+    let neighbor_hints = arbitration_neighbor_hints(&provisional_names);
     let requests = items
         .iter()
         .map(|item| {
@@ -404,10 +422,11 @@ fn arbitrate_identification_ties(
                     source_label: candidate.source_label.clone(),
                 })
                 .collect();
-            let context = naming_arbitration::build_context_for_function_from_index(
+            let context = naming_arbitration::build_context_for_function_with_index_and_neighbor_hints(
                 &export,
                 semantic_index.as_ref(),
                 &item.entry_address,
+                &neighbor_hints,
             )?;
             Ok((
                 item.entry_address.clone(),
