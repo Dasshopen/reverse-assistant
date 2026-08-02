@@ -5,7 +5,14 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$GhidraInstallDir
+    [string]$GhidraInstallDir,
+
+    # Optional wildcard for focused re-validation while developing a corpus
+    # family (for example: -LibraryPattern "edk2-*"). The default still
+    # validates every reference end to end.
+    [Parameter(Mandatory = $false)]
+    [ValidateNotNullOrEmpty()]
+    [string]$LibraryPattern = "*"
 )
 
 Set-StrictMode -Version Latest
@@ -61,8 +68,63 @@ $libraries = @(
         Name = "msvc-runtime"
         ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\msvc-runtime"
         Program = "msvc-runtime-reference.exe"
+    },
+    @{
+        Name = "edk2-uefi"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-uefi"
+        Program = "Shell.efi"
+    },
+    @{
+        Name = "edk2-acpi-view"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-acpi-view"
+        Program = "AcpiViewApp.efi"
+    },
+    @{
+        Name = "edk2-dp"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-dp"
+        Program = "dp.efi"
+    },
+    @{
+        Name = "edk2-dp-command"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-dp-command"
+        Program = "dpDynamicCommand.efi"
+    },
+    @{
+        Name = "edk2-http"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-http"
+        Program = "http.efi"
+    },
+    @{
+        Name = "edk2-http-command"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-http-command"
+        Program = "httpDynamicCommand.efi"
+    },
+    @{
+        Name = "edk2-tftp"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-tftp"
+        Program = "tftp.efi"
+    },
+    @{
+        Name = "edk2-tftp-command"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-tftp-command"
+        Program = "TftpDynamicCommand.efi"
+    },
+    @{
+        Name = "edk2-var-policy"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-var-policy"
+        Program = "varpolicy.efi"
+    },
+    @{
+        Name = "edk2-var-policy-command"
+        ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\edk2-var-policy-command"
+        Program = "VariablePolicyDynamicCommand.efi"
     }
 )
+
+$libraries = @($libraries | Where-Object { $_.Name -like $LibraryPattern })
+if ($libraries.Count -eq 0) {
+    throw "No corpus reference matches LibraryPattern '$LibraryPattern'."
+}
 
 foreach ($library in $libraries) {
     $projectFile = Join-Path $library.ProjectDir "$($library.Name).gpr"

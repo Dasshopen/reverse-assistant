@@ -135,10 +135,10 @@ pub fn managed_install_plan(app: &AppHandle) -> Result<SetupInstallPlan, String>
             SetupInstallItem {
                 id: "bsim",
                 label: "BSim seed corpus",
-                version: "SQLite 3.53.3 + zlib 1.3.2 + LZ4 1.10.0 + xxHash 0.8.3",
+                version: "Core native libraries + MSVC runtime + EDK2 UEFI stable202605",
                 source: "Locally reproducible Reverse Assistant corpus",
-                license: "Public Domain + zlib License + BSD 2-Clause",
-                license_url: "https://github.com/lz4/lz4/blob/v1.10.0/LICENSE",
+                license: "Permissive upstream licenses (see the pinned corpus manifest)",
+                license_url: "https://github.com/tianocore/edk2/blob/edk2-stable202605/License.txt",
                 download_required: false,
             },
         ],
@@ -517,15 +517,12 @@ fn build_extension_archive(
         .ok_or_else(|| "the extension build produced no ZIP archive".to_owned())
 }
 
-fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+pub(crate) fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("unable to resolve application data directory: {error}"))?;
     let destination = bsim_corpus::cached_db_path(&app_data_dir);
-    if destination.is_file() && bsim_corpus::validate_database_file(&destination).is_ok() {
-        return Ok(Some(destination));
-    }
 
     let bundled = app
         .path()
@@ -541,9 +538,25 @@ fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, String> {
             development.is_file().then_some(development)
         });
     let Some(bundled) = bundled else {
-        return Ok(None);
+        return if destination.is_file() && bsim_corpus::validate_database_file(&destination).is_ok()
+        {
+            Ok(Some(destination))
+        } else {
+            Ok(None)
+        };
     };
     bsim_corpus::validate_database_file(&bundled)?;
+
+    // A valid cache is not necessarily the current bundled corpus. Compare
+    // hashes so an application update can replace an older seed database
+    // (for example after adding EDK2/UEFI signatures) instead of reusing it
+    // forever merely because it is still a valid H2 file.
+    if destination.is_file()
+        && bsim_corpus::validate_database_file(&destination).is_ok()
+        && hash_file(&destination)? == hash_file(&bundled)?
+    {
+        return Ok(Some(destination));
+    }
     let parent = destination
         .parent()
         .ok_or_else(|| "the BSim destination has no parent directory".to_owned())?;

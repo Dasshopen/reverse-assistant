@@ -19,7 +19,11 @@ function Get-VerifiedSource {
     )
 
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-    $entry = $manifest.libraries | Where-Object { $_.name -eq $LibraryName }
+    $entries = @($manifest.libraries)
+    if ($null -ne $manifest.build_tools) {
+        $entries += @($manifest.build_tools)
+    }
+    $entry = $entries | Where-Object { $_.name -eq $LibraryName }
 
     if ($null -eq $entry) {
         throw "No manifest entry found for library '$LibraryName' in $ManifestPath"

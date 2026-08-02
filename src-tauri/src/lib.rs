@@ -2011,6 +2011,17 @@ fn disassemble_functions(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // Keep the writable app-data copy in sync with the corpus bundled
+            // by this exact application build. Without this startup refresh,
+            // an otherwise valid cache from an older version would remain in
+            // use forever and newly added reference families (such as EDK2)
+            // would appear to produce no matches.
+            if let Err(error) = setup::install_bsim_corpus(app.handle()) {
+                eprintln!("unable to refresh the bundled BSim corpus: {error}");
+            }
+            Ok(())
+        })
         .manage(Mutex::new(None::<AnalysisSession>))
         .manage(Mutex::new(None::<GhidraExport>))
         .manage(services::semantic_memory::SemanticIndexCache::default())

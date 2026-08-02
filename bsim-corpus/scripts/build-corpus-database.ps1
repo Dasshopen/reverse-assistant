@@ -42,12 +42,42 @@ $libraries = @(
     @{ Name = "xxhash"; Dll = Join-Path $corpusRoot "build\xxhash-0.8.3-x64-release-syms\xxhash.dll" },
     @{ Name = "zstd"; Dll = Join-Path $corpusRoot "build\zstd-1.5.7-x64-release-syms\zstd.dll" },
     @{ Name = "brotli"; Dll = Join-Path $corpusRoot "build\brotli-1.2.0-x64-release-syms\brotli.dll" },
-    @{ Name = "msvc-runtime"; Dll = Join-Path $corpusRoot "build\msvc-runtime-x64-release-syms\msvc-runtime-reference.exe" }
+    @{ Name = "msvc-runtime"; Dll = Join-Path $corpusRoot "build\msvc-runtime-x64-release-syms\msvc-runtime-reference.exe" },
+    @{
+        Name = "edk2-uefi"
+        Dll = Join-Path $corpusRoot "build\edk2-stable202605-shell-x64-debug-syms\Shell.efi"
+        Pdb = Join-Path $corpusRoot "build\edk2-stable202605-shell-x64-debug-syms\Shell.pdb"
+    }
 )
+
+$edk2ModulesRoot = Join-Path $corpusRoot "build\edk2-stable202605-shell-x64-debug-syms\modules"
+$edk2Modules = @(
+    @{ Id = "acpi-view"; Efi = "AcpiViewApp.efi"; Pdb = "AcpiViewApp.pdb" },
+    @{ Id = "dp"; Efi = "dp.efi"; Pdb = "dp.pdb" },
+    @{ Id = "dp-command"; Efi = "dpDynamicCommand.efi"; Pdb = "dpDynamicCommand.pdb" },
+    @{ Id = "http"; Efi = "http.efi"; Pdb = "http.pdb" },
+    @{ Id = "http-command"; Efi = "httpDynamicCommand.efi"; Pdb = "httpDynamicCommand.pdb" },
+    @{ Id = "tftp"; Efi = "tftp.efi"; Pdb = "tftp.pdb" },
+    @{ Id = "tftp-command"; Efi = "TftpDynamicCommand.efi"; Pdb = "TftpDynamicCommand.pdb" },
+    @{ Id = "var-policy"; Efi = "varpolicy.efi"; Pdb = "varpolicy.pdb" },
+    @{ Id = "var-policy-command"; Efi = "VariablePolicyDynamicCommand.efi"; Pdb = "VariablePolicyDynamicCommand.pdb" }
+)
+foreach ($module in $edk2Modules) {
+    $moduleDir = Join-Path $edk2ModulesRoot $module.Id
+    $libraries += @{
+        Name = "edk2-$($module.Id)"
+        Dll = Join-Path $moduleDir $module.Efi
+        Pdb = Join-Path $moduleDir $module.Pdb
+    }
+}
 
 foreach ($library in $libraries) {
     if (-not (Test-Path -LiteralPath $library.Dll -PathType Leaf)) {
         throw "$($library.Name) reference binary not found at $($library.Dll); run its build script first."
+    }
+
+    if ($library.ContainsKey("Pdb") -and -not (Test-Path -LiteralPath $library.Pdb -PathType Leaf)) {
+        throw "$($library.Name) reference PDB not found at $($library.Pdb); run its build script first."
     }
 }
 
@@ -80,7 +110,23 @@ foreach ($library in $libraries) {
     Write-Host ""
     Write-Host "Analyzing $($library.Name) ($($library.Dll))..."
 
-    & $analyzeHeadless $projectDir $library.Name -import $library.Dll
+    if ($library.ContainsKey("Pdb")) {
+        & $analyzeHeadless `
+            $projectDir `
+            $library.Name `
+            -import $library.Dll `
+            -scriptPath $PSScriptRoot `
+            -preScript "ConfigurePdb.java" $library.Pdb `
+            -postScript "RemoveUnusableBsimFunctions.java"
+    }
+    else {
+        & $analyzeHeadless `
+            $projectDir `
+            $library.Name `
+            -import $library.Dll `
+            -scriptPath $PSScriptRoot `
+            -postScript "RemoveUnusableBsimFunctions.java"
+    }
 
     if ($LASTEXITCODE -ne 0) {
         throw "analyzeHeadless failed while analyzing $($library.Name)"

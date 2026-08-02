@@ -278,8 +278,9 @@ pub fn list_corpora(app: &AppHandle) -> Result<Vec<BsimCorpusSummary>, String> {
             "Zstandard 1.5.7".to_owned(),
             "Brotli 1.2.0".to_owned(),
             "Runtime MSVC x64".to_owned(),
+            "EDK2 UEFI Shell stable202605".to_owned(),
         ],
-        description: "Stockage, compression, hachage et runtime MSVC couramment intégrés aux binaires x64 optimisés."
+        description: "Stockage, compression, hachage, runtime MSVC et composants UEFI/EDK2 couramment intégrés aux binaires x64 optimisés."
             .to_owned(),
         removable: false,
     });

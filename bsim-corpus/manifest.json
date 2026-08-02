@@ -65,6 +65,59 @@
                           "license":  "MIT",
                           "license_url":  "https://github.com/google/brotli/blob/v1.2.0/LICENSE",
                           "retrieved_date":  "2026-07-25"
+                      },
+                      {
+                          "name":  "edk2-uefi",
+                          "version":  "edk2-stable202605",
+                          "source_url":  "https://github.com/tianocore/edk2/archive/refs/tags/edk2-stable202605.zip",
+                          "archive_name":  "edk2-stable202605.zip",
+                          "sha256":  "120bad1dde0a60ddcb483728ab3be0b00bd8fd3528ce8bf436821aef4cb7ba82",
+                          "sha3_256":  null,
+                          "license":  "BSD-2-Clause-Patent (majority; EDK2 packages used by the reference build)",
+                          "license_url":  "https://github.com/tianocore/edk2/blob/edk2-stable202605/License.txt",
+                          "retrieved_date":  "2026-07-31"
                       }
-                  ]
+                  ],
+    "build_tools":  [
+                        {
+                            "name":  "python-embed",
+                            "version":  "3.12.10",
+                            "source_url":  "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+                            "archive_name":  "python-3.12.10-embed-amd64.zip",
+                            "sha256":  "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+                            "license":  "Python Software Foundation License Version 2",
+                            "license_url":  "https://docs.python.org/3/license.html",
+                            "retrieved_date":  "2026-07-31"
+                        },
+                        {
+                            "name":  "nasm-portable",
+                            "version":  "2.16.03",
+                            "source_url":  "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip",
+                            "archive_name":  "nasm-2.16.03-win64.zip",
+                            "sha256":  "3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6",
+                            "license":  "BSD 2-Clause",
+                            "license_url":  "https://www.nasm.us/",
+                            "retrieved_date":  "2026-07-31"
+                        },
+                        {
+                            "name":  "edk2-mipisyst",
+                            "version":  "370b5944c046bab043dd8b133727b2135af7747a",
+                            "source_url":  "https://github.com/MIPI-Alliance/public-mipi-sys-t/archive/370b5944c046bab043dd8b133727b2135af7747a.zip",
+                            "archive_name":  "mipisyst-370b5944c046bab043dd8b133727b2135af7747a.zip",
+                            "sha256":  "7a6501ff821d8193ee8701983857161f3f57a178c2776e90d0f350e323c2aa20",
+                            "license":  "Apache-2.0",
+                            "license_url":  "https://github.com/MIPI-Alliance/public-mipi-sys-t/blob/370b5944c046bab043dd8b133727b2135af7747a/LICENSE",
+                            "retrieved_date":  "2026-07-31"
+                        },
+                        {
+                            "name":  "edk2-brotli",
+                            "version":  "e230f474b87134e8c6c85b630084c612057f253e",
+                            "source_url":  "https://github.com/google/brotli/archive/e230f474b87134e8c6c85b630084c612057f253e.zip",
+                            "archive_name":  "edk2-brotli-e230f474b87134e8c6c85b630084c612057f253e.zip",
+                            "sha256":  "b616e4630b161110b73e87470d2e6074ae72830feb7e220ad028fe2d6b9f5cf4",
+                            "license":  "MIT",
+                            "license_url":  "https://github.com/google/brotli/blob/e230f474b87134e8c6c85b630084c612057f253e/LICENSE",
+                            "retrieved_date":  "2026-07-31"
+                        }
+                    ]
 }

@@ -25,8 +25,15 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. watch application sources only. The corpus directories contain
+      // large archives and H2 databases that build tools/antivirus may lock
+      // temporarily on Windows; they are runtime resources, not frontend
+      // source files, so watching them can crash Vite with EBUSY.
+      ignored: [
+        "**/src-tauri/**",
+        "**/bsim-corpus/sources/**",
+        "**/bsim-corpus/build/**",
+      ],
     },
   },
 }));

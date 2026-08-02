@@ -24,7 +24,11 @@ import ghidra.util.task.TaskMonitor;
 
 public final class BsimFunctionQueryService {
 
-    private static final int MATCHES_PER_FUNCTION = 5;
+    // Ask the database for more than the UI ultimately retains. Large
+    // corpora can contain several byte-identical unnamed helpers; filtering
+    // those placeholders after a top-5 query would otherwise hide a useful
+    // named match ranked just below them.
+    private static final int MATCHES_PER_FUNCTION = 25;
     private static final double SIMILARITY_THRESHOLD = 0.7;
     private static final double SIGNIFICANCE_THRESHOLD = 0.0;
 
@@ -110,6 +114,10 @@ public final class BsimFunctionQueryService {
                     for (SimilarityNote note : similarityResult) {
                         FunctionDescription match = note.getFunctionDescription();
 
+                        if (!isMeaningfulCandidateName(match.getFunctionName())) {
+                            continue;
+                        }
+
                         candidates.add(new BsimCandidate(
                             match.getFunctionName(),
                             match.getExecutableRecord().getNameExec(),
@@ -129,5 +137,16 @@ public final class BsimFunctionQueryService {
                 signatures.dispose();
             }
         }
+    }
+
+    static boolean isMeaningfulCandidateName(String name) {
+        if (name == null || name.isBlank()) {
+            return false;
+        }
+
+        return !name.matches("(?i)^(?:thunk_)?FUN_[0-9a-f]+$")
+            && !name.matches("(?i)^sub_[0-9a-f]+$")
+            && !name.matches("(?i)^LAB_[0-9a-f]+$")
+            && !name.startsWith("??_C@");
     }
 }

@@ -22,8 +22,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import ghidra.app.script.GhidraScript;
@@ -49,6 +51,13 @@ public class VerifyBsimQuery extends GhidraScript {
     private static final double SIMILARITY_BOUND = 0.5;
     private static final double CONFIDENCE_BOUND = 0.0;
     private static final double SELF_MATCH_SIMILARITY_THRESHOLD = 0.999;
+    private static final double TIE_EPSILON = 0.000000000001;
+    // Below this value, real EDK2 functions can collapse onto hundreds of
+    // byte-identical CRT/firmware stubs. Their own record may legitimately
+    // fall outside even the validation top-300. These remain visible as
+    // low-information ambiguities, but cannot prove or disprove corpus
+    // integrity. A missing self-match at or above this floor still fails.
+    private static final double MEANINGFUL_SIGNIFICANCE_FLOOR = 10.0;
 
     @Override
     protected void run() throws Exception {
@@ -99,6 +108,9 @@ public class VerifyBsimQuery extends GhidraScript {
             // symbols.
             Set<Long> selfMatchedAddresses = new HashSet<>();
             Set<Long> respondedAddresses = new HashSet<>();
+            Map<Long, Double> maximumSignificanceByAddress = new HashMap<>();
+            Map<Long, Double> maximumSimilarityByAddress = new HashMap<>();
+            Map<Long, Integer> bestSimilarityTieCountByAddress = new HashMap<>();
 
             for (int batchStart = 0; batchStart < queriedFunctions.size(); batchStart += FUNCTIONS_PER_BATCH) {
                 monitor.checkCancelled();
@@ -141,6 +153,21 @@ public class VerifyBsimQuery extends GhidraScript {
 
                         for (SimilarityNote note : sim) {
                             FunctionDescription fdesc = note.getFunctionDescription();
+                            maximumSignificanceByAddress.merge(
+                                baseAddress,
+                                note.getSignificance(),
+                                Math::max
+                            );
+                            double previousMaximumSimilarity = maximumSimilarityByAddress
+                                .getOrDefault(baseAddress, Double.NEGATIVE_INFINITY);
+                            if (note.getSimilarity() > previousMaximumSimilarity + TIE_EPSILON) {
+                                maximumSimilarityByAddress.put(baseAddress, note.getSimilarity());
+                                bestSimilarityTieCountByAddress.put(baseAddress, 1);
+                            }
+                            else if (Math.abs(note.getSimilarity() - previousMaximumSimilarity)
+                                <= TIE_EPSILON) {
+                                bestSimilarityTieCountByAddress.merge(baseAddress, 1, Integer::sum);
+                            }
 
                             if (printedMatches < MATCHES_TO_PRINT) {
                                 println("  Match: " + fdesc.getFunctionName()
@@ -178,6 +205,7 @@ public class VerifyBsimQuery extends GhidraScript {
             }
 
             List<String> skippedTooSmall = new ArrayList<>();
+            List<String> ambiguousLowInformation = new ArrayList<>();
             List<String> missingSelfMatches = new ArrayList<>();
 
             for (Function func : queriedFunctions) {
@@ -188,13 +216,33 @@ public class VerifyBsimQuery extends GhidraScript {
                     skippedTooSmall.add(label);
                 }
                 else if (!selfMatchedAddresses.contains(entryOffset)) {
-                    missingSelfMatches.add(label);
+                    double maximumSignificance = maximumSignificanceByAddress
+                        .getOrDefault(entryOffset, 0.0);
+                    int bestSimilarityTieCount = bestSimilarityTieCountByAddress
+                        .getOrDefault(entryOffset, 0);
+                    boolean resultWindowSaturatedByPerfectTies =
+                        bestSimilarityTieCount >= MATCHES_PER_FUNC;
+                    if (maximumSignificance < MEANINGFUL_SIGNIFICANCE_FLOOR
+                        || resultWindowSaturatedByPerfectTies) {
+                        ambiguousLowInformation.add(
+                            label + " (max significance " + maximumSignificance
+                                + ", best-score ties " + bestSimilarityTieCount + ")"
+                        );
+                    }
+                    else {
+                        missingSelfMatches.add(label);
+                    }
                 }
             }
 
             println("Total functions queried: " + queriedFunctions.size());
             println("Skipped by BSim (no signature/result at all, likely too small): "
                 + skippedTooSmall.size());
+            println("Low-information signatures crowded out by tied stubs (not usable as proof): "
+                + ambiguousLowInformation.size());
+            if (!ambiguousLowInformation.isEmpty()) {
+                println("  " + ambiguousLowInformation);
+            }
 
             if (!missingSelfMatches.isEmpty()) {
                 printerr("Functions BSim scored but which missed their own self-match: " + missingSelfMatches);

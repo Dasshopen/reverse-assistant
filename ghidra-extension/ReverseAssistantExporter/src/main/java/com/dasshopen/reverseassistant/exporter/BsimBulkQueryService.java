@@ -15,7 +15,11 @@ import ghidra.util.task.TaskMonitor;
 
 public final class BsimBulkQueryService {
 
-    private static final int BATCH_SIZE = 100;
+    // Ghidra's local H2 BSim backend can return an incomplete nearest-neighbour
+    // response when a query contains too many generated signatures.  The corpus
+    // verifier already uses batches of 25 for this reason; keep the production
+    // bulk scan on the same proven bound so named matches are not silently lost.
+    private static final int BATCH_SIZE = 25;
     private static final int MAX_COMBINED_MATCHES = 12;
 
     private final BsimFunctionQueryService queryService = new BsimFunctionQueryService();
@@ -85,7 +89,10 @@ public final class BsimBulkQueryService {
                 candidates = new ArrayList<>(candidates.subList(0, MAX_COMBINED_MATCHES));
             }
             results.add(new BsimBulkFunctionResult(
-                "0x" + function.getEntryPoint().toString(false, false),
+                "0x" + Long.toUnsignedString(
+                    function.getEntryPoint().getOffset(),
+                    16
+                ),
                 candidates,
                 scannedAddresses.contains(function.getEntryPoint().getOffset()),
                 message

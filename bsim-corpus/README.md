@@ -28,6 +28,11 @@ used to validate BSim end to end before deciding whether/how to scale it.
   linked into the DLL and BSim/FID would attribute them to the library
   itself (confirmed by inspecting an earlier build's import table with
   `dumpbin /dependents` before and after adding the flag).
+- `scripts/build-edk2-uefi.ps1` — builds the official EDK2 X64 UEFI Shell
+  plus nine production ShellPkg applications/dynamic commands from the
+  pinned stable tag, with their PDB/map symbols. Python, NASM and the
+  EDK2 submodules actually required by the build are portable downloads
+  with pinned hashes; nothing is installed system-wide.
 - `scripts/build-corpus-database.ps1` — analyzes each compiled DLL with a
   full (not speed-optimized) Ghidra headless pass, then creates a BSim
   database and generates+commits signatures for each library via Ghidra's
@@ -65,6 +70,7 @@ working hashes but weak or absent names.
 .\scripts\build-zstd.ps1
 .\scripts\build-brotli.ps1
 .\scripts\build-msvc-runtime.ps1
+.\scripts\build-edk2-uefi.ps1
 
 # 2. Analyze them and build the BSim database
 .\scripts\build-corpus-database.ps1 -GhidraInstallDir "C:\path\to\ghidra_12.x_PUBLIC"
@@ -79,12 +85,42 @@ This produces `build\reverse-assistant-seed.mv.db`.
 
 One architecture (x64) and one compile profile (optimized, `/MD`, symbols
 kept), six high-value libraries (SQLite 3.53.3, zlib 1.3.2, LZ4 1.10.0,
-xxHash 0.8.3, Zstandard 1.5.7, Brotli 1.2.0). The original four were
+xxHash 0.8.3, Zstandard 1.5.7, Brotli 1.2.0), one MSVC runtime reference,
+and an official EDK2 UEFI ShellPkg stable202605 set. The original four were
 validated end to end (`VerifyBsimQuery.java` confirmed real function names
 matching correctly) before any decision to expand to more libraries,
 architectures, or compile profiles; zstd and brotli were added the same way
 and validated the same way — expand further only after checking the
 pipeline still holds.
+
+The EDK2 target covers common firmware code from `MdePkg`, `MdeModulePkg`,
+`NetworkPkg`, and `ShellPkg`, including BaseLib, BaseMemoryLib, SafeInt,
+printing, device paths, UEFI services, and shell command helpers. Keeping
+several linked images gives shared routines more chances to retain a real PDB
+name instead of a `FUN_...` placeholder. It remains a focused x64/VS2022
+reference rather than a claim to cover every vendor firmware or compiler
+profile.
+
+The expanded corpus was also checked through the application's real bulk-query
+path against the Catbert `0.efi` test image. Of its 729 unnamed functions, 45
+received at least one usable BSim candidate; 39 had an EDK2 candidate and 22
+top candidates had both similarity >= 0.90 and significance >= 10. Examples
+include `StrCatS`, `StrnCatS`, `CopyGuid`, `CompareGuid`, and
+`AsciiStrToUnicodeStrS`. These remain suggestions rather than automatic proof:
+compiler options and small shared helpers can still produce ambiguous matches.
+
+The same application path was checked against the real `serpentine.exe` test
+binary: 270 of 342 unnamed functions received a BSim candidate, including 162
+top candidates with similarity >= 0.90 and significance >= 10. No Ghidra
+placeholder or MSVC string-literal symbol survived the corpus/query filters.
+
+Before signatures are generated, `RemoveUnusableBsimFunctions.java` removes
+functions whose only name is a Ghidra default placeholder (`FUN_...`,
+`sub_...`, `LAB_...`) as well as MSVC string-literal symbols (`??_C@...`).
+Those functions may have valid machine-code signatures, but they cannot teach
+the application a meaningful name and would otherwise crowd useful candidates
+out of BSim's bounded result window. The application repeats the name filter at
+query time so older locally generated databases remain safe to display.
 
 The local `build-msvc-runtime.ps1` target is intentionally different. It
 builds a local, `/MT`, symbol-rich reference executable from a small harness
@@ -123,6 +159,15 @@ Two things are reported separately, not treated as failures:
   similarity with dozens of siblings (confirmed: a 3-code-unit no-op ties
   with 40+ other 3-code-unit no-ops), so matching is checked as "same
   executable + near-1.0 similarity," not "exact same name."
+- **Low-information signatures whose best result has significance below
+  10** — real EDK2 functions can collapse onto hundreds of identical CRT or
+  firmware stubs at that information level. If their own record falls outside
+  the validation top-300, the verifier reports the ambiguity explicitly but
+  does not call it a corpus loss. A missing self-match at significance 10 or
+  above remains a hard failure unless all 300 returned slots are saturated by
+  perfect-score ties. That saturation is itself proof that BSim cannot
+  distinguish the function from the tied stubs; it is reported as ambiguity,
+  never accepted as an identification.
 
 The exact executable/address pair is accepted even if its regenerated score
 is below 1.0. This is intentional: `sqlite3JournalOpen` consistently returns

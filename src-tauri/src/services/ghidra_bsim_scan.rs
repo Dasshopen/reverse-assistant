@@ -79,14 +79,37 @@ pub fn scan_unnamed_functions(
             destination.display()
         )
     })?;
-    serde_json::from_str(&json)
-        .map_err(|error| format!("invalid background BSim result JSON: {error}"))
+    let mut results: Vec<FunctionIdentification> = serde_json::from_str(&json)
+        .map_err(|error| format!("invalid background BSim result JSON: {error}"))?;
+    normalize_entry_addresses(&mut results);
+    Ok(results)
+}
+
+fn canonical_entry_address(address: &str) -> String {
+    let trimmed = address.trim();
+    let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    else {
+        return trimmed.to_owned();
+    };
+    u64::from_str_radix(hex, 16)
+        .map(|value| format!("0x{value:x}"))
+        .unwrap_or_else(|_| trimmed.to_owned())
+}
+
+fn normalize_entry_addresses(results: &mut [FunctionIdentification]) {
+    for result in results {
+        result.entry_address = canonical_entry_address(&result.entry_address);
+    }
 }
 
 pub fn merge_results(
     mut function_id: Vec<FunctionIdentification>,
-    bsim: Vec<FunctionIdentification>,
+    mut bsim: Vec<FunctionIdentification>,
 ) -> Vec<FunctionIdentification> {
+    normalize_entry_addresses(&mut function_id);
+    normalize_entry_addresses(&mut bsim);
     for bsim_result in bsim {
         if let Some(existing) = function_id
             .iter_mut()
@@ -163,5 +186,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["0x10", "0x20"]
         );
+    }
+
+    #[test]
+    fn merge_treats_zero_padded_and_canonical_addresses_as_the_same_function() {
+        let function_id = vec![identification("0x1014c", Some("StrCatS"))];
+        let mut bsim = identification("0x0001014c", None);
+        bsim.bsim_scanned = true;
+        bsim.bsim_candidates.push(BsimIdentificationCandidate {
+            name: "StrCatS".to_owned(),
+            executable: "Shell.efi".to_owned(),
+            corpus: "edk2".to_owned(),
+            similarity: 0.923,
+            significance: 104.2,
+        });
+
+        let merged = merge_results(function_id, vec![bsim]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].entry_address, "0x1014c");
+        assert_eq!(merged[0].bsim_candidates[0].name, "StrCatS");
     }
 }
