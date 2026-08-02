@@ -357,6 +357,19 @@ interface AutomaticRenameEvaluation {
   rejections: AutomaticRenameRejection[];
 }
 
+type AutomaticReviewCategory = "ambiguous" | "insufficient" | "unresolved";
+
+interface AutomaticReviewItem {
+  category: AutomaticReviewCategory;
+  func: GhidraFunction;
+  candidateName: string | null;
+  candidateRawName: string | null;
+  source: AutomaticRenameChoice["source"] | null;
+  evidenceLabel: string | null;
+  reason: string;
+  confidence: number | null;
+}
+
 type CallGraphDirection = "outgoing" | "incoming" | "both";
 
 interface CallGraphNode {
@@ -574,6 +587,9 @@ interface ApplyRenamesResult {
   const automaticIdentificationPageSize = 12;
   let automaticGenerationPage = $state(1);
   const automaticGenerationPageSize = 10;
+  let automaticReviewCategory = $state<AutomaticReviewCategory>("ambiguous");
+  let automaticReviewPage = $state(1);
+  const automaticReviewPageSize = 8;
   let includeBelowThresholdRenames = $state(false);
   let ignoredIdentificationAddresses = $state(new Set<string>());
   let isApplyingAutomaticRenames = $state(false);
@@ -1663,6 +1679,78 @@ interface ApplyRenamesResult {
     automaticRenameCandidatesWithEvidence.slice(
       (currentAutomaticIdentificationPage - 1) * automaticIdentificationPageSize,
       currentAutomaticIdentificationPage * automaticIdentificationPageSize,
+    ),
+  );
+  let automaticReviewItems = $derived.by<AutomaticReviewItem[]>(() => {
+    const items: AutomaticReviewItem[] = [];
+    const coveredAddresses = new Set<string>();
+
+    for (const choice of automaticRenameReviewChoices) {
+      coveredAddresses.add(choice.func.entry_address);
+      items.push({
+        category: choice.ambiguous ? "ambiguous" : "insufficient",
+        func: choice.func,
+        candidateName: choice.name,
+        candidateRawName: null,
+        source: choice.source,
+        evidenceLabel: choice.evidenceLabel,
+        reason: choice.ambiguous
+          ? "Plusieurs noms restent plausibles : aucun choix ne doit être appliqué sans contrôle."
+          : `Confiance ${choice.confidence}% : sous le seuil ${activePrudenceProfile.label} (${automaticConfidenceThreshold}%).`,
+        confidence: choice.confidence,
+      });
+    }
+
+    for (const rejection of automaticRenameRejections) {
+      coveredAddresses.add(rejection.func.entry_address);
+      const normalizedReason = rejection.reason.toLocaleLowerCase("fr");
+      const isAmbiguous = normalizedReason.includes("plusieurs noms") ||
+        normalizedReason.includes("ex æquo") || normalizedReason.includes("ambigu");
+      items.push({
+        category: isAmbiguous ? "ambiguous" : "insufficient",
+        func: rejection.func,
+        candidateName: rejection.candidateDisplayName,
+        candidateRawName: rejection.candidateName,
+        source: rejection.source,
+        evidenceLabel: rejection.evidenceLabel,
+        reason: rejection.reason,
+        confidence: null,
+      });
+    }
+
+    for (const choice of automaticRenameCandidates) coveredAddresses.add(choice.func.entry_address);
+    for (const func of unidentifiedFunctions) {
+      if (coveredAddresses.has(func.entry_address)) continue;
+      items.push({
+        category: "unresolved",
+        func,
+        candidateName: null,
+        candidateRawName: null,
+        source: null,
+        evidenceLabel: null,
+        reason: "FunctionID, BSim, RTTI et l'analyse IA n'ont fourni aucun nom suffisamment défendable.",
+        confidence: null,
+      });
+    }
+
+    return items;
+  });
+  let automaticReviewCategoryItems = $derived(
+    automaticReviewItems.filter((item) => item.category === automaticReviewCategory),
+  );
+  let automaticReviewCategoryCounts = $derived.by(() => ({
+    ambiguous: automaticReviewItems.filter((item) => item.category === "ambiguous").length,
+    insufficient: automaticReviewItems.filter((item) => item.category === "insufficient").length,
+    unresolved: automaticReviewItems.filter((item) => item.category === "unresolved").length,
+  }));
+  let automaticReviewPageCount = $derived(
+    Math.max(1, Math.ceil(automaticReviewCategoryItems.length / automaticReviewPageSize)),
+  );
+  let currentAutomaticReviewPage = $derived(Math.min(automaticReviewPage, automaticReviewPageCount));
+  let paginatedAutomaticReviewItems = $derived(
+    automaticReviewCategoryItems.slice(
+      (currentAutomaticReviewPage - 1) * automaticReviewPageSize,
+      currentAutomaticReviewPage * automaticReviewPageSize,
     ),
   );
 
@@ -5998,11 +6086,11 @@ interface ApplyRenamesResult {
           </details>
           {/if}
 
-          {#if automaticRenameReviewChoices.length + automaticRenameRejections.length > 0}
+          {#if automaticReviewItems.length > 0}
             <details class="automatic-rejections">
               <summary>
-                <span><strong>{automaticRenameReviewChoices.length + automaticRenameRejections.length} proposition(s) à vérifier manuellement</strong><small>Masquées par défaut pour ne pas imposer une longue liste répétitive</small></span>
-                <b>Voir les raisons</b>
+                <span><strong>{automaticReviewItems.length} cas restent hors du lot automatique</strong><small>{automaticRenameReviewChoices.length + automaticRenameRejections.length} avec une piste · {automaticReviewCategoryCounts.unresolved} sans piste exploitable</small></span>
+                <b>Ouvrir la file</b>
               </summary>
               {#if automaticRenameReviewChoices.length > 0}
                 <section class="below-threshold-warning" role="alert">
@@ -6026,23 +6114,64 @@ interface ApplyRenamesResult {
                       : `Inclure quand même (${automaticRenameReviewChoices.length})`}</button>
                 </section>
               {/if}
-              <div class="automatic-rejection-list">
-                {#each automaticRenameReviewChoices as item (item.func.entry_address)}
-                  <article>
-                    <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
-                    <div><span>{item.name}</span></div>
-                    <div><small>{identificationSourceLabel(item.source)} · confiance {item.confidence}%</small><b>Sous le seuil de prudence actuel ({automaticConfidenceThreshold}%).</b></div>
-                    <button type="button" onclick={() => reviewIdentificationFunction(item.func.entry_address)}>Vérifier manuellement</button>
-                  </article>
-                {/each}
-                {#each automaticRenameRejections as item (item.func.entry_address)}
-                  <article>
-                    <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
-                    <div><span>{item.candidateDisplayName}</span>{#if item.candidateName && item.candidateDisplayName !== item.candidateName}<code title="Nom brut FunctionID">{item.candidateName}</code>{/if}</div>
-                    <div><small>{identificationSourceLabel(item.source)} · {item.evidenceLabel}</small><b>{item.reason}</b></div>
-                    <button type="button" onclick={() => reviewIdentificationFunction(item.func.entry_address)}>Vérifier manuellement</button>
-                  </article>
-                {/each}
+              <div class="automatic-review-workspace">
+                <nav class="automatic-review-categories" aria-label="Catégories de vérification manuelle">
+                  <button
+                    type="button"
+                    class:active={automaticReviewCategory === "ambiguous"}
+                    onclick={() => { automaticReviewCategory = "ambiguous"; automaticReviewPage = 1; }}
+                  ><span>Ambiguïtés réelles</span><b>{automaticReviewCategoryCounts.ambiguous}</b><small>Plusieurs noms plausibles</small></button>
+                  <button
+                    type="button"
+                    class:active={automaticReviewCategory === "insufficient"}
+                    onclick={() => { automaticReviewCategory = "insufficient"; automaticReviewPage = 1; }}
+                  ><span>Preuve insuffisante</span><b>{automaticReviewCategoryCounts.insufficient}</b><small>Une piste, mais trop faible</small></button>
+                  <button
+                    type="button"
+                    class:active={automaticReviewCategory === "unresolved"}
+                    onclick={() => { automaticReviewCategory = "unresolved"; automaticReviewPage = 1; }}
+                  ><span>Sans piste exploitable</span><b>{automaticReviewCategoryCounts.unresolved}</b><small>Aucun nom défendable</small></button>
+                </nav>
+
+                <header class="automatic-review-heading">
+                  <div>
+                    <strong>{automaticReviewCategory === "ambiguous" ? "Un choix humain est réellement nécessaire" : automaticReviewCategory === "insufficient" ? "Une piste existe, mais sa preuve est trop faible" : "Le système préfère s'abstenir plutôt qu'inventer"}</strong>
+                    <span>{automaticReviewCategory === "ambiguous" ? "Compare les candidats et le pseudocode avant de choisir." : automaticReviewCategory === "insufficient" ? "Vérifie le score, la source et les indices disponibles." : "Ces fonctions restent accessibles en mode manuel pour une analyse approfondie."}</span>
+                  </div>
+                  <small>{automaticReviewCategoryItems.length} cas · page {currentAutomaticReviewPage}/{automaticReviewPageCount}</small>
+                </header>
+
+                <div class="automatic-rejection-list">
+                  {#each paginatedAutomaticReviewItems as item (item.func.entry_address)}
+                    {@const arbitration = arbitrationResults.get(item.func.entry_address)}
+                    <article class:ambiguous={item.category === "ambiguous"} class:unresolved={item.category === "unresolved"}>
+                      <div class="automatic-review-function"><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
+                      <div class="automatic-review-candidate">
+                        {#if item.candidateName}<span>{item.candidateName}</span>{:else}<span>Aucun nom proposé</span>{/if}
+                        {#if item.candidateRawName && item.candidateName !== item.candidateRawName}<code title="Nom brut de la source">{item.candidateRawName}</code>{/if}
+                      </div>
+                      <div class="automatic-review-reason">
+                        {#if item.source}<small>{identificationSourceLabel(item.source)}{item.confidence !== null ? ` · confiance ${item.confidence}%` : ""}{item.evidenceLabel ? ` · ${item.evidenceLabel}` : ""}</small>{/if}
+                        <b>{item.reason}</b>
+                        {#if arbitration && !arbitration.chosen_name && (arbitration.evidence.length > 0 || arbitration.reasoning)}
+                          <details>
+                            <summary>Ce que l'agent a réellement observé</summary>
+                            {#if arbitration.reasoning}<p>{arbitration.reasoning}</p>{/if}
+                            {#if arbitration.evidence.length > 0}<ul>{#each arbitration.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}
+                          </details>
+                        {/if}
+                      </div>
+                      <button type="button" onclick={() => reviewIdentificationFunction(item.func.entry_address)}>Examiner</button>
+                    </article>
+                  {:else}
+                    <div class="automatic-review-empty">Aucun cas dans cette catégorie.</div>
+                  {/each}
+                </div>
+                <nav class="identification-pagination automatic-review-pagination" aria-label="Pages des vérifications manuelles">
+                  <button type="button" disabled={currentAutomaticReviewPage === 1} onclick={() => (automaticReviewPage = Math.max(1, currentAutomaticReviewPage - 1))}>←</button>
+                  <span>{currentAutomaticReviewPage} / {automaticReviewPageCount}</span>
+                  <button type="button" disabled={currentAutomaticReviewPage === automaticReviewPageCount} onclick={() => (automaticReviewPage = Math.min(automaticReviewPageCount, currentAutomaticReviewPage + 1))}>→</button>
+                </nav>
               </div>
             </details>
           {/if}
@@ -10476,6 +10605,43 @@ interface ApplyRenamesResult {
   .automatic-rejections[open] > summary b { font-size: 0; }
   .automatic-rejections[open] > summary b::after { font-size: 0.63rem; content: "Masquer"; }
 
+  .automatic-review-workspace { display: grid; }
+  .automatic-review-categories {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.55rem;
+    padding: 0.7rem;
+    border-bottom: 1px solid #2c2b3a;
+  }
+  .automatic-review-categories button {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.12rem 0.5rem;
+    padding: 0.65rem 0.7rem;
+    border: 1px solid #344258;
+    background: #101a2b;
+    color: #d6deeb;
+    text-align: left;
+  }
+  .automatic-review-categories button:hover:not(:disabled) { border-color: #64748b; background: #142238; }
+  .automatic-review-categories button.active { border-color: #8b5cf6; box-shadow: inset 3px 0 #8b5cf6; background: #201a3a; }
+  .automatic-review-categories span { font-size: 0.68rem; font-weight: 750; }
+  .automatic-review-categories b { color: #fbbf24; font-size: 0.78rem; }
+  .automatic-review-categories small { grid-column: 1 / -1; color: #8292ad; font-size: 0.56rem; }
+  .automatic-review-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0.78rem;
+    border-bottom: 1px solid #292334;
+    background: #0d1625;
+  }
+  .automatic-review-heading > div { display: grid; gap: 0.15rem; }
+  .automatic-review-heading strong { color: #e7edf6; font-size: 0.69rem; }
+  .automatic-review-heading span,
+  .automatic-review-heading small { color: #8292ad; font-size: 0.57rem; }
+
   .below-threshold-warning {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
@@ -10516,8 +10682,6 @@ interface ApplyRenamesResult {
 
   .automatic-rejection-list {
     display: grid;
-    max-height: 390px;
-    overflow: auto;
   }
 
   .automatic-rejection-list article {
@@ -10527,8 +10691,11 @@ interface ApplyRenamesResult {
     gap: 0.75rem;
     padding: 0.65rem 0.78rem;
     border-bottom: 1px solid #292334;
+    box-shadow: inset 3px 0 #b45309;
   }
 
+  .automatic-rejection-list article.ambiguous { background: rgb(120 53 15 / 8%); box-shadow: inset 3px 0 #f59e0b; }
+  .automatic-rejection-list article.unresolved { background: rgb(51 65 85 / 8%); box-shadow: inset 3px 0 #64748b; }
   .automatic-rejection-list article:last-child { border-bottom: 0; }
   .automatic-rejection-list article > div { display: grid; min-width: 0; gap: 0.13rem; }
   .automatic-rejection-list strong { color: #e7edf6; font-size: 0.68rem; }
@@ -10538,10 +10705,19 @@ interface ApplyRenamesResult {
   .automatic-rejection-list b { color: #fda4af; font-size: 0.62rem; font-weight: 600; line-height: 1.35; }
   .automatic-rejection-list button { padding: 0.42rem 0.58rem; border: 1px solid #604052; background: #251724; color: #fecdd3; font-size: 0.6rem; white-space: nowrap; }
   .automatic-rejection-list button:hover:not(:disabled) { background: #392033; }
+  .automatic-review-candidate > span:first-child { font-weight: 700; }
+  .automatic-rejection-list article.unresolved .automatic-review-candidate span { color: #8292ad; font-style: italic; }
+  .automatic-review-reason details { margin-top: 0.25rem; }
+  .automatic-review-reason details summary { width: fit-content; cursor: pointer; color: #c4b5fd; font-size: 0.57rem; font-weight: 700; }
+  .automatic-review-reason details p { margin: 0.35rem 0 0; color: #a9b8d2; font-size: 0.58rem; line-height: 1.45; }
+  .automatic-review-reason details ul { display: grid; gap: 0.2rem; margin: 0.35rem 0 0; padding-left: 1rem; color: #94a3b8; font-size: 0.56rem; }
+  .automatic-review-empty { padding: 2rem 1rem; color: #8292ad; font-size: 0.65rem; text-align: center; }
+  .automatic-review-pagination { border-top: 1px solid #292334; }
 
   @media (max-width: 1180px) {
     .below-threshold-warning { grid-template-columns: auto 1fr; }
     .below-threshold-warning button { grid-column: 1 / -1; }
+    .automatic-review-categories { grid-template-columns: 1fr; }
     .automatic-rejection-list article { grid-template-columns: 1fr 1fr; }
   }
 

@@ -270,8 +270,22 @@ fn synthesize_arbitration_answers(
             format!("{consensus} | D'autres agents ont divergé; la confiance a été réduite.")
         }
     } else {
-        "Les agents activés manquent de contexte exploitable; validation manuelle requise."
-            .to_owned()
+        let observations = agreeing
+            .iter()
+            .filter_map(|(label, answer)| {
+                let reasoning = answer.reasoning.trim();
+                (!reasoning.is_empty()).then(|| format!("{label}: {reasoning}"))
+            })
+            .collect::<Vec<_>>();
+        if observations.is_empty() {
+            "Aucun agent n'a pu départager les candidats avec les indices disponibles; validation manuelle requise."
+                .to_owned()
+        } else {
+            format!(
+                "Aucun nom n'a pu être départagé. Observations conservées : {}",
+                observations.join(" | ")
+            )
+        }
     };
     ArbitrationOutcome {
         chosen_name,
@@ -422,12 +436,13 @@ fn arbitrate_identification_ties(
                     source_label: candidate.source_label.clone(),
                 })
                 .collect();
-            let context = naming_arbitration::build_context_for_function_with_index_and_neighbor_hints(
-                &export,
-                semantic_index.as_ref(),
-                &item.entry_address,
-                &neighbor_hints,
-            )?;
+            let context =
+                naming_arbitration::build_context_for_function_with_index_and_neighbor_hints(
+                    &export,
+                    semantic_index.as_ref(),
+                    &item.entry_address,
+                    &neighbor_hints,
+                )?;
             Ok((
                 item.entry_address.clone(),
                 naming_arbitration::ArbitrationRequest {
@@ -740,21 +755,23 @@ fn verify_and_calibrate_generation_batch(
         .collect::<Vec<_>>();
     let request = naming_generation::build_name_verification_batch_request(&candidates, model);
     let response = provider.complete(&request)?;
-    let verifications = match naming_generation::parse_name_verification_batch_response(&response, &expected)
-    {
-        Ok(verifications) => verifications,
-        Err(_) => {
-            // The untagged batch schema fails atomically: one malformed item
-            // among several good ones poisons the whole array. Recover the
-            // healthy majority by re-verifying each candidate on its own
-            // instead of silently discarding adversarial verification for
-            // the entire batch (see verify_one_candidate_with_repair).
-            candidates
-                .iter()
-                .filter_map(|candidate| verify_one_candidate_with_repair(provider, model, candidate))
-                .collect()
-        }
-    };
+    let verifications =
+        match naming_generation::parse_name_verification_batch_response(&response, &expected) {
+            Ok(verifications) => verifications,
+            Err(_) => {
+                // The untagged batch schema fails atomically: one malformed item
+                // among several good ones poisons the whole array. Recover the
+                // healthy majority by re-verifying each candidate on its own
+                // instead of silently discarding adversarial verification for
+                // the entire batch (see verify_one_candidate_with_repair).
+                candidates
+                    .iter()
+                    .filter_map(|candidate| {
+                        verify_one_candidate_with_repair(provider, model, candidate)
+                    })
+                    .collect()
+            }
+        };
     for item in results {
         let Some((_, context)) = contexts
             .iter()
@@ -794,7 +811,11 @@ fn verify_and_calibrate_generation_batch(
 fn verify_one_candidate_with_repair(
     provider: &services::ai_provider::OpenAiCompatibleProvider,
     model: &str,
-    candidate: &(String, naming_generation::GenerationContext, naming_generation::GenerationResult),
+    candidate: &(
+        String,
+        naming_generation::GenerationContext,
+        naming_generation::GenerationResult,
+    ),
 ) -> Option<naming_generation::NameVerificationResult> {
     let (entry_address, context, result) = candidate;
     let expected = std::slice::from_ref(entry_address).to_vec();
@@ -810,11 +831,16 @@ fn verify_one_candidate_with_repair(
     }
 
     let suggested_name = result.suggested_name.as_deref().unwrap_or_default();
-    let repair_request =
-        naming_generation::build_name_verification_repair_request(entry_address, context, suggested_name, model);
+    let repair_request = naming_generation::build_name_verification_repair_request(
+        entry_address,
+        context,
+        suggested_name,
+        model,
+    );
     let repair_response = provider.complete(&repair_request).ok()?;
     let mut verifications =
-        naming_generation::parse_name_verification_batch_response(&repair_response, &expected).ok()?;
+        naming_generation::parse_name_verification_batch_response(&repair_response, &expected)
+            .ok()?;
     verifications.pop()
 }
 
@@ -2186,7 +2212,9 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{synthesize_generation_answers, DecompileCoordinator};
+    use super::{
+        synthesize_arbitration_answers, synthesize_generation_answers, DecompileCoordinator,
+    };
     use crate::services::naming_generation::{
         GenerationResult, NameVerificationTier, VerificationVerdict,
     };
@@ -2358,6 +2386,27 @@ mod tests {
         let result = synthesize_generation_answers("0x3", &answers, 1);
 
         assert_eq!(result.verifier_verdict, Some(VerificationVerdict::Partial));
+    }
+
+    #[test]
+    fn arbitration_synthesis_preserves_observations_when_agents_abstain() {
+        let answers = vec![(
+            "agent local".to_owned(),
+            crate::services::naming_arbitration::ArbitrationResult {
+                chosen_name: None,
+                reasoning:
+                    "La fonction appelle un verrou, mais aucun candidat ne correspond clairement."
+                        .to_owned(),
+                confidence: 0,
+                evidence: vec!["appel observé : __acrt_lock".to_owned()],
+            },
+        )];
+
+        let result = synthesize_arbitration_answers(&answers);
+
+        assert_eq!(result.chosen_name, None);
+        assert!(result.reasoning.contains("appelle un verrou"));
+        assert_eq!(result.evidence, vec!["appel observé : __acrt_lock"]);
     }
 
     #[test]

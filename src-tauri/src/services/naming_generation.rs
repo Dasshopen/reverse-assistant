@@ -311,8 +311,15 @@ fn is_reserved_entry_point_name(name: &str) -> bool {
 /// `is_main_thread`, where `thread` is a real, unrelated semantic word: this
 /// list only *qualifies* a core word, it never stands in for one.
 const ENTRY_POINT_CORE_TOKENS: &[&str] = &["main", "entry", "start", "startup", "driverentry"];
-const ENTRY_POINT_QUALIFIER_TOKENS: &[&str] =
-    &["program", "application", "app", "process", "module", "point", "routine"];
+const ENTRY_POINT_QUALIFIER_TOKENS: &[&str] = &[
+    "program",
+    "application",
+    "app",
+    "process",
+    "module",
+    "point",
+    "routine",
+];
 
 /// Rejects a compound name only when *every* one of its meaningful words
 /// belongs to the reserved/qualifier vocabulary above -- i.e. the name adds
@@ -343,9 +350,32 @@ fn is_reserved_entry_point_name_compound(name: &str) -> bool {
 /// closed-set catalogues (`naming_arbitration`/`bsim_corpus`) and never flow
 /// through `calibrate_confidence`.
 const GENERIC_NAME_TOKENS: &[&str] = &[
-    "process", "handle", "check", "initialize", "init", "call", "perform", "execute", "run",
-    "manage", "operate", "apply", "invoke", "dispatch", "thunk", "wrapper", "generic", "data",
-    "value", "item", "object", "entity", "helper", "util", "utility", "misc",
+    "process",
+    "handle",
+    "check",
+    "initialize",
+    "init",
+    "call",
+    "perform",
+    "execute",
+    "run",
+    "manage",
+    "operate",
+    "apply",
+    "invoke",
+    "dispatch",
+    "thunk",
+    "wrapper",
+    "generic",
+    "data",
+    "value",
+    "item",
+    "object",
+    "entity",
+    "helper",
+    "util",
+    "utility",
+    "misc",
 ];
 
 /// True when *every* meaningful word of the name is drawn from
@@ -1889,7 +1919,10 @@ pub fn build_compact_refinement_request(
     compact.semantic_facts.rtti_class_names.truncate(4);
     compact.semantic_facts.numeric_constants.truncate(6);
     compact.semantic_facts.global_references.truncate(6);
-    compact.semantic_facts.incoming_callsite_arguments.truncate(4);
+    compact
+        .semantic_facts
+        .incoming_callsite_arguments
+        .truncate(4);
     compact.semantic_facts.callsite_arguments.truncate(4);
     compact.provisional_neighbors.truncate(2);
     let finding = findings
@@ -2170,7 +2203,10 @@ pub fn build_compact_generation_request(
     compact.semantic_facts.rtti_class_names.truncate(4);
     compact.semantic_facts.numeric_constants.truncate(6);
     compact.semantic_facts.global_references.truncate(6);
-    compact.semantic_facts.incoming_callsite_arguments.truncate(4);
+    compact
+        .semantic_facts
+        .incoming_callsite_arguments
+        .truncate(4);
     compact.semantic_facts.callsite_arguments.truncate(4);
     compact.provisional_neighbors.truncate(2);
 
@@ -2300,7 +2336,9 @@ fn normalize_model_identifier(name: Option<&str>) -> Result<Option<String>, Stri
         return Ok(None);
     }
     if !is_plausible_identifier(&normalized) {
-        return Err(format!("the model suggested invalid identifier '{original}'"));
+        return Err(format!(
+            "the model suggested invalid identifier '{original}'"
+        ));
     }
     Ok(Some(normalized))
 }
@@ -2347,7 +2385,7 @@ pub fn parse_generation_response(
         confidence,
         evidence: parsed.evidence,
         verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+        verifier_verdict: None,
         requested_tools: parsed
             .requested_tools
             .iter()
@@ -2654,13 +2692,18 @@ mod tests {
 
         let result = parse_generation_response(&response)
             .expect("a C++ namespace separator has a lossless Ghidra-safe spelling");
-        assert_eq!(result.suggested_name.as_deref(), Some("std_open_config_file"));
+        assert_eq!(
+            result.suggested_name.as_deref(),
+            Some("std_open_config_file")
+        );
     }
 
     #[test]
     fn a_name_with_punctuation_is_rejected() {
         let response = ChatCompletionResponse {
-            content: r#"{"suggested_name": "open-config-file!", "confidence": 65, "reasoning": "..."}"#.to_owned(),
+            content:
+                r#"{"suggested_name": "open-config-file!", "confidence": 65, "reasoning": "..."}"#
+                    .to_owned(),
         };
 
         let error = parse_generation_response(&response)
@@ -2672,7 +2715,8 @@ mod tests {
     #[test]
     fn a_name_starting_with_a_digit_is_rejected() {
         let response = ChatCompletionResponse {
-            content: r#"{"suggested_name": "1_open_file", "confidence": 65, "reasoning": "..."}"#.to_owned(),
+            content: r#"{"suggested_name": "1_open_file", "confidence": 65, "reasoning": "..."}"#
+                .to_owned(),
         };
 
         let error = parse_generation_response(&response)
@@ -2835,7 +2879,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2858,7 +2902,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2995,7 +3039,7 @@ mod tests {
             evidence: vec!["boucle de remise a zero".to_owned()],
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 35);
@@ -3015,7 +3059,7 @@ mod tests {
             evidence: vec!["CreateFileA".to_owned(), "rb".to_owned()],
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 55);
@@ -3054,7 +3098,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -3124,7 +3168,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3152,7 +3196,10 @@ mod tests {
 
         assert_eq!(result.confidence, 85);
         assert_eq!(result.verification_tier, NameVerificationTier::Strong);
-        assert_eq!(result.verifier_verdict, Some(VerificationVerdict::Supported));
+        assert_eq!(
+            result.verifier_verdict,
+            Some(VerificationVerdict::Supported)
+        );
         assert!(result
             .evidence
             .iter()
@@ -3271,7 +3318,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3307,7 +3354,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3349,7 +3396,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3404,7 +3451,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3459,7 +3506,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3485,7 +3532,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3505,7 +3552,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3525,7 +3572,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
-                verifier_verdict: None,
+            verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3576,9 +3623,8 @@ mod tests {
         let response = ChatCompletionResponse {
             content: r#"{"results":[{"entry_address":"0x140004fa4","verdict":"supported","confidence":95,"claims":[{"name_token":"terminate_and_exit_process","source_id":"behavior:0","kind":"Behavior","value":"process_termination_exit"},{"name_token":"ExitProcess","source_id":"import:0","kind":"Import","value":"ExitProcess (KERNEL32.DLL)"}],"unsupported_tokens":[],"reasoning":"raison"}]}"#.to_owned(),
         };
-        let parsed =
-            parse_name_verification_batch_response(&response, &["0x140004fa4".to_owned()])
-                .expect("a capitalised but otherwise valid kind must still parse");
+        let parsed = parse_name_verification_batch_response(&response, &["0x140004fa4".to_owned()])
+            .expect("a capitalised but otherwise valid kind must still parse");
         assert_eq!(parsed[0].claims[0].kind, VerificationEvidenceKind::Behavior);
         assert_eq!(parsed[0].claims[1].kind, VerificationEvidenceKind::Import);
     }

@@ -166,8 +166,7 @@ pub fn build_context_for_function_with_index_and_neighbor_hints(
     entry_address: &str,
     neighbor_hints: &[ArbitrationNeighborHint],
 ) -> Result<ArbitrationContext, String> {
-    let mut context =
-        build_context_for_function_from_index(export, semantic_index, entry_address)?;
+    let mut context = build_context_for_function_from_index(export, semantic_index, entry_address)?;
     let semantic_facts = semantic_index
         .get(entry_address)
         .ok_or_else(|| format!("no semantic facts exist for function '{entry_address}'"))?;
@@ -735,13 +734,7 @@ mod tests {
     #[test]
     fn arbitration_keeps_only_strong_deterministic_direct_neighbor_hints() {
         let data = export(vec![
-            function(
-                "0x1",
-                "main",
-                &[("0x2", "FUN_2")],
-                &[],
-                Some("FUN_2();"),
-            ),
+            function("0x1", "main", &[("0x2", "FUN_2")], &[], Some("FUN_2();")),
             function("0x2", "FUN_2", &[("0x3", "FUN_3")], &[], Some("FUN_3();")),
             function("0x3", "FUN_3", &[], &[], Some("return;")),
             function("0x4", "FUN_4", &[], &[], Some("return;")),
@@ -829,13 +822,7 @@ mod tests {
     #[test]
     fn a_name_claimed_at_several_addresses_is_never_a_neighbor_anchor() {
         let data = export(vec![
-            function(
-                "0x1",
-                "FUN_1",
-                &[("0x2", "FUN_2")],
-                &[],
-                Some("FUN_2();"),
-            ),
+            function("0x1", "FUN_1", &[("0x2", "FUN_2")], &[], Some("FUN_2();")),
             function("0x2", "FUN_2", &[], &[], Some("return;")),
             function("0x3", "FUN_3", &[], &[], Some("return;")),
         ]);
