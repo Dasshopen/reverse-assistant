@@ -129,6 +129,9 @@ pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f64>,
+    /// Hard output budget. Local models can otherwise keep emitting malformed
+    /// JSON until Ollama exhausts its context window and returns HTTP 500.
+    pub max_tokens: Option<u32>,
     /// Ask compatible providers (including Ollama) to constrain decoding to
     /// one JSON object instead of relying on prompt wording alone.
     pub require_json_object: bool,
@@ -194,6 +197,9 @@ pub(crate) fn build_request_body_json(request: &ChatCompletionRequest) -> Value 
     if let Some(temperature) = request.temperature {
         body["temperature"] = json!(temperature);
     }
+    if let Some(max_tokens) = request.max_tokens {
+        body["max_tokens"] = json!(max_tokens);
+    }
     if let Some(schema) = &request.response_schema {
         body["response_format"] = json!({
             "type": "json_schema",
@@ -217,6 +223,8 @@ struct ChatCompletionResponseJson {
 #[derive(Deserialize)]
 struct ChatCompletionChoiceJson {
     message: ChatCompletionResponseMessageJson,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -232,9 +240,31 @@ pub(crate) fn parse_response_body_json(body: &str) -> Result<ChatCompletionRespo
         .into_iter()
         .next()
         .ok_or_else(|| "chat completion response contained no choices".to_owned())?;
+    if first_choice.finish_reason.as_deref() == Some("length") {
+        return Err(
+            "chat completion output was truncated by the provider (finish_reason=length)"
+                .to_owned(),
+        );
+    }
+    if let Some(reason) = first_choice
+        .finish_reason
+        .as_deref()
+        .filter(|reason| !matches!(*reason, "stop" | "tool_calls"))
+    {
+        return Err(format!(
+            "chat completion stopped without a complete answer (finish_reason={reason})"
+        ));
+    }
     Ok(ChatCompletionResponse {
         content: first_choice.message.content,
     })
+}
+
+pub fn is_output_limit_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("finish_reason=length")
+        || lower.contains("context length exceeded")
+        || lower.contains("model runner has unexpectedly stopped")
 }
 
 impl ChatCompletionProvider for OpenAiCompatibleProvider {
@@ -323,6 +353,7 @@ mod tests {
                 },
             ],
             temperature: None,
+            max_tokens: None,
             require_json_object: false,
             response_schema: None,
         };
@@ -345,6 +376,7 @@ mod tests {
             model: "gpt-4o-mini".to_owned(),
             messages: vec![],
             temperature: Some(0.2),
+            max_tokens: None,
             require_json_object: true,
             response_schema: None,
         };
@@ -361,6 +393,7 @@ mod tests {
             model: "qwen2.5-coder:7b".to_owned(),
             messages: vec![],
             temperature: Some(0.0),
+            max_tokens: Some(512),
             require_json_object: true,
             response_schema: Some(json!({
                 "type": "object",
@@ -370,6 +403,7 @@ mod tests {
         };
         let body = build_request_body_json(&request);
         assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["max_tokens"], 512);
         assert_eq!(
             body["response_format"]["json_schema"]["schema"]["required"][0],
             "name"
@@ -395,6 +429,20 @@ mod tests {
         let response = parse_response_body_json(body).expect("a valid response should parse");
 
         assert_eq!(response.content, "sqlite3OsOpen");
+    }
+
+    #[test]
+    fn reports_a_provider_output_limit_instead_of_parsing_partial_json() {
+        let error = parse_response_body_json(
+            r#"{"choices":[{"message":{"content":"{\"results\":["},"finish_reason":"length"}]}"#,
+        )
+        .expect_err("a truncated response must never look successful");
+
+        assert!(is_output_limit_error(&error));
+        assert!(error.contains("truncated"));
+        assert!(is_output_limit_error(
+            "HTTP 500: model runner has unexpectedly stopped"
+        ));
     }
 
     #[test]

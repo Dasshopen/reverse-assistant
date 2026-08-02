@@ -29,12 +29,16 @@ surface. The upstream review is recorded in `docs/reva-security-review.md`.
 3. Reuse accepted/generated names as provisional semantic anchors for later
    batches; final outcomes and their evidence remain persisted in the project.
 4. Propagate those names and deterministic facts through bounded call-graph
-   neighbourhoods.
+   neighbourhoods. Contextual refinement is scheduled only for a direct
+   neighbour of an anchor at 80% or more; without a new strong anchor, the
+   first-pass result is retained instead of spending a redundant model call.
 5. Let the local model request a small number of read-only investigations.
 6. Produce an observable role before proposing a symbol name.
 7. Require observable evidence and an explicit uncertainty in the final answer.
-8. Run one contradictory verifier over the generated batch. It must bind each
-   meaningful word in the proposed identifier to an observable citation.
+8. Calibrate with the deterministic Rust catalogue first. Run the contradictory
+   verifier only for hypotheses that remain genuinely ambiguous (35-79%). It
+   must bind each meaningful word in the proposed identifier to an observable
+   citation.
 9. Validate every verifier citation against the deterministic Rust fact sheet;
    missing or invented facts cannot raise confidence.
 10. Derive a small, audited behavior vocabulary from exact APIs and literals
@@ -60,11 +64,20 @@ proofs.
 ## Budgets
 
 - no more than two read-only tools and one follow-up for one function;
-- six functions at most per local-model batch, ordered by semantic anchors;
-- generation outcomes are versioned independently (protocol version 8), cached in the local
+- four compact, graph-independent functions at most in an initial-generation
+  batch; complex functions remain isolated;
+- three graph-independent functions at most in a contextual batch. A failed
+  batch is retried per function so one malformed answer cannot discard its
+  neighbours;
+- every provider request has an explicit output budget. Truncation or a stopped
+  Ollama runner is journalled, then retried once with a much smaller context;
+- generation outcomes are versioned independently (protocol version 10), cached in the local
   project archive and invalidated when the agent protocol changes;
 - failed or interrupted work remains resumable through the existing
   per-address project cache;
+- a malformed single-function refinement receives one explicit correction
+  request containing the rejected answer and validation reason; a second
+  invalid answer fails closed and is never retried in a loop;
 - functions without executable evidence are marked as such without repeated LLM
   calls.
 

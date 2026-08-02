@@ -77,7 +77,7 @@ First real result (qwen2.5-coder:7b, 2026-07-27):
 | 0x4006fd | `rejected` | `terminate_and_notify` | 95% | yes | no |
 
 Coverage 100%, exact-match precision 0%, automatic precision 0% (3/3 unsafe
-automatic names under the default "Equilibre" 65% threshold).
+automatic names under the default "Equilibre" 45% threshold).
 
 Two distinct things are visible in this one run and should not be conflated:
 

@@ -22,8 +22,8 @@ const FIXTURE: &str =
     include_str!("../../tests/fixtures/real-fauxware-hidden-names-export-v2.json");
 const MODEL: &str = "qwen2.5-coder:7b";
 const BASE_URL: &str = "http://localhost:11434/v1";
-// The app's default prudence profile ("Equilibre") auto-applies from 65%.
-const AUTOMATIC_THRESHOLD: u8 = 65;
+// The app's default prudence profile ("Equilibre") auto-applies from 45%.
+const AUTOMATIC_THRESHOLD: u8 = 45;
 
 struct Target {
     entry_address: &'static str,

@@ -256,6 +256,7 @@ pub fn build_arbitration_request(
             },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(512),
         require_json_object: true,
         response_schema: Some(arbitration_result_schema(None)),
     }
@@ -367,6 +368,7 @@ Il doit y avoir exactement une entree par adresse, dans le meme ordre."
             },
         ],
         temperature: Some(0.0),
+        max_tokens: Some(2_048),
         require_json_object: true,
         response_schema: Some(arbitration_batch_schema(&addresses)),
     }
@@ -610,6 +612,7 @@ mod tests {
 
         assert_eq!(chat_request.model, "llama3.1");
         assert_eq!(chat_request.messages.len(), 2);
+        assert_eq!(chat_request.max_tokens, Some(512));
         let user_message = &chat_request.messages[1].content;
         assert!(user_message.contains("std::bad_alloc::bad_alloc"));
         assert!(user_message.contains("std::out_of_range::out_of_range"));
