@@ -3471,7 +3471,12 @@ interface ApplyRenamesResult {
         .filter(([, result]) => result.chosen_name !== null && result.confidence >= 80)
         .map(([address]) => address),
       ...[...generationResults.entries()]
-        .filter(([, result]) => result.suggested_name !== null && result.confidence >= 80)
+        .filter(
+          ([, result]) =>
+            result.suggested_name !== null &&
+            result.confidence >= 80 &&
+            result.verification_tier !== "unsupported",
+        )
         .map(([address]) => address),
     ]);
   }
