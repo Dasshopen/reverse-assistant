@@ -709,9 +709,22 @@ fn verify_and_calibrate_generation_batch(
         .map(|(address, _, _)| address.clone())
         .collect::<Vec<_>>();
     let request = naming_generation::build_name_verification_batch_request(&candidates, model);
-    let verifications = provider.complete(&request).and_then(|response| {
-        naming_generation::parse_name_verification_batch_response(&response, &expected)
-    })?;
+    let response = provider.complete(&request)?;
+    let verifications = match naming_generation::parse_name_verification_batch_response(&response, &expected)
+    {
+        Ok(verifications) => verifications,
+        Err(_) => {
+            // The untagged batch schema fails atomically: one malformed item
+            // among several good ones poisons the whole array. Recover the
+            // healthy majority by re-verifying each candidate on its own
+            // instead of silently discarding adversarial verification for
+            // the entire batch (see verify_one_candidate_with_repair).
+            candidates
+                .iter()
+                .filter_map(|candidate| verify_one_candidate_with_repair(provider, model, candidate))
+                .collect()
+        }
+    };
     for item in results {
         let Some((_, context)) = contexts
             .iter()
@@ -740,6 +753,39 @@ fn verify_and_calibrate_generation_batch(
         }
     }
     Ok(())
+}
+
+/// One candidate whose place in the batch verifier response could not be
+/// parsed: re-verify it alone, then -- only if that individual attempt is
+/// *also* unparseable -- retry once more with the simpler, claims-free
+/// repair schema. Returns `None` (fail closed) if both attempts fail; the
+/// caller then leaves that result at its Step-1 deterministic-only
+/// calibration rather than treating it as adversarially verified.
+fn verify_one_candidate_with_repair(
+    provider: &services::ai_provider::OpenAiCompatibleProvider,
+    model: &str,
+    candidate: &(String, naming_generation::GenerationContext, naming_generation::GenerationResult),
+) -> Option<naming_generation::NameVerificationResult> {
+    let (entry_address, context, result) = candidate;
+    let expected = std::slice::from_ref(entry_address).to_vec();
+    let single = std::slice::from_ref(candidate);
+
+    let request = naming_generation::build_name_verification_batch_request(single, model);
+    if let Ok(response) = provider.complete(&request) {
+        if let Ok(mut verifications) =
+            naming_generation::parse_name_verification_batch_response(&response, &expected)
+        {
+            return verifications.pop();
+        }
+    }
+
+    let suggested_name = result.suggested_name.as_deref().unwrap_or_default();
+    let repair_request =
+        naming_generation::build_name_verification_repair_request(entry_address, context, suggested_name, model);
+    let repair_response = provider.complete(&repair_request).ok()?;
+    let mut verifications =
+        naming_generation::parse_name_verification_batch_response(&repair_response, &expected).ok()?;
+    verifications.pop()
 }
 
 #[tauri::command(async)]
