@@ -153,7 +153,10 @@ fn hash_file(path: &Path) -> Result<String, String> {
         )
     })?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Keep the large I/O buffer on the heap. This function also runs from
+    // Tauri's main thread during startup; a 1 MiB stack allocation overflows
+    // the default Windows debug-thread stack before the window can open.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let count = file
             .read(&mut buffer)
