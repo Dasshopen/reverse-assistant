@@ -513,6 +513,8 @@ struct GenerationOutcome {
     analysis_pass: u8,
     #[serde(default)]
     verification_tier: naming_generation::NameVerificationTier,
+    #[serde(default)]
+    verifier_verdict: Option<naming_generation::VerificationVerdict>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -526,6 +528,8 @@ struct GenerationBatchOutcome {
     analysis_pass: u8,
     #[serde(default)]
     verification_tier: naming_generation::NameVerificationTier,
+    #[serde(default)]
+    verifier_verdict: Option<naming_generation::VerificationVerdict>,
 }
 
 fn synthesize_generation_answers(
@@ -561,7 +565,7 @@ fn synthesize_generation_answers(
         left_support.total_cmp(&right_support)
     });
 
-    let (suggested_name, confidence, evidence, reasoning, verification_tier) =
+    let (suggested_name, confidence, evidence, reasoning, verification_tier, verifier_verdict) =
         if let Some((_, winner)) = best {
             let winner_name = winner.suggested_name.as_deref().unwrap_or_default();
             let agreeing: Vec<_> = named
@@ -599,12 +603,23 @@ fn synthesize_generation_answers(
                 .map(|(_, answer)| answer.verification_tier)
                 .min()
                 .unwrap_or_default();
+            // Same reasoning as the tier above: a verdict is only as strong
+            // as its weakest agreeing provider. An answer that never went
+            // through adversarial verification (`None`) carries no evidence
+            // that it was ever cross-checked, so it must pull the merged
+            // verdict down just as hard as an explicit `Unsupported` would.
+            let verifier_verdict = agreeing
+                .iter()
+                .map(|(_, answer)| answer.verifier_verdict)
+                .min()
+                .flatten();
             (
                 winner.suggested_name.clone(),
                 confidence,
                 evidence,
                 reasoning,
                 verification_tier,
+                verifier_verdict,
             )
         } else {
             (
@@ -617,6 +632,7 @@ fn synthesize_generation_answers(
                     .collect::<Vec<_>>()
                     .join(" | "),
                 naming_generation::NameVerificationTier::default(),
+                None,
             )
         };
     GenerationBatchOutcome {
@@ -632,6 +648,7 @@ fn synthesize_generation_answers(
         evidence,
         analysis_pass,
         verification_tier,
+        verifier_verdict,
     }
 }
 
@@ -1084,6 +1101,7 @@ fn refine_identification_suggestions(
                 evidence: result.evidence,
                 analysis_pass: 2,
                 verification_tier: result.verification_tier,
+                verifier_verdict: result.verifier_verdict,
             })
         })
         .collect()
@@ -1308,6 +1326,7 @@ fn generate_identification_suggestion(
         evidence: synthesized.evidence,
         analysis_pass: 1,
         verification_tier: synthesized.verification_tier,
+        verifier_verdict: synthesized.verifier_verdict,
     })
 }
 
@@ -1351,6 +1370,7 @@ fn save_generation_result(
         agent_version: naming_generation::NAMING_GENERATION_VERSION,
         analysis_pass: outcome.analysis_pass.max(1),
         verification_tier: outcome.verification_tier,
+        verifier_verdict: outcome.verifier_verdict,
     };
     match results
         .iter_mut()
@@ -1384,6 +1404,7 @@ fn save_generation_results(
             agent_version: naming_generation::NAMING_GENERATION_VERSION,
             analysis_pass: outcome.analysis_pass.max(1),
             verification_tier: outcome.verification_tier,
+            verifier_verdict: outcome.verifier_verdict,
         };
         match results
             .iter_mut()
@@ -2090,7 +2111,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{synthesize_generation_answers, DecompileCoordinator};
-    use crate::services::naming_generation::{GenerationResult, NameVerificationTier};
+    use crate::services::naming_generation::{
+        GenerationResult, NameVerificationTier, VerificationVerdict,
+    };
 
     fn generated(name: Option<&str>, confidence: u8) -> GenerationResult {
         generated_with_tier(name, confidence, NameVerificationTier::Unsupported)
@@ -2101,6 +2124,15 @@ mod tests {
         confidence: u8,
         verification_tier: NameVerificationTier,
     ) -> GenerationResult {
+        generated_with_tier_and_verdict(name, confidence, verification_tier, None)
+    }
+
+    fn generated_with_tier_and_verdict(
+        name: Option<&str>,
+        confidence: u8,
+        verification_tier: NameVerificationTier,
+        verifier_verdict: Option<VerificationVerdict>,
+    ) -> GenerationResult {
         GenerationResult {
             suggested_name: name.map(str::to_owned),
             reasoning: "raison observable".to_owned(),
@@ -2108,6 +2140,7 @@ mod tests {
             evidence: vec!["preuve".to_owned()],
             requested_tools: Vec::new(),
             verification_tier,
+            verifier_verdict,
         }
     }
 
@@ -2185,6 +2218,70 @@ mod tests {
             NameVerificationTier::Unsupported,
             "a weak agreeing answer must not be laundered into a stronger merged tier"
         );
+    }
+
+    #[test]
+    fn generation_synthesis_never_upgrades_the_weakest_agreeing_verdict() {
+        // Same laundering risk as the tier test above, but for the verifier's
+        // own verdict: one provider's answer was never adversarially checked
+        // (verdict = None), the other was fully confirmed (Supported). The
+        // merged verdict must fall to the unchecked answer, not the
+        // confirmed one.
+        let answers = vec![
+            (
+                "agent A".to_owned(),
+                generated_with_tier_and_verdict(
+                    Some("open_config_file"),
+                    85,
+                    NameVerificationTier::Strong,
+                    Some(VerificationVerdict::Supported),
+                ),
+            ),
+            (
+                "agent B".to_owned(),
+                generated_with_tier_and_verdict(
+                    Some("open_config_file"),
+                    80,
+                    NameVerificationTier::Strong,
+                    None,
+                ),
+            ),
+        ];
+
+        let result = synthesize_generation_answers("0x3", &answers, 1);
+
+        assert_eq!(
+            result.verifier_verdict, None,
+            "an agreeing answer with no verdict at all must pull the merged verdict down to None"
+        );
+    }
+
+    #[test]
+    fn generation_synthesis_picks_the_safest_verdict_among_agreeing_answers() {
+        let answers = vec![
+            (
+                "agent A".to_owned(),
+                generated_with_tier_and_verdict(
+                    Some("open_config_file"),
+                    85,
+                    NameVerificationTier::Strong,
+                    Some(VerificationVerdict::Supported),
+                ),
+            ),
+            (
+                "agent B".to_owned(),
+                generated_with_tier_and_verdict(
+                    Some("open_config_file"),
+                    70,
+                    NameVerificationTier::Strong,
+                    Some(VerificationVerdict::Partial),
+                ),
+            ),
+        ];
+
+        let result = synthesize_generation_answers("0x3", &answers, 1);
+
+        assert_eq!(result.verifier_verdict, Some(VerificationVerdict::Partial));
     }
 
     #[test]

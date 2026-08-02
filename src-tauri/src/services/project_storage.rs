@@ -1741,6 +1741,7 @@ mod tests {
             agent_version: crate::services::naming_generation::NAMING_GENERATION_VERSION,
             analysis_pass: 1,
             verification_tier: crate::services::naming_generation::NameVerificationTier::default(),
+            verifier_verdict: None,
         }
     }
 

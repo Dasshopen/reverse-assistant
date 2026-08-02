@@ -242,6 +242,16 @@ interface StoredArbitrationOutcome extends ArbitrationOutcome {
 // generationRefinementPlan below).
 type NameVerificationTier = "unsupported" | "partial" | "supported" | "strong";
 
+// Mirrors naming_generation::VerificationVerdict (Rust): the contradictory
+// verifier's own free-form judgement about the proposed name -- a claim to
+// be cross-checked, never a fact. Kept independent from
+// NameVerificationTier: a verifier that writes "unsupported" while the
+// deterministic tier is "supported"/"strong" is a real disagreement that
+// gating must catch on its own (see isEligibleForAutomaticNaming below).
+// `null` means no adversarial verification actually ran for this result and
+// must be treated exactly like "unsupported", never as an implicit pass.
+type VerificationVerdict = "unsupported" | "partial" | "supported";
+
 interface GenerationOutcome {
   suggested_name: string | null;
   reasoning: string;
@@ -250,6 +260,23 @@ interface GenerationOutcome {
   evidence: string[];
   analysis_pass?: number;
   verification_tier: NameVerificationTier;
+  verifier_verdict: VerificationVerdict | null;
+}
+
+// The deterministic tier is the ceiling: it can never be raised by the
+// verifier's verdict, only narrowed by it. A name is only eligible for
+// automatic application when every meaningful word is backed by real
+// evidence from at least one category (tier >= "supported") AND the
+// contradictory verifier did not itself disagree (verdict present and not
+// "unsupported"). This is deliberately not "tier !== unsupported" alone --
+// real data showed 14/20 admissible proposals had a tier of
+// supported/strong while the verifier's own verdict said "unsupported";
+// averaging or ignoring that disagreement let bad names through.
+function isEligibleForAutomaticNaming(
+  tier: NameVerificationTier,
+  verdict: VerificationVerdict | null,
+): boolean {
+  return (tier === "supported" || tier === "strong") && verdict !== null && verdict !== "unsupported";
 }
 
 interface GenerationBatchOutcome extends GenerationOutcome {
@@ -1355,12 +1382,15 @@ interface ApplyRenamesResult {
       // this name, not just that it did.
       if (hasNoEvidenceAtAll(func)) {
         const generation = generationResults.get(func.entry_address);
-        // "unsupported" means no meaningful word of the name is backed by
-        // any real evidence -- the model itself signalled it has nothing
-        // solid. Never automatic. The suggestion stays visible for manual
-        // review on the function's own detail panel; it simply never
-        // becomes an automatic-mode choice.
-        if (generation?.suggested_name && generation.verification_tier !== "unsupported") {
+        // Automatic application requires both the deterministic tier AND the
+        // contradictory verifier's verdict to agree the name is trustworthy
+        // -- see isEligibleForAutomaticNaming. A name that fails either
+        // check stays visible for manual review on the function's own
+        // detail panel; it simply never becomes an automatic-mode choice.
+        if (
+          generation?.suggested_name &&
+          isEligibleForAutomaticNaming(generation.verification_tier, generation.verifier_verdict)
+        ) {
           const normalizedName = normalizedAutomaticSymbolName(generation.suggested_name);
           // A reserved runtime entry-point name (main, _start, DriverEntry...)
           // may only be assigned to the function that actually holds that
@@ -2475,6 +2505,13 @@ interface ApplyRenamesResult {
               // function is recalculated.
               verification_tier:
                 stored.agent_version >= 10 ? stored.verification_tier ?? "unsupported" : "unsupported",
+              // Protocol v11 adds the contradictory verifier's own verdict as
+              // a field distinct from the tier above. A record saved before
+              // it existed never went through adversarial verification as a
+              // persisted signal -- treat it exactly like an explicit
+              // "unsupported" verdict, never as an implicit pass.
+              verifier_verdict:
+                stored.agent_version >= 11 ? stored.verifier_verdict ?? "unsupported" : "unsupported",
             },
           ]),
         );
@@ -3528,7 +3565,7 @@ interface ApplyRenamesResult {
           ([, result]) =>
             result.suggested_name !== null &&
             result.confidence >= 80 &&
-            result.verification_tier !== "unsupported",
+            isEligibleForAutomaticNaming(result.verification_tier, result.verifier_verdict),
         )
         .map(([address]) => address),
     ]);
@@ -3698,17 +3735,18 @@ interface ApplyRenamesResult {
           confidence: result.confidence,
           source: result.provider_label,
         })),
-      // An "unsupported" name must never become a second-pass anchor for its
-      // neighbours, however high its blended confidence -- confidence alone
-      // is not a safe proxy for this once several providers can average
-      // together into a misleadingly high number (see
-      // generation_synthesis_never_upgrades_the_weakest_agreeing_tier).
+      // An ineligible name (see isEligibleForAutomaticNaming) must never
+      // become a second-pass anchor for its neighbours, however high its
+      // blended confidence -- confidence alone is not a safe proxy for this
+      // once several providers can average together into a misleadingly
+      // high number (see generation_synthesis_never_upgrades_the_weakest_agreeing_tier
+      // and _verdict).
       ...[...generationResults.entries()]
         .filter(
           ([, result]) =>
             result.suggested_name !== null &&
             result.confidence >= 80 &&
-            result.verification_tier !== "unsupported",
+            isEligibleForAutomaticNaming(result.verification_tier, result.verifier_verdict),
         )
         .map(([entry_address, result]) => ({
           entry_address,

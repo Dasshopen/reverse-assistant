@@ -29,7 +29,11 @@ pub use crate::services::naming_arbitration::ArbitrationContext;
 /// recompute only open-ended suggestions when the semantic agent changes.
 /// Bumped to 10 for `verification_tier`: the frontend must not trust that
 /// field on a record stamped below this version (see `NameVerificationTier`).
-pub const NAMING_GENERATION_VERSION: u32 = 10;
+/// Bumped to 11 for `verifier_verdict`: a record stamped below this version
+/// never went through the contradictory verifier as a separate, persisted
+/// signal, so it must be treated as if the verifier had said `unsupported`
+/// (i.e. manual review only) regardless of its `verification_tier`.
+pub const NAMING_GENERATION_VERSION: u32 = 11;
 
 fn default_analysis_pass() -> u8 {
     1
@@ -218,6 +222,14 @@ pub struct StoredGenerationOutcome {
     /// "genuinely unsupported" and "never classified".
     #[serde(default)]
     pub verification_tier: NameVerificationTier,
+    /// The contradictory verifier's own verdict for this name, kept separate
+    /// from `verification_tier` -- see `VerificationVerdict`. `None` when no
+    /// adversarial verification actually ran (a record saved before this
+    /// field existed, or a pipeline path that fell back to plain
+    /// `calibrate_confidence`); gating must treat `None` exactly like
+    /// `Some(VerificationVerdict::Unsupported)`, never as an implicit pass.
+    #[serde(default)]
+    pub verifier_verdict: Option<VerificationVerdict>,
 }
 
 /// A bounded, durable record of an AI naming attempt that did not produce a
@@ -252,6 +264,11 @@ pub struct GenerationResult {
     /// computes it. Every real pipeline runs one of those before this result
     /// is returned to the frontend or persisted.
     pub verification_tier: NameVerificationTier,
+    /// `None` until `calibrate_confidence_with_verification` actually runs an
+    /// adversarial verification pass; see the field of the same name on
+    /// `StoredGenerationOutcome` for why gating must treat `None` as
+    /// `Unsupported`, never as a pass.
+    pub verifier_verdict: Option<VerificationVerdict>,
 }
 
 /// Small local models regularly report near-certainty for a plausible-sounding
@@ -283,12 +300,86 @@ fn is_reserved_entry_point_name(name: &str) -> bool {
     )
 }
 
+/// A reserved entry-point word (see `is_reserved_entry_point_name`), still
+/// recognisable once qualified by a generic descriptor -- `main_entry_point`,
+/// `program_main`, `application_entry`, `process_entry_point`. A plain
+/// `contains("main")` would also reject legitimate names such as
+/// `is_main_thread`, where `thread` is a real, unrelated semantic word: this
+/// list only *qualifies* a core word, it never stands in for one.
+const ENTRY_POINT_CORE_TOKENS: &[&str] = &["main", "entry", "start", "startup", "driverentry"];
+const ENTRY_POINT_QUALIFIER_TOKENS: &[&str] =
+    &["program", "application", "app", "process", "module", "point", "routine"];
+
+/// Rejects a compound name only when *every* one of its meaningful words
+/// belongs to the reserved/qualifier vocabulary above -- i.e. the name adds
+/// no other real semantic content beyond "this is the entry point". Real
+/// data showed the model reaching for exactly these compositions
+/// (`main_entry_point`, `program_main`) once the bare aliases were blocked.
+fn is_reserved_entry_point_name_compound(name: &str) -> bool {
+    let tokens = meaningful_name_tokens(name);
+    if tokens.is_empty() {
+        return false;
+    }
+    let has_core = tokens
+        .iter()
+        .any(|token| ENTRY_POINT_CORE_TOKENS.contains(&token.as_str()));
+    has_core
+        && tokens.iter().all(|token| {
+            ENTRY_POINT_CORE_TOKENS.contains(&token.as_str())
+                || ENTRY_POINT_QUALIFIER_TOKENS.contains(&token.as_str())
+        })
+}
+
+/// Vague, content-free verbs/nouns the model reaches for when it has
+/// pattern-matched a shape ("does something to some data") without actually
+/// identifying the observable action or subject. `SYSTEM_PROMPT` already
+/// asks the model not to use these; this enforces it deterministically
+/// instead of trusting compliance. Scoped to this module's generative
+/// proposals only -- RTTI/FunctionID/BSim candidates come from real
+/// closed-set catalogues (`naming_arbitration`/`bsim_corpus`) and never flow
+/// through `calibrate_confidence`.
+const GENERIC_NAME_TOKENS: &[&str] = &[
+    "process", "handle", "check", "initialize", "init", "call", "perform", "execute", "run",
+    "manage", "operate", "apply", "invoke", "dispatch", "thunk", "wrapper", "generic", "data",
+    "value", "item", "object", "entity", "helper", "util", "utility", "misc",
+];
+
+/// True when *every* meaningful word of the name is drawn from
+/// `GENERIC_NAME_TOKENS` -- the name carries zero concrete semantic content
+/// (e.g. `process_data`, `thunk_wrapper`, `initialize_and_call`). A name that
+/// mixes in even one concrete word (`initialize_header`, `process_payment`)
+/// is left alone: the vagueness has to be total, not just present.
+fn is_structurally_generic_name(name: &str) -> bool {
+    let tokens = meaningful_name_tokens(name);
+    !tokens.is_empty()
+        && tokens
+            .iter()
+            .all(|token| GENERIC_NAME_TOKENS.contains(&token.as_str()))
+}
+
 pub fn calibrate_confidence(context: &GenerationContext, result: &mut GenerationResult) {
     if let Some(name) = result.suggested_name.as_deref() {
-        if is_reserved_entry_point_name(name) && !context.semantic_facts.is_entry_point {
+        let entry_point_misuse = (is_reserved_entry_point_name(name)
+            || is_reserved_entry_point_name_compound(name))
+            && !context.semantic_facts.is_entry_point;
+        if entry_point_misuse {
             let reason = format!(
                 "Abstention : « {name} » est reserve au veritable point d'entree du programme ; \
 cette fonction n'en est pas un."
+            );
+            if !result.reasoning.is_empty() {
+                result.reasoning.push_str(" | ");
+            }
+            result.reasoning.push_str(&reason);
+            result.evidence.push(reason);
+            result.suggested_name = None;
+        }
+    }
+    if let Some(name) = result.suggested_name.as_deref() {
+        if is_structurally_generic_name(name) {
+            let reason = format!(
+                "Abstention : « {name} » ne contient aucun mot semantique concret (uniquement du \
+vocabulaire generique) ; le role reel de cette fonction n'est pas identifie."
             );
             if !result.reasoning.is_empty() {
                 result.reasoning.push_str(" | ");
@@ -469,12 +560,23 @@ pub struct VerificationClaim {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Declared weakest-first, like `NameVerificationTier`, so the derived `Ord`
+/// picks the safe (minimum) verdict when merging several providers' answers
+/// for the same function (see `synthesize_generation_answers`). This is the
+/// contradictory verifier's own free-form judgement about the proposed name
+/// -- a claim to be cross-checked, never a fact. It is kept as an
+/// independent signal from `NameVerificationTier`: the tier is computed
+/// purely from deterministic token/claim evidence and never consults this
+/// verdict, so a verifier that explicitly disagrees (`Unsupported`) with a
+/// name the deterministic evidence otherwise supports is itself a specific,
+/// real failure mode that gating must catch separately (see
+/// `GenerationResult::verifier_verdict`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationVerdict {
-    Supported,
-    Partial,
     Unsupported,
+    Partial,
+    Supported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -922,6 +1024,7 @@ pub fn calibrate_confidence_with_verification(
     calibrate_confidence(context, result);
     let Some(name) = result.suggested_name.as_deref() else {
         result.verification_tier = NameVerificationTier::Unsupported;
+        result.verifier_verdict = None;
         return;
     };
     let tokens = meaningful_name_tokens(name);
@@ -1001,6 +1104,7 @@ pub fn calibrate_confidence_with_verification(
         (45, NameVerificationTier::Unsupported)
     };
     result.verification_tier = tier;
+    result.verifier_verdict = Some(verification.verdict);
     let raw_tokens = name_tokens(name);
     let contains_structural_placeholder = raw_tokens.iter().any(|token| {
         matches!(
@@ -1850,6 +1954,7 @@ pub fn parse_generation_batch_response(
                 confidence,
                 evidence: item.evidence.clone(),
                 verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
                 requested_tools: item
                     .requested_tools
                     .iter()
@@ -2128,6 +2233,7 @@ pub fn parse_generation_response(
         confidence,
         evidence: parsed.evidence,
         verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         requested_tools: parsed
             .requested_tools
             .iter()
@@ -2163,6 +2269,7 @@ pub fn parse_repaired_generation_response(
                 confidence: 0,
                 evidence: parsed.evidence,
                 verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
                 requested_tools: Vec::new(),
             })
         }
@@ -2612,6 +2719,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2634,6 +2742,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2652,6 +2761,7 @@ mod tests {
                 evidence: Vec::new(),
                 requested_tools: Vec::new(),
                 verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
             };
             calibrate_confidence(&context, &mut result);
             assert_eq!(
@@ -2659,6 +2769,99 @@ mod tests {
                 "'{reserved}' must be rejected off the real entry point"
             );
         }
+    }
+
+    #[test]
+    fn compound_entry_point_names_are_rejected_off_the_real_entry_point() {
+        let context = sample_context();
+        for compound in [
+            "main_entry_point",
+            "program_main",
+            "application_entry",
+            "process_entry_point",
+        ] {
+            let mut result = GenerationResult {
+                suggested_name: Some(compound.to_owned()),
+                reasoning: "hypothese".to_owned(),
+                confidence: 80,
+                evidence: Vec::new(),
+                requested_tools: Vec::new(),
+                verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
+            };
+            calibrate_confidence(&context, &mut result);
+            assert_eq!(
+                result.suggested_name, None,
+                "'{compound}' must be rejected off the real entry point"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_merely_contains_main_as_a_real_word_is_not_an_entry_point_misuse() {
+        let context = sample_context();
+        let mut result = GenerationResult {
+            suggested_name: Some("is_main_thread".to_owned()),
+            reasoning: "Role observe : verifie le thread appelant.".to_owned(),
+            confidence: 80,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+        };
+        calibrate_confidence(&context, &mut result);
+        assert_eq!(
+            result.suggested_name.as_deref(),
+            Some("is_main_thread"),
+            "'thread' is real semantic content the entry-point filter must not swallow"
+        );
+    }
+
+    #[test]
+    fn structurally_generic_names_are_rejected_regardless_of_context() {
+        let context = sample_context();
+        for generic in [
+            "thunk_wrapper",
+            "handle_data",
+            "process_data",
+            "initialize_and_call",
+            "check_and_call",
+        ] {
+            let mut result = GenerationResult {
+                suggested_name: Some(generic.to_owned()),
+                reasoning: "hypothese".to_owned(),
+                confidence: 80,
+                evidence: Vec::new(),
+                requested_tools: Vec::new(),
+                verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
+            };
+            calibrate_confidence(&context, &mut result);
+            assert_eq!(
+                result.suggested_name, None,
+                "'{generic}' carries no concrete semantic content and must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_with_one_concrete_word_survives_the_generic_name_filter() {
+        let context = sample_context();
+        let mut result = GenerationResult {
+            suggested_name: Some("process_payment".to_owned()),
+            reasoning: "Role observe : traite un paiement.".to_owned(),
+            confidence: 80,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+        };
+        calibrate_confidence(&context, &mut result);
+        assert_eq!(
+            result.suggested_name.as_deref(),
+            Some("process_payment"),
+            "'payment' is real semantic content; only fully vague names must be rejected"
+        );
     }
 
     #[test]
@@ -2670,12 +2873,13 @@ mod tests {
         context.semantic_facts.referenced_strings.clear();
         context.semantic_facts.rtti_class_names.clear();
         let mut result = GenerationResult {
-            suggested_name: Some("initializeAndProcessData".to_owned()),
+            suggested_name: Some("resetDiagnosticCounters".to_owned()),
             reasoning: "Role observe : initialise puis transmet des donnees.".to_owned(),
             confidence: 95,
             evidence: vec!["boucle de remise a zero".to_owned()],
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 35);
@@ -2695,6 +2899,7 @@ mod tests {
             evidence: vec!["CreateFileA".to_owned(), "rb".to_owned()],
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 55);
@@ -2733,6 +2938,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2802,6 +3008,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -2829,10 +3036,113 @@ mod tests {
 
         assert_eq!(result.confidence, 85);
         assert_eq!(result.verification_tier, NameVerificationTier::Strong);
+        assert_eq!(result.verifier_verdict, Some(VerificationVerdict::Supported));
         assert!(result
             .evidence
             .iter()
             .any(|item| item.contains("2/2 mot(s) justifie(s)")));
+    }
+
+    #[test]
+    fn a_contradictory_unsupported_verdict_is_kept_even_when_the_deterministic_tier_is_strong() {
+        // This is the real gap the audit found: two independent providers
+        // agreed on token-level evidence (tier computed as Strong), while the
+        // adversarial verifier itself still wrote `unsupported` -- e.g.
+        // because it judged the *combination* wrong even though individual
+        // words resolve. The tier must not silently absorb or overrule that
+        // disagreement; both signals have to survive so gating can see it.
+        let mut context = sample_context();
+        context.semantic_facts.referenced_strings = vec!["config_file".to_owned()];
+        let mut result = GenerationResult {
+            suggested_name: Some("open_file".to_owned()),
+            reasoning: "Role observe : ouvre un fichier.".to_owned(),
+            confidence: 95,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+        };
+        let verification = NameVerificationResult {
+            entry_address: "0x140009a10".to_owned(),
+            verdict: VerificationVerdict::Unsupported,
+            confidence: 40,
+            claims: vec![
+                VerificationClaim {
+                    name_token: "open".to_owned(),
+                    source_id: None,
+                    kind: VerificationEvidenceKind::Import,
+                    value: "CreateFileA".to_owned(),
+                },
+                VerificationClaim {
+                    name_token: "file".to_owned(),
+                    source_id: None,
+                    kind: VerificationEvidenceKind::String,
+                    value: "config_file".to_owned(),
+                },
+            ],
+            unsupported_tokens: Vec::new(),
+            reasoning: "Verifie individuellement mais la combinaison reste douteuse.".to_owned(),
+        };
+
+        calibrate_confidence_with_verification(&context, &mut result, &verification);
+
+        assert_eq!(
+            result.verification_tier,
+            NameVerificationTier::Strong,
+            "the deterministic tier is computed from token evidence alone"
+        );
+        assert_eq!(
+            result.verifier_verdict,
+            Some(VerificationVerdict::Unsupported),
+            "the verifier's own contradictory verdict must survive as an independent signal"
+        );
+    }
+
+    #[test]
+    fn an_abstained_name_carries_no_verifier_verdict() {
+        let context = sample_context();
+        let mut result = GenerationResult {
+            suggested_name: Some("main".to_owned()),
+            reasoning: "hypothese".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+        };
+        let verification = NameVerificationResult {
+            entry_address: "0x140009a10".to_owned(),
+            verdict: VerificationVerdict::Supported,
+            confidence: 90,
+            claims: Vec::new(),
+            unsupported_tokens: Vec::new(),
+            reasoning: "n/a".to_owned(),
+        };
+
+        calibrate_confidence_with_verification(&context, &mut result, &verification);
+
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.verification_tier, NameVerificationTier::Unsupported);
+        assert_eq!(
+            result.verifier_verdict, None,
+            "a name rejected before verification even ran has no verdict to report"
+        );
+    }
+
+    #[test]
+    fn verification_verdict_orders_unsupported_as_the_safest_minimum() {
+        assert!(VerificationVerdict::Unsupported < VerificationVerdict::Partial);
+        assert!(VerificationVerdict::Partial < VerificationVerdict::Supported);
+        assert_eq!(
+            [
+                VerificationVerdict::Supported,
+                VerificationVerdict::Unsupported,
+                VerificationVerdict::Partial,
+            ]
+            .into_iter()
+            .min(),
+            Some(VerificationVerdict::Unsupported)
+        );
     }
 
     #[test]
@@ -2845,6 +3155,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -2880,6 +3191,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -2921,6 +3233,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -2962,6 +3275,7 @@ mod tests {
             serde_json::from_str(json).expect("a legacy record without the field must still parse");
 
         assert_eq!(stored.verification_tier, NameVerificationTier::Unsupported);
+        assert_eq!(stored.verifier_verdict, None);
     }
 
     #[test]
@@ -2974,6 +3288,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3028,6 +3343,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3053,6 +3369,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3072,6 +3389,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3091,6 +3409,7 @@ mod tests {
             evidence: Vec::new(),
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
+                verifier_verdict: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
