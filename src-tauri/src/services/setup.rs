@@ -569,7 +569,9 @@ pub(crate) fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, St
             parent.display()
         )
     })?;
-    let temporary = parent.join(".reverse-assistant-seed.mv.db.tmp");
+    // H2 validation identifies the database format from the final suffix, so
+    // the staging file must itself still end in `.mv.db`.
+    let temporary = parent.join(".reverse-assistant-seed.pending.mv.db");
     fs::copy(&bundled, &temporary)
         .map_err(|error| format!("failed to copy bundled BSim corpus: {error}"))?;
     bsim_corpus::validate_database_file(&temporary)?;
