@@ -2457,7 +2457,7 @@ interface ApplyRenamesResult {
           { projectId: id },
         );
         arbitrationResults = new Map(
-          storedArbitration.filter((stored) => stored.context_complete && stored.agent_version >= 2).map((stored) => [
+          storedArbitration.filter((stored) => stored.context_complete && stored.agent_version >= 3).map((stored) => [
             stored.entry_address,
             {
               chosen_name: stored.chosen_name,
@@ -3299,7 +3299,7 @@ interface ApplyRenamesResult {
     if (tiedBsim.length >= 2) {
       return tiedBsim.map((candidate) => ({
         name: candidate.name,
-        source_label: `BSim (${candidate.executable}, similarité ${candidate.similarity.toFixed(3)})`,
+        source_label: `BSim (${candidate.executable}, similarité ${candidate.similarity.toFixed(3)}, significativité ${candidate.significance.toFixed(1)}${candidate.matchingExecutables.length > 1 ? `, retrouvé dans ${candidate.matchingExecutables.length} bibliothèques` : ""})`,
       }));
     }
 

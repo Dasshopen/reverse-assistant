@@ -290,6 +290,7 @@ fn synthesize_arbitration_answers(
 fn arbitrate_identification_tie(
     app: AppHandle,
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     entry_address: String,
     candidates: Vec<ArbitrationCandidateInput>,
 ) -> Result<ArbitrationOutcome, String> {
@@ -311,7 +312,12 @@ fn arbitrate_identification_tie(
         })
         .collect();
 
-    let context = naming_arbitration::build_context_for_function(&export, &entry_address)?;
+    let semantic_index = semantic_index_cache.get_or_build(&export)?;
+    let context = naming_arbitration::build_context_for_function_from_index(
+        &export,
+        semantic_index.as_ref(),
+        &entry_address,
+    )?;
 
     let enabled = ai_providers::enabled_providers_for_app(&app)?;
     if enabled.is_empty() {
@@ -369,6 +375,7 @@ struct ArbitrationBatchOutcome {
 fn arbitrate_identification_ties(
     app: AppHandle,
     export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
     items: Vec<ArbitrationBatchInput>,
 ) -> Result<Vec<ArbitrationBatchOutcome>, String> {
     if items.is_empty() || items.len() > 6 {
@@ -379,6 +386,7 @@ fn arbitrate_identification_ties(
         .map_err(|_| "the analysis export lock was poisoned".to_owned())?
         .clone()
         .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    let semantic_index = semantic_index_cache.get_or_build(&export)?;
     let requests = items
         .iter()
         .map(|item| {
@@ -396,8 +404,11 @@ fn arbitrate_identification_ties(
                     source_label: candidate.source_label.clone(),
                 })
                 .collect();
-            let context =
-                naming_arbitration::build_context_for_function(&export, &item.entry_address)?;
+            let context = naming_arbitration::build_context_for_function_from_index(
+                &export,
+                semantic_index.as_ref(),
+                &item.entry_address,
+            )?;
             Ok((
                 item.entry_address.clone(),
                 naming_arbitration::ArbitrationRequest {

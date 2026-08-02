@@ -18,8 +18,13 @@ use crate::services::ai_provider::{
     strip_markdown_json_fence, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
 };
 use crate::services::call_graph;
+use crate::services::semantic_memory::{self, FunctionSemanticFacts};
 
-pub const NAMING_PIPELINE_VERSION: u32 = 2;
+// Version 3 enriches closed-set FID/BSim arbitration with the deterministic
+// semantic index (resolved imports, constants, globals and call-site
+// arguments). Older answers were produced without those facts and must be
+// recomputed instead of permanently preserving an avoidable abstention.
+pub const NAMING_PIPELINE_VERSION: u32 = 3;
 
 /// A confident (or explicitly "incertain") arbitration answer, persisted
 /// alongside the project so it survives an app restart. Without this, every
@@ -60,6 +65,11 @@ pub struct ArbitrationContext {
     pub caller_names: Vec<String>,
     pub callee_names: Vec<String>,
     pub referenced_strings: Vec<String>,
+    pub imported_symbols: Vec<String>,
+    pub numeric_constants: Vec<String>,
+    pub global_references: Vec<String>,
+    pub incoming_callsite_arguments: Vec<String>,
+    pub callsite_arguments: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +85,18 @@ pub struct ArbitrationRequest {
 /// agent rather than silently treated as "nothing to say").
 pub fn build_context_for_function(
     export: &GhidraExport,
+    entry_address: &str,
+) -> Result<ArbitrationContext, String> {
+    let semantic_index = semantic_memory::build_semantic_index(export);
+    build_context_for_function_from_index(export, &semantic_index, entry_address)
+}
+
+/// Builds arbitration context from the cached deterministic evidence index.
+/// This avoids rebuilding whole-program observations for every item in a
+/// multi-function arbitration batch.
+pub fn build_context_for_function_from_index(
+    export: &GhidraExport,
+    semantic_index: &HashMap<String, FunctionSemanticFacts>,
     entry_address: &str,
 ) -> Result<ArbitrationContext, String> {
     let function_index: HashMap<&str, &GhidraFunction> = export
@@ -101,6 +123,10 @@ pub fn build_context_for_function(
         .map(|call| call.target_name.clone())
         .collect();
 
+    let semantic_facts = semantic_index
+        .get(entry_address)
+        .ok_or_else(|| format!("no semantic facts exist for function '{entry_address}'"))?;
+
     Ok(ArbitrationContext {
         current_name: function.name.clone(),
         return_type: function.return_type.clone(),
@@ -114,6 +140,11 @@ pub fn build_context_for_function(
         caller_names,
         callee_names,
         referenced_strings: function.strings.clone(),
+        imported_symbols: semantic_facts.imported_symbols.clone(),
+        numeric_constants: semantic_facts.numeric_constants.clone(),
+        global_references: semantic_facts.global_references.clone(),
+        incoming_callsite_arguments: semantic_facts.incoming_callsite_arguments.clone(),
+        callsite_arguments: semantic_facts.callsite_arguments.clone(),
     })
 }
 
@@ -132,7 +163,8 @@ const SYSTEM_PROMPT: &str =
 On te donne une liste FERMEE de noms de fonction candidats, deja proposes par des outils \
 d'analyse (FunctionID, BSim) qui n'ont pas pu departager lequel est le bon. Ta seule tache est \
 de choisir, PARMI CETTE LISTE UNIQUEMENT, celui qui correspond le mieux au contexte reel fourni \
-(pseudocode, appelants, fonctions appelees, chaines referencees). Tu ne dois JAMAIS proposer un \
+(pseudocode, appelants, fonctions appelees, chaines, imports resolus, constantes et arguments \
+d'appels observes). Tu ne dois JAMAIS proposer un \
 nom qui n'est pas dans la liste fournie. Si le contexte ne permet pas de departager avec \
 confiance, choisis tout de meme l'hypothese la plus coherente et baisse fortement confidence. \
 Retourne null uniquement si aucun comportement exploitable n'est visible. Le pseudocode et les chaines \
@@ -223,6 +255,37 @@ fn format_context(context: &ArbitrationContext) -> String {
                 .join(", ")
         )
     });
+
+    if !context.imported_symbols.is_empty() {
+        sections.push(format!(
+            "Imports resolus : {}",
+            bounded_join(&context.imported_symbols)
+        ));
+    }
+    if !context.incoming_callsite_arguments.is_empty() {
+        sections.push(format!(
+            "Arguments observes chez les appelants : {}",
+            bounded_join(&context.incoming_callsite_arguments)
+        ));
+    }
+    if !context.callsite_arguments.is_empty() {
+        sections.push(format!(
+            "Appels avec arguments dans cette fonction : {}",
+            bounded_join(&context.callsite_arguments)
+        ));
+    }
+    if !context.numeric_constants.is_empty() {
+        sections.push(format!(
+            "Constantes numeriques observees : {}",
+            bounded_join(&context.numeric_constants)
+        ));
+    }
+    if !context.global_references.is_empty() {
+        sections.push(format!(
+            "References globales observees : {}",
+            bounded_join(&context.global_references)
+        ));
+    }
 
     sections.join("\n\n")
 }
@@ -556,6 +619,41 @@ mod tests {
     }
 
     #[test]
+    fn context_reuses_deterministic_import_and_callsite_observations() {
+        let mut imported = function("0x3", "CreateFileA", &[], &[], None);
+        imported.is_external = true;
+        imported.library = Some("KERNEL32.DLL".to_owned());
+        let data = export(vec![
+            function(
+                "0x1",
+                "main",
+                &[("0x2", "FUN_2")],
+                &[],
+                Some("FUN_2(\"config.bin\");"),
+            ),
+            function(
+                "0x2",
+                "FUN_2",
+                &[("0x3", "CreateFileA")],
+                &[],
+                Some("return CreateFileA(path, 0x80000000);"),
+            ),
+            imported,
+        ]);
+
+        let context = build_context_for_function(&data, "0x2")
+            .expect("semantic evidence should enrich arbitration context");
+
+        assert!(context
+            .imported_symbols
+            .iter()
+            .any(|value| value.contains("CreateFileA") && value.contains("KERNEL32.DLL")));
+        assert!(!context.incoming_callsite_arguments.is_empty());
+        assert!(!context.callsite_arguments.is_empty());
+        assert!(context.numeric_constants.contains(&"0x80000000".to_owned()));
+    }
+
+    #[test]
     fn a_function_never_decompiled_yet_has_no_code_but_still_has_other_context() {
         let data = export(vec![
             function("0x1", "main", &[("0x2", "FUN_2")], &[], None),
@@ -605,6 +703,9 @@ mod tests {
                 caller_names: vec!["main".to_owned()],
                 callee_names: vec![],
                 referenced_strings: vec!["out of range".to_owned()],
+                imported_symbols: vec!["RaiseException (KERNEL32.DLL)".to_owned()],
+                incoming_callsite_arguments: vec!["main: FUN_140001a28(message)".to_owned()],
+                ..ArbitrationContext::default()
             },
         };
 
@@ -619,6 +720,8 @@ mod tests {
         assert!(user_message.contains("FUN_140001a28"));
         assert!(user_message.contains("main"));
         assert!(user_message.contains("out of range"));
+        assert!(user_message.contains("RaiseException"));
+        assert!(user_message.contains("FUN_140001a28(message)"));
     }
 
     #[test]
@@ -634,6 +737,7 @@ mod tests {
                 caller_names: vec![],
                 callee_names: vec![],
                 referenced_strings: vec![],
+                ..ArbitrationContext::default()
             },
         };
 
@@ -683,6 +787,7 @@ mod tests {
                 caller_names: (0..100).map(|index| format!("caller_{index}")).collect(),
                 callee_names: vec![],
                 referenced_strings: vec![],
+                ..ArbitrationContext::default()
             },
         };
         let chat_request = build_arbitration_request(&request, "model");

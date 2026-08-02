@@ -80,7 +80,11 @@ pub fn build_context_for_function_from_index(
     semantic_index: &HashMap<String, FunctionSemanticFacts>,
     entry_address: &str,
 ) -> Result<GenerationContext, String> {
-    let base = naming_arbitration::build_context_for_function(export, entry_address)?;
+    let base = naming_arbitration::build_context_for_function_from_index(
+        export,
+        semantic_index,
+        entry_address,
+    )?;
     let semantic_facts = semantic_index
         .get(entry_address)
         .cloned()
@@ -2446,6 +2450,7 @@ mod tests {
                 caller_names: vec!["main".to_owned()],
                 callee_names: vec!["CreateFileA".to_owned()],
                 referenced_strings: vec!["rb".to_owned()],
+                ..ArbitrationContext::default()
             },
             provisional_neighbors: Vec::new(),
         }
@@ -2478,6 +2483,7 @@ mod tests {
             caller_names: vec![],
             callee_names: vec![],
             referenced_strings: vec![],
+            ..ArbitrationContext::default()
         };
         context.semantic_facts.decompiled = false;
 
