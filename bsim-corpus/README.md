@@ -33,6 +33,12 @@ used to validate BSim end to end before deciding whether/how to scale it.
   pinned stable tag, with their PDB/map symbols. Python, NASM and the
   EDK2 submodules actually required by the build are portable downloads
   with pinned hashes; nothing is installed system-wide.
+- `scripts/build-pyinstaller.ps1` — builds four official PyInstaller
+  bootloader generations (6.10, 6.14, 6.18 and 6.21), in x86 and x64, using
+  the console/windowed and release/debug variants. The executables retain the
+  upstream release optimization profile while PDBs preserve their `pyi_*`
+  reference names. Only the two release variants are ingested into BSim;
+  debug variants would add noisy near-duplicates rather than useful coverage.
 - `scripts/build-corpus-database.ps1` — analyzes each compiled DLL with a
   full (not speed-optimized) Ghidra headless pass, then creates a BSim
   database and generates+commits signatures for each library via Ghidra's
@@ -71,6 +77,7 @@ working hashes but weak or absent names.
 .\scripts\build-brotli.ps1
 .\scripts\build-msvc-runtime.ps1
 .\scripts\build-edk2-uefi.ps1
+.\scripts\build-pyinstaller.ps1
 
 # 2. Analyze them and build the BSim database
 .\scripts\build-corpus-database.ps1 -GhidraInstallDir "C:\path\to\ghidra_12.x_PUBLIC"
@@ -83,10 +90,12 @@ This produces `build\reverse-assistant-seed.mv.db`.
 
 ## Current scope (deliberately narrow)
 
-One architecture (x64) and one compile profile (optimized, `/MD`, symbols
-kept), six high-value libraries (SQLite 3.53.3, zlib 1.3.2, LZ4 1.10.0,
-xxHash 0.8.3, Zstandard 1.5.7, Brotli 1.2.0), one MSVC runtime reference,
-and an official EDK2 UEFI ShellPkg stable202605 set. The original four were
+The native-library set uses one architecture/profile (x64, optimized, `/MD`,
+symbols kept): SQLite 3.53.3, zlib 1.3.2, LZ4 1.10.0, xxHash 0.8.3,
+Zstandard 1.5.7 and Brotli 1.2.0. It also contains one MSVC runtime reference,
+an official EDK2 UEFI ShellPkg stable202605 set, and official PyInstaller
+bootloaders spanning 6.10 through 6.21 for Windows x86 and x64. The original
+four libraries were
 validated end to end (`VerifyBsimQuery.java` confirmed real function names
 matching correctly) before any decision to expand to more libraries,
 architectures, or compile profiles; zstd and brotli were added the same way
@@ -100,6 +109,24 @@ several linked images gives shared routines more chances to retain a real PDB
 name instead of a `FUN_...` placeholder. It remains a focused x64/VS2022
 reference rather than a claim to cover every vendor firmware or compiler
 profile.
+
+The PyInstaller family is deliberately versioned rather than represented by
+one current build. Bootloader implementation and compiler output change across
+releases, and BSim similarity is sensitive to both. Four bounded generations
+cover modern one-file/one-dir executables without pretending that
+the embedded Python application or third-party extensions are PyInstaller
+code. This corpus is expected to identify the bootloader and its statically
+linked helpers; the semantic agent remains responsible for application code
+that has no deterministic library match.
+
+The expansion was measured against the real stripped `frog.exe` test case
+that motivated it. With the previous corpus, 76 of the 634 BSim-scanned
+functions had a candidate and 30 had a top match at similarity >= 0.9 and
+significance >= 10. With the PyInstaller references included, those figures
+became 473 and 296 respectively; 406 top candidates came from an official
+`run.exe` reference. These are raw BSim measurements, not automatic rename
+counts: the application's ambiguity, name-safety and confidence gates still
+decide whether a candidate is applied or sent to manual review.
 
 The expanded corpus was also checked through the application's real bulk-query
 path against the Catbert `0.efi` test image. Of its 729 unnamed functions, 45

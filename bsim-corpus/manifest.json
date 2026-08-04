@@ -76,6 +76,50 @@
                           "license":  "BSD-2-Clause-Patent (majority; EDK2 packages used by the reference build)",
                           "license_url":  "https://github.com/tianocore/edk2/blob/edk2-stable202605/License.txt",
                           "retrieved_date":  "2026-07-31"
+                      },
+                      {
+                          "name":  "pyinstaller-6.10.0",
+                          "version":  "6.10.0",
+                          "source_url":  "https://files.pythonhosted.org/packages/5c/df/30b1f66d35defa37e676556acca4eb775b49637bb73054b0c31af134cd8a/pyinstaller-6.10.0.tar.gz",
+                          "archive_name":  "pyinstaller-6.10.0.tar.gz",
+                          "sha256":  "143840f8056ff7b910bf8f16f6cd92cc10a6c2680bb76d0a25d558d543d21270",
+                          "sha3_256":  null,
+                          "license":  "GPL-2.0-or-later with special bootloader exception",
+                          "license_url":  "https://github.com/pyinstaller/pyinstaller/blob/v6.10.0/COPYING.txt",
+                          "retrieved_date":  "2026-08-04"
+                      },
+                      {
+                          "name":  "pyinstaller-6.14.2",
+                          "version":  "6.14.2",
+                          "source_url":  "https://files.pythonhosted.org/packages/f8/25/41d6be08d65bdc5126e86d854f5767397483acf360f2c95c890e3fa96a31/pyinstaller-6.14.2.tar.gz",
+                          "archive_name":  "pyinstaller-6.14.2.tar.gz",
+                          "sha256":  "142cce0719e79315f0cc26400c2e5c45d9b6b17e7e0491fee444a9f8f16f4917",
+                          "sha3_256":  null,
+                          "license":  "GPL-2.0-or-later with special bootloader exception",
+                          "license_url":  "https://github.com/pyinstaller/pyinstaller/blob/v6.14.2/COPYING.txt",
+                          "retrieved_date":  "2026-08-04"
+                      },
+                      {
+                          "name":  "pyinstaller-6.18.0",
+                          "version":  "6.18.0",
+                          "source_url":  "https://files.pythonhosted.org/packages/9f/b8/0fe3359920b0a4e7008e0e93ff383003763e3eee3eb31a07c52868722960/pyinstaller-6.18.0.tar.gz",
+                          "archive_name":  "pyinstaller-6.18.0.tar.gz",
+                          "sha256":  "cdc507542783511cad4856fce582fdc37e9f29665ca596889c663c83ec8c6ec9",
+                          "sha3_256":  null,
+                          "license":  "GPL-2.0-or-later with special bootloader exception",
+                          "license_url":  "https://github.com/pyinstaller/pyinstaller/blob/v6.18.0/COPYING.txt",
+                          "retrieved_date":  "2026-08-04"
+                      },
+                      {
+                          "name":  "pyinstaller-6.21.0",
+                          "version":  "6.21.0",
+                          "source_url":  "https://files.pythonhosted.org/packages/d5/4d/ec706c3fcf39e26888c35b39615ff4d5865d184069666c47492cff1fbe50/pyinstaller-6.21.0.tar.gz",
+                          "archive_name":  "pyinstaller-6.21.0.tar.gz",
+                          "sha256":  "bb9fab705983e393a2d1cac77d6972513057ad800215fd861dc15ff5272e98fd",
+                          "sha3_256":  null,
+                          "license":  "GPL-2.0-or-later with special bootloader exception",
+                          "license_url":  "https://github.com/pyinstaller/pyinstaller/blob/v6.21.0/COPYING.txt",
+                          "retrieved_date":  "2026-08-04"
                       }
                   ],
     "build_tools":  [

@@ -135,10 +135,11 @@ pub fn managed_install_plan(app: &AppHandle) -> Result<SetupInstallPlan, String>
             SetupInstallItem {
                 id: "bsim",
                 label: "BSim seed corpus",
-                version: "Core native libraries + MSVC runtime + EDK2 UEFI stable202605",
+                version: "Core native libraries + MSVC runtime + EDK2 UEFI + PyInstaller x86/x64",
                 source: "Locally reproducible Reverse Assistant corpus",
-                license: "Permissive upstream licenses (see the pinned corpus manifest)",
-                license_url: "https://github.com/tianocore/edk2/blob/edk2-stable202605/License.txt",
+                license:
+                    "Compatible upstream licenses and bootloader exception (see pinned manifest)",
+                license_url: "https://github.com/pyinstaller/pyinstaller/blob/v6.21.0/COPYING.txt",
                 download_required: false,
             },
         ],

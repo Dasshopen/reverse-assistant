@@ -30,10 +30,13 @@ if (-not (Test-Path -LiteralPath $bsim -PathType Leaf)) {
 }
 
 $corpusRoot = Split-Path $PSScriptRoot -Parent
-$projectsDir = Join-Path $corpusRoot "build\ghidra-projects"
 $dbBaseName = "reverse-assistant-seed"
 $dbFile = Join-Path $corpusRoot "build\$dbBaseName.mv.db"
-$dbUrl = "file:/" + ($corpusRoot -replace '\\', '/') + "/build/$dbBaseName"
+$stagingBaseName = "$dbBaseName-next"
+$stagingDbFile = Join-Path $corpusRoot "build\$stagingBaseName.mv.db"
+$dbUrl = "file:/" + ($corpusRoot -replace '\\', '/') + "/build/$stagingBaseName"
+$projectsDir = Join-Path $corpusRoot "build\ghidra-projects-next"
+$finalProjectsDir = Join-Path $corpusRoot "build\ghidra-projects"
 
 $libraries = @(
     @{ Name = "sqlite3"; Dll = Join-Path $corpusRoot "build\sqlite3-3.53.3-x64-release-syms\sqlite3.dll" },
@@ -71,6 +74,31 @@ foreach ($module in $edk2Modules) {
     }
 }
 
+$manifestPath = Join-Path $corpusRoot "manifest.json"
+$pyinstallerVersions = @(
+    (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).libraries |
+        Where-Object { $_.name -like "pyinstaller-*" } |
+        ForEach-Object { $_.version }
+)
+$pyinstallerArchitectures = @("x86", "x64")
+# Debug variants are built for reproducibility but intentionally not ingested:
+# their extra logging produces near-duplicate candidates and increases name
+# ambiguity without representing normal packaged applications.
+$pyinstallerBootloaders = @("run", "runw")
+foreach ($version in $pyinstallerVersions) {
+    foreach ($architecture in $pyinstallerArchitectures) {
+        $referenceDir = Join-Path $corpusRoot "build\pyinstaller\$version-$architecture"
+        foreach ($bootloader in $pyinstallerBootloaders) {
+            $projectId = "pyinstaller-$($version.Replace('.', '_'))-$architecture-$bootloader"
+            $libraries += @{
+                Name = $projectId
+                Dll = Join-Path $referenceDir "$bootloader.exe"
+                Pdb = Join-Path $referenceDir "$bootloader.pdb"
+            }
+        }
+    }
+}
+
 foreach ($library in $libraries) {
     if (-not (Test-Path -LiteralPath $library.Dll -PathType Leaf)) {
         throw "$($library.Name) reference binary not found at $($library.Dll); run its build script first."
@@ -81,9 +109,9 @@ foreach ($library in $libraries) {
     }
 }
 
-if (Test-Path -LiteralPath $dbFile) {
-    Write-Host "Removing existing BSim database: $dbFile"
-    Remove-Item -LiteralPath $dbFile -Force
+if (Test-Path -LiteralPath $stagingDbFile) {
+    Write-Host "Removing incomplete staging BSim database: $stagingDbFile"
+    Remove-Item -LiteralPath $stagingDbFile -Force
 }
 
 if (Test-Path -LiteralPath $projectsDir) {
@@ -146,4 +174,20 @@ foreach ($library in $libraries) {
 }
 
 Write-Host ""
+Write-Host "Promoting completed BSim database into place..."
+$promotionStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+if (Test-Path -LiteralPath $dbFile) {
+    $dbBackup = Join-Path $corpusRoot "build\$dbBaseName.previous-$promotionStamp.mv.db"
+    Move-Item -LiteralPath $dbFile -Destination $dbBackup
+    Write-Host "Previous database retained at: $dbBackup"
+}
+Move-Item -LiteralPath $stagingDbFile -Destination $dbFile
+
+if (Test-Path -LiteralPath $finalProjectsDir) {
+    $projectsBackup = Join-Path $corpusRoot "build\ghidra-projects.previous-$promotionStamp"
+    Move-Item -LiteralPath $finalProjectsDir -Destination $projectsBackup
+    Write-Host "Previous reference projects retained at: $projectsBackup"
+}
+Move-Item -LiteralPath $projectsDir -Destination $finalProjectsDir
+
 Write-Host "BSim seed database built: $dbFile"

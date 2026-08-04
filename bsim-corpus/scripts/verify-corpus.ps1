@@ -121,6 +121,27 @@ $libraries = @(
     }
 )
 
+$manifestPath = Join-Path $corpusRoot "manifest.json"
+$pyinstallerVersions = @(
+    (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).libraries |
+        Where-Object { $_.name -like "pyinstaller-*" } |
+        ForEach-Object { $_.version }
+)
+$pyinstallerArchitectures = @("x86", "x64")
+$pyinstallerBootloaders = @("run", "runw")
+foreach ($version in $pyinstallerVersions) {
+    foreach ($architecture in $pyinstallerArchitectures) {
+        foreach ($bootloader in $pyinstallerBootloaders) {
+            $projectId = "pyinstaller-$($version.Replace('.', '_'))-$architecture-$bootloader"
+            $libraries += @{
+                Name = $projectId
+                ProjectDir = Join-Path $corpusRoot "build\ghidra-projects\$projectId"
+                Program = "$bootloader.exe"
+            }
+        }
+    }
+}
+
 $libraries = @($libraries | Where-Object { $_.Name -like $LibraryPattern })
 if ($libraries.Count -eq 0) {
     throw "No corpus reference matches LibraryPattern '$LibraryPattern'."

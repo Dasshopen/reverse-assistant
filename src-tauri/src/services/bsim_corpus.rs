@@ -279,8 +279,9 @@ pub fn list_corpora(app: &AppHandle) -> Result<Vec<BsimCorpusSummary>, String> {
             "Brotli 1.2.0".to_owned(),
             "Runtime MSVC x64".to_owned(),
             "EDK2 UEFI Shell stable202605".to_owned(),
+            "PyInstaller 6.10–6.21 (Windows x86/x64)".to_owned(),
         ],
-        description: "Stockage, compression, hachage, runtime MSVC et composants UEFI/EDK2 couramment intégrés aux binaires x64 optimisés."
+        description: "Stockage, compression, hachage, runtime MSVC, composants UEFI/EDK2 et bootloaders PyInstaller modernes couramment intégrés aux binaires Windows/UEFI optimisés."
             .to_owned(),
         removable: false,
     });

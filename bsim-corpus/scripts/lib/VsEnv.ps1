@@ -3,9 +3,12 @@
 # current PowerShell session by shelling out to vcvarsall.bat and capturing
 # the resulting environment block. PowerShell has no built-in equivalent of
 # sourcing a .bat file, so this is the standard workaround.
-function Import-VisualStudioX64Environment {
+function Import-VisualStudioEnvironment {
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateSet("x86", "x64")]
+        [string] $TargetArchitecture = "x64"
+    )
 
     $vswhere = Join-Path `
         ${env:ProgramFiles(x86)} `
@@ -38,7 +41,11 @@ function Import-VisualStudioX64Environment {
     # error, so relax that just for this call.
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $envOutput = & cmd.exe /c "`"$vcvarsall`" x64 && set" 2>$null
+    # Keep a 64-bit host toolchain, but select libraries and headers for the
+    # binary architecture. In particular, an x86 compiler with an x64 LIB
+    # path links successfully only until it reaches the first Windows import.
+    $vcvarsArchitecture = if ($TargetArchitecture -eq "x86") { "x64_x86" } else { "x64" }
+    $envOutput = & cmd.exe /c "`"$vcvarsall`" $vcvarsArchitecture && set" 2>$null
     $ErrorActionPreference = $previousErrorActionPreference
 
     foreach ($line in $envOutput) {
@@ -50,4 +57,11 @@ function Import-VisualStudioX64Environment {
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
         throw "cl.exe is still not on PATH after importing the VS environment."
     }
+}
+
+function Import-VisualStudioX64Environment {
+    [CmdletBinding()]
+    param()
+
+    Import-VisualStudioEnvironment -TargetArchitecture "x64"
 }
