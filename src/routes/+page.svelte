@@ -1719,6 +1719,52 @@ interface ApplyRenamesResult {
     }
 
     for (const choice of automaticRenameCandidates) coveredAddresses.add(choice.func.entry_address);
+
+    // A generative answer that failed the automatic gate is still a real
+    // hypothesis worth showing to a human. Previously these named answers
+    // fell through to "unresolved", which made the UI claim that the agent
+    // had found nothing even though the persisted result contained a name,
+    // a confidence score and a verifier disagreement. Keep them out of the
+    // automatic/below-threshold bulk actions, but expose them as weak leads.
+    for (const func of unidentifiedFunctions) {
+      if (coveredAddresses.has(func.entry_address)) continue;
+      const generation = generationResults.get(func.entry_address);
+      if (!generation?.suggested_name) continue;
+
+      const normalizedName = normalizedAutomaticSymbolName(generation.suggested_name);
+      const displayedName = normalizedName ?? generation.suggested_name;
+      const tierLabel = generation.verification_tier === "strong"
+        ? "fort"
+        : generation.verification_tier === "supported"
+        ? "soutenu"
+        : generation.verification_tier === "partial"
+        ? "partiel"
+        : "non confirmé";
+      const verdictLabel = generation.verifier_verdict === null
+        ? "vérificateur absent"
+        : generation.verifier_verdict === "unsupported"
+        ? "vérificateur en désaccord"
+        : generation.verifier_verdict === "partial"
+        ? "vérificateur partiel"
+        : "vérificateur favorable";
+
+      coveredAddresses.add(func.entry_address);
+      items.push({
+        category: "insufficient",
+        func,
+        candidateName: displayedName,
+        candidateRawName: displayedName === generation.suggested_name ? null : generation.suggested_name,
+        source: "generation",
+        evidenceLabel: `${generation.provider_label} · niveau déterministe ${tierLabel} · ${verdictLabel}`,
+        reason: generation.verifier_verdict === "unsupported"
+          ? "L'IA propose bien ce nom, mais le vérificateur contradictoire le conteste : hypothèse visible, jamais appliquée automatiquement."
+          : generation.verification_tier === "unsupported"
+          ? "L'IA propose bien ce nom, mais aucun mot significatif n'est assez confirmé par les preuves déterministes."
+          : "L'hypothèse IA reste exploitable pour une lecture humaine, mais ne satisfait pas toutes les garanties du renommage automatique.",
+        confidence: generation.confidence,
+      });
+    }
+
     for (const func of unidentifiedFunctions) {
       if (coveredAddresses.has(func.entry_address)) continue;
       items.push({
@@ -1743,6 +1789,9 @@ interface ApplyRenamesResult {
     insufficient: automaticReviewItems.filter((item) => item.category === "insufficient").length,
     unresolved: automaticReviewItems.filter((item) => item.category === "unresolved").length,
   }));
+  let manualGenerationHypothesisCount = $derived(
+    automaticReviewItems.filter((item) => item.source === "generation").length,
+  );
   let automaticReviewPageCount = $derived(
     Math.max(1, Math.ceil(automaticReviewCategoryItems.length / automaticReviewPageSize)),
   );
@@ -6061,11 +6110,11 @@ interface ApplyRenamesResult {
           <details class="automatic-choice-preview generation-choice-preview">
             <summary>
               <div>
-                <h3>Propositions par IA générative</h3>
-                <span>Aucune preuve FunctionID/BSim pour ces fonctions — l'agent a inventé un nom à partir du pseudocode, des appelants/appelés et des chaînes. Ce sont des propositions, pas des faits vérifiés : relis le raisonnement avant de leur faire confiance.</span>
+                <h3>Propositions IA retenues pour le lot automatique</h3>
+                <span>Aucune preuve FunctionID/BSim pour ces fonctions — l'agent a proposé un nom à partir du pseudocode, des appelants/appelés et des chaînes. Seules les hypothèses ayant franchi les deux contrôles de sécurité apparaissent ici.</span>
               </div>
               <div class="generation-choice-summary-action">
-                <small>{automaticRenameGenerationCandidates.length} proposition(s) · page {currentAutomaticGenerationPage}/{automaticGenerationPageCount}</small>
+                <small>{automaticRenameGenerationCandidates.length} automatique(s) sur {generationProposed} nom(s) généré(s) · {manualGenerationHypothesisCount} à vérifier</small>
                 <b>Afficher</b>
               </div>
             </summary>
@@ -6125,7 +6174,7 @@ interface ApplyRenamesResult {
                     type="button"
                     class:active={automaticReviewCategory === "insufficient"}
                     onclick={() => { automaticReviewCategory = "insufficient"; automaticReviewPage = 1; }}
-                  ><span>Preuve insuffisante</span><b>{automaticReviewCategoryCounts.insufficient}</b><small>Une piste, mais trop faible</small></button>
+                  ><span>Preuve insuffisante</span><b>{automaticReviewCategoryCounts.insufficient}</b><small>Une piste déterministe ou une hypothèse IA à vérifier</small></button>
                   <button
                     type="button"
                     class:active={automaticReviewCategory === "unresolved"}
