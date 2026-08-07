@@ -1627,9 +1627,49 @@ interface ApplyRenamesResult {
   let automaticRenameCandidates = $derived(
     automaticRenameEvaluation.choices.filter((choice) => choice.confidence >= automaticConfidenceThreshold),
   );
-  let automaticRenameReviewChoices = $derived(
-    automaticRenameEvaluation.choices.filter((choice) => choice.confidence < automaticConfidenceThreshold),
-  );
+  let automaticGenerationReviewChoices = $derived.by<AutomaticRenameChoice[]>(() => {
+    const choices: AutomaticRenameChoice[] = [];
+    const addressesAlreadyClassified = new Set(
+      automaticRenameEvaluation.choices.map((choice) => choice.func.entry_address),
+    );
+    const reservedNames = new Set([
+      ...(importedExport?.functions ?? [])
+        .filter((func) => !isGeneratedFunctionName(func.name))
+        .map((func) => func.name),
+      ...automaticRenameEvaluation.choices.map((choice) => choice.name),
+    ]);
+
+    for (const func of unidentifiedFunctions) {
+      if (!hasNoEvidenceAtAll(func) || addressesAlreadyClassified.has(func.entry_address)) continue;
+      const generation = generationResults.get(func.entry_address);
+      if (!generation?.suggested_name) continue;
+
+      const normalizedName = normalizedAutomaticSymbolName(generation.suggested_name);
+      if (!normalizedName) continue;
+      if (isReservedEntryPointName(normalizedName) && !isRealEntryPointAddress(func.entry_address)) continue;
+      if (!reserveNameIfGloballyUnique(normalizedName, reservedNames)) continue;
+
+      choices.push({
+        func,
+        name: normalizedName,
+        source: "generation",
+        scoreLabel: "hypothèse IA non validée",
+        evidenceLabel: `${generation.provider_label} · confiance calibrée ${generation.confidence}% : ${generation.reasoning}`,
+        alternativeCount: 0,
+        decisionLabel: "Hypothèse rejetée par les contrôles automatiques, conservée uniquement pour une application volontaire après avertissement",
+        ambiguous: true,
+        confidence: generation.confidence,
+      });
+    }
+
+    return choices;
+  });
+  let automaticRenameReviewChoices = $derived([
+    ...automaticRenameEvaluation.choices.filter(
+      (choice) => choice.confidence < automaticConfidenceThreshold,
+    ),
+    ...automaticGenerationReviewChoices,
+  ]);
   let automaticRenameRejections = $derived(automaticRenameEvaluation.rejections);
   let automaticRenameApplicationCount = $derived(
     Math.min(
@@ -3332,7 +3372,7 @@ interface ApplyRenamesResult {
     const batch = eligibleChoices.slice(0, 500);
     if (batch.length === 0) return;
     const warning = includeBelowThresholdRenames
-      ? `\n\n⚠ AVERTISSEMENT : ${Math.min(automaticRenameReviewChoices.length, Math.max(0, 500 - automaticRenameCandidates.length))} proposition(s) sous le seuil de ${automaticConfidenceThreshold} % seront aussi appliquées. Elles sont moins fiables et peuvent attribuer un mauvais rôle aux fonctions.`
+      ? `\n\n⚠ AVERTISSEMENT : ${Math.min(automaticRenameReviewChoices.length, Math.max(0, 500 - automaticRenameCandidates.length))} proposition(s) non validée(s) automatiquement seront aussi appliquées. Elles peuvent être sous le seuil de ${automaticConfidenceThreshold} %, contestées par le vérificateur IA, ou insuffisamment corroborées. Elles risquent donc d'attribuer un mauvais rôle aux fonctions.`
       : "";
     if (!window.confirm(
       `Appliquer ${batch.length} renommage(s) dans le projet Ghidra ?${warning}\n\nLes preuves resteront consultables, mais vérifie les noms suspects avant de poursuivre ton analyse.`,
@@ -3370,7 +3410,7 @@ interface ApplyRenamesResult {
     }
 
     const confirmed = window.confirm(
-      `⚠ AVERTISSEMENT — RENOMMAGES MOINS FIABLES\n\nTu vas ajouter ${automaticRenameReviewChoices.length} proposition(s) qui n'atteignent pas le seuil « ${activePrudenceProfile.label} » (${automaticConfidenceThreshold} %).\n\nCes noms sont techniquement valides, mais les preuves sont insuffisantes : certains peuvent être inexacts ou trompeurs. Ils seront écrits dans le projet Ghidra si tu confirmes ensuite l'application du lot.\n\nLes propositions rejetées pour nom invalide, collision ou absence de nom resteront exclues.\n\nActiver quand même cette option ?`,
+      `⚠ AVERTISSEMENT — RENOMMAGES NON VALIDÉS\n\nTu vas ajouter ${automaticRenameReviewChoices.length} proposition(s) que le mode automatique normal a refusées. Certaines sont sous le seuil « ${activePrudenceProfile.label} » (${automaticConfidenceThreshold} %), d'autres sont des hypothèses IA contestées ou insuffisamment corroborées.\n\nCes noms sont techniquement applicables, mais ils peuvent être inexacts ou trompeurs. Ils seront écrits dans le projet Ghidra si tu confirmes ensuite l'application du lot.\n\nLes noms invalides, les collisions, les faux points d'entrée et les propositions sans nom restent exclus.\n\nActiver quand même cette option ?`,
     );
     if (confirmed) includeBelowThresholdRenames = true;
   }
@@ -6145,13 +6185,14 @@ interface ApplyRenamesResult {
                 <section class="below-threshold-warning" role="alert">
                   <div class="below-threshold-warning-icon" aria-hidden="true">⚠</div>
                   <div>
-                    <strong>Renommages sous le seuil : risque accru d'erreurs</strong>
+                    <strong>Renommages non validés : risque accru d'erreurs</strong>
                     <p>
-                      Ces {automaticRenameReviewChoices.length} propositions sont techniquement utilisables, mais leurs preuves
-                      n'atteignent pas le niveau « {activePrudenceProfile.label} » ({automaticConfidenceThreshold} %).
-                      Les inclure peut attribuer un nom incorrect ou trompeur à certaines fonctions dans Ghidra.
+                      Ces {automaticRenameReviewChoices.length} propositions sont techniquement applicables, mais elles n'ont
+                      pas franchi tous les contrôles du mode « {activePrudenceProfile.label} » : score trop faible,
+                      vérificateur en désaccord ou corroboration insuffisante. Les inclure peut attribuer un nom incorrect
+                      ou trompeur à certaines fonctions dans Ghidra.
                     </p>
-                    <small>Les noms invalides, les collisions et les propositions sans nom restent toujours exclus.</small>
+                    <small>Les noms invalides, les collisions, les faux points d'entrée et les propositions sans nom restent toujours exclus.</small>
                   </div>
                   <button
                     type="button"
