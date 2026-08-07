@@ -1270,7 +1270,12 @@ interface ApplyRenamesResult {
     };
   }
 
+  const uniqueFidCandidatesCache = new WeakMap<FidCandidate[], FidCandidate[]>();
+  const uniqueBsimCandidatesCache = new WeakMap<BsimCandidate[], MergedBsimCandidate[]>();
+
   function uniqueFidCandidates(candidates: FidCandidate[]): FidCandidate[] {
+    const cached = uniqueFidCandidatesCache.get(candidates);
+    if (cached) return cached;
     const bestByName = new Map<string, FidCandidate>();
     for (const candidate of candidates) {
       if (isGeneratedFunctionName(candidate.name)) continue;
@@ -1279,10 +1284,14 @@ interface ApplyRenamesResult {
         bestByName.set(candidate.name, candidate);
       }
     }
-    return [...bestByName.values()].sort((a, b) => b.overall_score - a.overall_score);
+    const result = [...bestByName.values()].sort((a, b) => b.overall_score - a.overall_score);
+    uniqueFidCandidatesCache.set(candidates, result);
+    return result;
   }
 
   function uniqueBsimCandidates(candidates: BsimCandidate[]): MergedBsimCandidate[] {
+    const cached = uniqueBsimCandidatesCache.get(candidates);
+    if (cached) return cached;
     const bestByName = new Map<string, MergedBsimCandidate>();
     for (const candidate of candidates) {
       if (isGeneratedFunctionName(candidate.name)) continue;
@@ -1304,9 +1313,11 @@ interface ApplyRenamesResult {
         bestByName.set(candidate.name, { ...previous, corpus: corpora, matchingExecutables });
       }
     }
-    return [...bestByName.values()].sort(
+    const result = [...bestByName.values()].sort(
       (a, b) => b.similarity - a.similarity || b.significance - a.significance,
     );
+    uniqueBsimCandidatesCache.set(candidates, result);
+    return result;
   }
 
   function bsimMatchesForAddress(entryAddress: string): MergedBsimCandidate[] {
@@ -2387,6 +2398,17 @@ interface ApplyRenamesResult {
       pendingDecompiles.has(selectedFunctionAddress),
   );
 
+  let isSelectedDecompileQueued = $derived(
+    activeWorkspaceView === "identification" &&
+      automaticIdentificationMode &&
+      automaticWorkspaceMode === "review" &&
+      selectedFunction !== null &&
+      selectedFunction.decompiled_code === null &&
+      !decompileCache.has(selectedFunction.entry_address) &&
+      pendingDecompiles.size > 0 &&
+      !pendingDecompiles.has(selectedFunction.entry_address),
+  );
+
   let selectedDecompileError = $derived(
     selectedFunctionAddress === null
       ? ""
@@ -2608,12 +2630,15 @@ interface ApplyRenamesResult {
   }
 
   function bsimResultForAddress(entryAddress: string): BsimQueryResult | undefined {
-    const cached = decompileCache.get(entryAddress)?.bsim;
     const background = backgroundBsimResults.get(entryAddress);
     // An on-demand decompilation may have cached "unavailable" before the
     // whole-program BSim pass completed. Once the background scan has real
     // evidence (including a confirmed empty result), it is authoritative.
+    // Check it before reading `decompileCache`: this also prevents every
+    // newly decompiled function from invalidating and rebuilding the complete
+    // automatic-naming evaluation when the bulk BSim scan is already final.
     if (background?.status === "available") return background;
+    const cached = decompileCache.get(entryAddress)?.bsim;
     return cached ?? background;
   }
 
@@ -3119,13 +3144,40 @@ interface ApplyRenamesResult {
 
     if (!func || analysisSource !== "automatic" || func.is_external) return;
     if (func.decompiled_code !== null) return;
-    if (
-      decompileCache.has(func.entry_address) ||
-      pendingDecompiles.has(func.entry_address)
-    )
-      return;
+    if (decompileCache.has(func.entry_address)) return;
+    // A failed request stays visible until the user explicitly retries; do
+    // not create an invisible retry loop every time the pending Set changes.
+    if (decompileErrors.has(func.entry_address)) return;
 
-    requestDecompiledCode(func.entry_address);
+    // `decompile_function` starts Ghidra headless and the Rust backend has to
+    // serialize every request behind an exclusive project lock. Previously,
+    // rapid clicks in the automatic-review queue submitted one request per
+    // intermediate selection, so the function the user actually wanted could
+    // sit behind several obsolete 5-10 second jobs. Never enqueue behind an
+    // existing request: when it finishes, the reactive Set update reruns this
+    // effect and only the latest selected address is requested.
+    if (pendingDecompiles.size > 0) return;
+
+    const isAutomaticReview =
+      activeWorkspaceView === "identification" &&
+      automaticIdentificationMode &&
+      automaticWorkspaceMode === "review";
+    if (isAutomaticReview) {
+      // Let selection/paint happen first and coalesce rapid navigation. The
+      // cleanup cancels the timer as soon as another row is selected.
+      const timer = window.setTimeout(() => {
+        if (
+          selectedFunctionAddress === func.entry_address &&
+          !decompileCache.has(func.entry_address) &&
+          pendingDecompiles.size === 0
+        ) {
+          void requestDecompiledCode(func.entry_address);
+        }
+      }, 180);
+      return () => window.clearTimeout(timer);
+    }
+
+    void requestDecompiledCode(func.entry_address);
   });
 
   // Disassembly is only fetched for the Code Browser tab -- unlike
@@ -3182,6 +3234,16 @@ interface ApplyRenamesResult {
     const address = selectedFunctionAddress;
     const direction = callGraphDirection;
     const depth = callGraphDepth;
+
+    // Automatic review displays the calls already present in the export, not
+    // the interactive graph. Avoid a backend BFS on every queue click.
+    // Switching to another workspace reruns this effect for the current
+    // function because `activeWorkspaceView` is read here.
+    if (
+      activeWorkspaceView === "identification" &&
+      automaticIdentificationMode &&
+      automaticWorkspaceMode === "review"
+    ) return;
 
     if (!address || analysisSource === "none") {
       callGraphResult = null;
@@ -6323,7 +6385,7 @@ interface ApplyRenamesResult {
                 <section class="automatic-review-context-panel">
                   <header><div><small>Contexte de contrôle</small><h3>Pseudocode et indices</h3></div><span>{reviewItem.func.calls.length} appel(s) · {reviewItem.func.strings.length} chaîne(s)</span></header>
                   <div class="automatic-review-code">
-                    {#if isDecompilingSelected}<p>Décompilation Ghidra en cours…</p>{:else if selectedDecompileError}<p class="error">{selectedDecompileError}</p>{:else if selectedDecompiledCode}<pre><code>{selectedDecompiledCode}</code></pre>{:else}<p>Aucun pseudocode disponible pour cette fonction.</p>{/if}
+                    {#if isDecompilingSelected}<p>Décompilation Ghidra en cours…</p>{:else if isSelectedDecompileQueued}<p>Cette fonction sera décompilée juste après la tâche Ghidra en cours…</p>{:else if selectedDecompileError}<p class="error">{selectedDecompileError}</p><button type="button" onclick={() => void requestDecompiledCode(reviewItem.func.entry_address)}>Réessayer la décompilation</button>{:else if selectedDecompiledCode}<pre><code>{selectedDecompiledCode}</code></pre>{:else}<p>Aucun pseudocode disponible pour cette fonction.</p>{/if}
                   </div>
                   <div class="automatic-review-context-facts">
                     <section><h4>Chaînes référencées</h4>{#if reviewItem.func.strings.length > 0}<ul>{#each reviewItem.func.strings.slice(0, 8) as value}<li>{value}</li>{/each}</ul>{:else}<p>Aucune chaîne.</p>{/if}</section>
