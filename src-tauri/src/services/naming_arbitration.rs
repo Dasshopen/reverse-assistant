@@ -403,6 +403,61 @@ pub fn build_arbitration_request(
     }
 }
 
+/// Smaller fallback used only when a provider reports that the normal
+/// arbitration response hit its output limit. The candidate set remains
+/// closed and complete; only the explanatory context and requested prose are
+/// shortened. This preserves the safety property instead of silently
+/// accepting a truncated answer or dropping candidates from the choice.
+pub fn build_compact_arbitration_request(
+    request: &ArbitrationRequest,
+    model: &str,
+) -> ChatCompletionRequest {
+    let candidate_list = request
+        .candidates
+        .iter()
+        .map(|candidate| format!("- {}", candidate.name))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut context = request.context.clone();
+    context.decompiled_code = context
+        .decompiled_code
+        .as_deref()
+        .map(|code| bounded_text(code, 2_500));
+    context.caller_names.truncate(8);
+    context.callee_names.truncate(8);
+    context.referenced_strings.truncate(8);
+    context.imported_symbols.truncate(8);
+    context.numeric_constants.truncate(8);
+    context.global_references.truncate(8);
+    context.incoming_callsite_arguments.truncate(6);
+    context.callsite_arguments.truncate(6);
+    context.provisional_neighbors.truncate(6);
+
+    ChatCompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: "Choisis exactement un nom dans la liste fermee, ou null si le contexte ne permet pas de trancher. Reponds uniquement en JSON. reasoning: une phrase courte. evidence: au plus 3 indices courts. N'invente aucun nom.".to_owned(),
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: format!(
+                    "CANDIDATS :\n{candidate_list}\n\nCONTEXTE BORNE :\n{}",
+                    format_context(&context)
+                ),
+            },
+        ],
+        temperature: Some(0.0),
+        // The normal request remains capped at 512. The fallback gets enough
+        // room to close a valid JSON object while its prompt explicitly
+        // forbids the long prose that caused the first truncation.
+        max_tokens: Some(768),
+        require_json_object: true,
+        response_schema: Some(arbitration_result_schema(None)),
+    }
+}
+
 const MAX_BATCH_CODE_CHARS: usize = 4_500;
 
 fn arbitration_result_schema(entry_address: Option<&str>) -> Value {
@@ -420,9 +475,12 @@ fn arbitration_result_schema(entry_address: Option<&str>) -> Value {
         ),
         (
             "evidence".to_owned(),
-            json!({ "type":"array", "items":{"type":"string"}, "maxItems":12 }),
+            json!({ "type":"array", "items":{"type":"string", "maxLength":240}, "maxItems":4 }),
         ),
-        ("reasoning".to_owned(), json!({ "type":"string" })),
+        (
+            "reasoning".to_owned(),
+            json!({ "type":"string", "maxLength":480 }),
+        ),
     ]);
     let mut required = vec!["chosen_name", "confidence", "evidence", "reasoning"];
     if let Some(entry_address) = entry_address {
@@ -920,6 +978,39 @@ mod tests {
         assert!(user_message.contains("out of range"));
         assert!(user_message.contains("RaiseException"));
         assert!(user_message.contains("FUN_140001a28(message)"));
+    }
+
+    #[test]
+    fn compact_retry_keeps_every_candidate_but_bounds_context_and_prose() {
+        let long_code = "x".repeat(8_000);
+        let request = ArbitrationRequest {
+            candidates: sample_candidates(),
+            context: ArbitrationContext {
+                current_name: "FUN_140001a28".to_owned(),
+                return_type: "void".to_owned(),
+                decompiled_code: Some(long_code),
+                caller_names: (0..20).map(|index| format!("caller_{index}")).collect(),
+                ..ArbitrationContext::default()
+            },
+        };
+
+        let compact = build_compact_arbitration_request(&request, "qwen2.5-coder:7b");
+        let prompt = &compact.messages[1].content;
+
+        assert_eq!(compact.max_tokens, Some(768));
+        assert!(prompt.contains("std::bad_alloc::bad_alloc"));
+        assert!(prompt.contains("std::out_of_range::out_of_range"));
+        assert!(prompt.contains("contexte tronque"));
+        assert!(prompt.contains("caller_7"));
+        assert!(!prompt.contains("caller_8"));
+        assert_eq!(
+            compact.response_schema.as_ref().unwrap()["properties"]["evidence"]["maxItems"],
+            4
+        );
+        assert_eq!(
+            compact.response_schema.as_ref().unwrap()["properties"]["reasoning"]["maxLength"],
+            480
+        );
     }
 
     #[test]

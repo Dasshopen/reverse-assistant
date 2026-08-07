@@ -6382,7 +6382,7 @@ interface ApplyRenamesResult {
               {/if}
               {#if generationDiagnostics.length > 0}
                 <details class="generation-diagnostics">
-                  <summary>Journal IA persistant ({generationDiagnostics.length})</summary>
+                  <summary>Historique IA persistant ({generationDiagnostics.length}, anciennes erreurs incluses)</summary>
                   <div class="generation-diagnostic-list">
                     {#each generationDiagnostics.slice(-20).reverse() as diagnostic}
                       <article>

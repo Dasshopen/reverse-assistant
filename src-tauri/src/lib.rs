@@ -361,14 +361,26 @@ fn arbitrate_identification_tie(
             base_url: secrets.base_url,
             api_key: secrets.api_key,
         };
-        let request = naming_arbitration::build_arbitration_request(
-            &naming_arbitration::ArbitrationRequest {
-                candidates: arbitration_candidates.clone(),
-                context: context.clone(),
-            },
-            &secrets.model,
-        );
-        match provider.complete(&request).and_then(|response| {
+        let arbitration_request = naming_arbitration::ArbitrationRequest {
+            candidates: arbitration_candidates.clone(),
+            context: context.clone(),
+        };
+        let request =
+            naming_arbitration::build_arbitration_request(&arbitration_request, &secrets.model);
+        let response = match provider.complete(&request) {
+            Ok(response) => Ok(response),
+            Err(error) if services::ai_provider::is_output_limit_error(&error) => {
+                let compact_request = naming_arbitration::build_compact_arbitration_request(
+                    &arbitration_request,
+                    &secrets.model,
+                );
+                provider.complete(&compact_request).map_err(|retry_error| {
+                    format!("arbitration output hit its limit; compact retry failed: {retry_error}")
+                })
+            }
+            Err(error) => Err(error),
+        };
+        match response.and_then(|response| {
             naming_arbitration::parse_arbitration_response(&response, &arbitration_candidates)
         }) {
             Ok(result) => answers.push((secrets.label, result)),
