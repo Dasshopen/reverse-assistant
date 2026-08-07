@@ -590,6 +590,12 @@ interface ApplyRenamesResult {
   let automaticReviewCategory = $state<AutomaticReviewCategory>("ambiguous");
   let automaticReviewPage = $state(1);
   const automaticReviewPageSize = 8;
+  type AutomaticWorkspaceMode = "batch" | "review";
+  let automaticWorkspaceMode = $state<AutomaticWorkspaceMode>("batch");
+  let automaticBatchPage = $state(1);
+  const automaticBatchPageSize = 14;
+  let excludedAutomaticRenameAddresses = $state(new Set<string>());
+  let automaticReviewSelectedAddress = $state<string | null>(null);
   let includeBelowThresholdRenames = $state(false);
   let ignoredIdentificationAddresses = $state(new Set<string>());
   let isApplyingAutomaticRenames = $state(false);
@@ -1176,8 +1182,9 @@ interface ApplyRenamesResult {
   }
 
   function identificationSourceLabel(
-    source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation",
+    source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation" | null,
   ): string {
+    if (source === null) return "Aucune source";
     if (source === "rtti") return "RTTI";
     if (source === "arbitration") return "Agent IA (arbitrage)";
     if (source === "generation") return "Agent IA (invention)";
@@ -1627,6 +1634,23 @@ interface ApplyRenamesResult {
   let automaticRenameCandidates = $derived(
     automaticRenameEvaluation.choices.filter((choice) => choice.confidence >= automaticConfidenceThreshold),
   );
+  let selectedAutomaticRenameCandidates = $derived(
+    automaticRenameCandidates.filter(
+      (choice) => !excludedAutomaticRenameAddresses.has(choice.func.entry_address),
+    ),
+  );
+  let automaticBatchPageCount = $derived(
+    Math.max(1, Math.ceil(automaticRenameCandidates.length / automaticBatchPageSize)),
+  );
+  let currentAutomaticBatchPage = $derived(
+    Math.min(automaticBatchPage, automaticBatchPageCount),
+  );
+  let paginatedAutomaticBatchChoices = $derived(
+    automaticRenameCandidates.slice(
+      (currentAutomaticBatchPage - 1) * automaticBatchPageSize,
+      currentAutomaticBatchPage * automaticBatchPageSize,
+    ),
+  );
   let automaticGenerationReviewChoices = $derived.by<AutomaticRenameChoice[]>(() => {
     const choices: AutomaticRenameChoice[] = [];
     const addressesAlreadyClassified = new Set(
@@ -1674,7 +1698,7 @@ interface ApplyRenamesResult {
   let automaticRenameApplicationCount = $derived(
     Math.min(
       500,
-      automaticRenameCandidates.length +
+      selectedAutomaticRenameCandidates.length +
         (includeBelowThresholdRenames ? automaticRenameReviewChoices.length : 0),
     ),
   );
@@ -1832,6 +1856,9 @@ interface ApplyRenamesResult {
   let manualGenerationHypothesisCount = $derived(
     automaticReviewItems.filter((item) => item.source === "generation").length,
   );
+  let automaticReviewLeadCount = $derived(
+    automaticReviewItems.filter((item) => item.candidateName !== null).length,
+  );
   let automaticReviewPageCount = $derived(
     Math.max(1, Math.ceil(automaticReviewCategoryItems.length / automaticReviewPageSize)),
   );
@@ -1842,6 +1869,12 @@ interface ApplyRenamesResult {
       currentAutomaticReviewPage * automaticReviewPageSize,
     ),
   );
+  let selectedAutomaticReviewItem = $derived.by<AutomaticReviewItem | null>(() => {
+    const explicitlySelected = automaticReviewCategoryItems.find(
+      (item) => item.func.entry_address === automaticReviewSelectedAddress,
+    );
+    return explicitlySelected ?? paginatedAutomaticReviewItems[0] ?? automaticReviewCategoryItems[0] ?? null;
+  });
 
   let selectedIdentificationCandidates = $derived(
     selectedFunctionAddress
@@ -2449,6 +2482,12 @@ interface ApplyRenamesResult {
       automaticIdentificationMode = false;
       automaticIdentificationPage = 1;
       automaticGenerationPage = 1;
+      automaticWorkspaceMode = "batch";
+      automaticBatchPage = 1;
+      automaticReviewCategory = "ambiguous";
+      automaticReviewPage = 1;
+      automaticReviewSelectedAddress = null;
+      excludedAutomaticRenameAddresses = new Set();
       includeBelowThresholdRenames = false;
       automaticRenameError = "";
       automaticRenameSuccess = "";
@@ -2485,6 +2524,20 @@ interface ApplyRenamesResult {
     if (queue.length === 0) return;
     if (!queue.some((func) => func.entry_address === selectedFunctionAddress)) {
       selectedFunctionAddress = queue[0].entry_address;
+    }
+  });
+
+  $effect(() => {
+    if (
+      activeWorkspaceView !== "identification" ||
+      !automaticIdentificationMode ||
+      automaticWorkspaceMode !== "review"
+    ) return;
+    const item = selectedAutomaticReviewItem;
+    if (!item) return;
+    automaticReviewSelectedAddress = item.func.entry_address;
+    if (selectedFunctionAddress !== item.func.entry_address) {
+      selectedFunctionAddress = item.func.entry_address;
     }
   });
 
@@ -3367,8 +3420,8 @@ interface ApplyRenamesResult {
       return;
     }
     const eligibleChoices = includeBelowThresholdRenames
-      ? [...automaticRenameCandidates, ...automaticRenameReviewChoices]
-      : automaticRenameCandidates;
+      ? [...selectedAutomaticRenameCandidates, ...automaticRenameReviewChoices]
+      : selectedAutomaticRenameCandidates;
     const batch = eligibleChoices.slice(0, 500);
     if (batch.length === 0) return;
     const warning = includeBelowThresholdRenames
@@ -3401,6 +3454,45 @@ interface ApplyRenamesResult {
     } finally {
       isApplyingAutomaticRenames = false;
     }
+  }
+
+  function toggleAutomaticBatchChoice(entryAddress: string) {
+    const next = new Set(excludedAutomaticRenameAddresses);
+    if (next.has(entryAddress)) next.delete(entryAddress);
+    else next.add(entryAddress);
+    excludedAutomaticRenameAddresses = next;
+  }
+
+  function selectAllAutomaticBatchChoices() {
+    excludedAutomaticRenameAddresses = new Set();
+  }
+
+  function clearAutomaticBatchChoices() {
+    excludedAutomaticRenameAddresses = new Set(
+      automaticRenameCandidates.map((choice) => choice.func.entry_address),
+    );
+  }
+
+  function selectAutomaticWorkspaceMode(mode: AutomaticWorkspaceMode) {
+    automaticWorkspaceMode = mode;
+    if (mode === "review") {
+      const item = selectedAutomaticReviewItem;
+      if (item) {
+        automaticReviewSelectedAddress = item.func.entry_address;
+        openFunction(item.func.entry_address, false);
+      }
+    }
+  }
+
+  function selectAutomaticReviewCategory(category: AutomaticReviewCategory) {
+    automaticReviewCategory = category;
+    automaticReviewPage = 1;
+    automaticReviewSelectedAddress = null;
+  }
+
+  function selectAutomaticReviewItem(item: AutomaticReviewItem) {
+    automaticReviewSelectedAddress = item.func.entry_address;
+    openFunction(item.func.entry_address, false);
   }
 
   function toggleBelowThresholdRenames() {
@@ -6063,12 +6155,11 @@ interface ApplyRenamesResult {
             <div>
               <strong>{automaticRenameCandidates.length} proposition(s) atteignent le niveau de prudence</strong>
               <span>
-                {automaticRenameReviewChoices.length + automaticRenameRejections.length} proposition(s) restent à vérifier ·
-                {automaticAmbiguousChoiceCount} choix ambigu(s) signalé(s)
+                {automaticReviewItems.length} cas restent à vérifier ·
+                {automaticReviewLeadCount} avec une piste · {automaticReviewCategoryCounts.unresolved} sans piste
                 {#if automaticRenameGenerationCandidates.length > 0}
                   (dont {automaticRenameGenerationCandidates.length} inventé(s) par IA, voir plus bas)
-                {/if} ·
-                {automaticRenameWithoutEvidenceCount} fonction(s) sans preuve exploitable.
+                {/if}.
               </span>
             </div>
             <fieldset class="prudence-control" aria-label="Niveau de prudence du renommage automatique">
@@ -6084,6 +6175,8 @@ interface ApplyRenamesResult {
                       automaticPrudenceLevel = profile.value;
                       automaticIdentificationPage = 1;
                       automaticGenerationPage = 1;
+                      automaticBatchPage = 1;
+                      excludedAutomaticRenameAddresses = new Set();
                       includeBelowThresholdRenames = false;
                       window.localStorage.setItem("automatic-rename-prudence", String(profile.value));
                     }}
@@ -6115,156 +6208,134 @@ interface ApplyRenamesResult {
             </section>
           {/if}
 
-          {#if automaticRenameCandidatesWithEvidence.length > 0}
-          <section class="automatic-choice-preview">
-            <header>
-              <div><h3>Choix préparés</h3><span>Chaque ligne conserve la preuve utilisée avant l'écriture dans Ghidra.</span></div>
-              <small>Page {currentAutomaticIdentificationPage} sur {automaticIdentificationPageCount}</small>
-            </header>
-            {#if paginatedAutomaticRenameCandidates.length > 0}
-              <table>
-                <thead><tr><th>Fonction actuelle</th><th>Nom choisi</th><th>Preuve</th><th>Autres choix</th></tr></thead>
-                <tbody>
-                  {#each paginatedAutomaticRenameCandidates as item (item.func.entry_address)}
-                    <tr>
-                      <td><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></td>
-                      <td>{item.name}</td>
-                      <td><span>{identificationSourceLabel(item.source)} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small><small class="automatic-decision-reason">✓ {item.decisionLabel}</small></td>
-                      <td>{item.alternativeCount === 0 ? "Aucun" : `${item.alternativeCount} moins bien classé(s)`}</td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {:else}
-              <div class="no-automatic-choice"><strong>Aucun nom automatique disponible</strong><span>Repasse en validation manuelle pour examiner le pseudocode des fonctions restantes.</span></div>
-            {/if}
-            <nav class="identification-pagination" aria-label="Pages des choix automatiques">
-              <button type="button" disabled={currentAutomaticIdentificationPage === 1} onclick={() => (automaticIdentificationPage = Math.max(1, currentAutomaticIdentificationPage - 1))}>←</button>
-              <span>{currentAutomaticIdentificationPage} / {automaticIdentificationPageCount}</span>
-              <button type="button" disabled={currentAutomaticIdentificationPage === automaticIdentificationPageCount} onclick={() => (automaticIdentificationPage = Math.min(automaticIdentificationPageCount, currentAutomaticIdentificationPage + 1))}>→</button>
-            </nav>
-          </section>
-          {/if}
+          <nav class="automatic-workspace-tabs" aria-label="Organisation du renommage automatique">
+            <button type="button" class:active={automaticWorkspaceMode === "batch"} onclick={() => selectAutomaticWorkspaceMode("batch")}>
+              <span>Lot automatique</span><b>{automaticRenameCandidates.length}</b><small>Choix prêts, sélectionnables avant application</small>
+            </button>
+            <button type="button" class:active={automaticWorkspaceMode === "review"} onclick={() => selectAutomaticWorkspaceMode("review")}>
+              <span>Révision nécessaire</span><b>{automaticReviewItems.length}</b><small>{automaticReviewLeadCount} avec une piste · {automaticReviewCategoryCounts.unresolved} sans piste</small>
+            </button>
+          </nav>
 
-          {#if automaticRenameGenerationCandidates.length > 0}
-          <details class="automatic-choice-preview generation-choice-preview">
-            <summary>
-              <div>
-                <h3>Propositions IA retenues pour le lot automatique</h3>
-                <span>Aucune preuve FunctionID/BSim pour ces fonctions — l'agent a proposé un nom à partir du pseudocode, des appelants/appelés et des chaînes. Seules les hypothèses ayant franchi les deux contrôles de sécurité apparaissent ici.</span>
-              </div>
-              <div class="generation-choice-summary-action">
-                <small>{automaticRenameGenerationCandidates.length} automatique(s) sur {generationProposed} nom(s) généré(s) · {manualGenerationHypothesisCount} à vérifier</small>
-                <b>Afficher</b>
-              </div>
-            </summary>
-            <div class="generation-choice-list">
-              {#each paginatedAutomaticGenerationCandidates as item (item.func.entry_address)}
-                <article class="generation-choice-item">
-                  <div><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
-                  <div class="generation-choice-name">→ <b>{item.name}</b></div>
-                  <p class="generation-choice-reasoning">{item.evidenceLabel}</p>
-                </article>
-              {/each}
-            </div>
-            <nav class="identification-pagination generation-choice-pagination" aria-label="Pages des propositions IA">
-              <button type="button" disabled={currentAutomaticGenerationPage === 1} onclick={() => (automaticGenerationPage = Math.max(1, currentAutomaticGenerationPage - 1))}>←</button>
-              <span>{currentAutomaticGenerationPage} / {automaticGenerationPageCount}</span>
-              <button type="button" disabled={currentAutomaticGenerationPage === automaticGenerationPageCount} onclick={() => (automaticGenerationPage = Math.min(automaticGenerationPageCount, currentAutomaticGenerationPage + 1))}>→</button>
-            </nav>
-          </details>
-          {/if}
-
-          {#if automaticReviewItems.length > 0}
-            <details class="automatic-rejections">
-              <summary>
-                <span><strong>{automaticReviewItems.length} cas restent hors du lot automatique</strong><small>{automaticRenameReviewChoices.length + automaticRenameRejections.length} avec une piste · {automaticReviewCategoryCounts.unresolved} sans piste exploitable</small></span>
-                <b>Ouvrir la file</b>
-              </summary>
-              {#if automaticRenameReviewChoices.length > 0}
-                <section class="below-threshold-warning" role="alert">
-                  <div class="below-threshold-warning-icon" aria-hidden="true">⚠</div>
-                  <div>
-                    <strong>Renommages non validés : risque accru d'erreurs</strong>
-                    <p>
-                      Ces {automaticRenameReviewChoices.length} propositions sont techniquement applicables, mais elles n'ont
-                      pas franchi tous les contrôles du mode « {activePrudenceProfile.label} » : score trop faible,
-                      vérificateur en désaccord ou corroboration insuffisante. Les inclure peut attribuer un nom incorrect
-                      ou trompeur à certaines fonctions dans Ghidra.
-                    </p>
-                    <small>Les noms invalides, les collisions, les faux points d'entrée et les propositions sans nom restent toujours exclus.</small>
-                  </div>
-                  <button
-                    type="button"
-                    class:active={includeBelowThresholdRenames}
-                    aria-pressed={includeBelowThresholdRenames}
-                    onclick={toggleBelowThresholdRenames}
-                  >{includeBelowThresholdRenames
-                      ? `✓ Incluses dans le lot (${automaticRenameReviewChoices.length})`
-                      : `Inclure quand même (${automaticRenameReviewChoices.length})`}</button>
-                </section>
-              {/if}
-              <div class="automatic-review-workspace">
-                <nav class="automatic-review-categories" aria-label="Catégories de vérification manuelle">
-                  <button
-                    type="button"
-                    class:active={automaticReviewCategory === "ambiguous"}
-                    onclick={() => { automaticReviewCategory = "ambiguous"; automaticReviewPage = 1; }}
-                  ><span>Ambiguïtés réelles</span><b>{automaticReviewCategoryCounts.ambiguous}</b><small>Plusieurs noms plausibles</small></button>
-                  <button
-                    type="button"
-                    class:active={automaticReviewCategory === "insufficient"}
-                    onclick={() => { automaticReviewCategory = "insufficient"; automaticReviewPage = 1; }}
-                  ><span>Preuve insuffisante</span><b>{automaticReviewCategoryCounts.insufficient}</b><small>Une piste déterministe ou une hypothèse IA à vérifier</small></button>
-                  <button
-                    type="button"
-                    class:active={automaticReviewCategory === "unresolved"}
-                    onclick={() => { automaticReviewCategory = "unresolved"; automaticReviewPage = 1; }}
-                  ><span>Sans piste exploitable</span><b>{automaticReviewCategoryCounts.unresolved}</b><small>Aucun nom défendable</small></button>
-                </nav>
-
-                <header class="automatic-review-heading">
-                  <div>
-                    <strong>{automaticReviewCategory === "ambiguous" ? "Un choix humain est réellement nécessaire" : automaticReviewCategory === "insufficient" ? "Une piste existe, mais sa preuve est trop faible" : "Le système préfère s'abstenir plutôt qu'inventer"}</strong>
-                    <span>{automaticReviewCategory === "ambiguous" ? "Compare les candidats et le pseudocode avant de choisir." : automaticReviewCategory === "insufficient" ? "Vérifie le score, la source et les indices disponibles." : "Ces fonctions restent accessibles en mode manuel pour une analyse approfondie."}</span>
-                  </div>
-                  <small>{automaticReviewCategoryItems.length} cas · page {currentAutomaticReviewPage}/{automaticReviewPageCount}</small>
-                </header>
-
-                <div class="automatic-rejection-list">
-                  {#each paginatedAutomaticReviewItems as item (item.func.entry_address)}
-                    {@const arbitration = arbitrationResults.get(item.func.entry_address)}
-                    <article class:ambiguous={item.category === "ambiguous"} class:unresolved={item.category === "unresolved"}>
-                      <div class="automatic-review-function"><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></div>
-                      <div class="automatic-review-candidate">
-                        {#if item.candidateName}<span>{item.candidateName}</span>{:else}<span>Aucun nom proposé</span>{/if}
-                        {#if item.candidateRawName && item.candidateName !== item.candidateRawName}<code title="Nom brut de la source">{item.candidateRawName}</code>{/if}
-                      </div>
-                      <div class="automatic-review-reason">
-                        {#if item.source}<small>{identificationSourceLabel(item.source)}{item.confidence !== null ? ` · confiance ${item.confidence}%` : ""}{item.evidenceLabel ? ` · ${item.evidenceLabel}` : ""}</small>{/if}
-                        <b>{item.reason}</b>
-                        {#if arbitration && !arbitration.chosen_name && (arbitration.evidence.length > 0 || arbitration.reasoning)}
-                          <details>
-                            <summary>Ce que l'agent a réellement observé</summary>
-                            {#if arbitration.reasoning}<p>{arbitration.reasoning}</p>{/if}
-                            {#if arbitration.evidence.length > 0}<ul>{#each arbitration.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}
-                          </details>
-                        {/if}
-                      </div>
-                      <button type="button" onclick={() => reviewIdentificationFunction(item.func.entry_address)}>Examiner</button>
-                    </article>
-                  {:else}
-                    <div class="automatic-review-empty">Aucun cas dans cette catégorie.</div>
-                  {/each}
+          {#if automaticWorkspaceMode === "batch"}
+            <section class="automatic-batch-workspace">
+              <header>
+                <div>
+                  <h3>Propositions prêtes pour le lot</h3>
+                  <span>FunctionID, BSim, RTTI, arbitrage et IA validée sont réunis dans une seule table.</span>
                 </div>
-                <nav class="identification-pagination automatic-review-pagination" aria-label="Pages des vérifications manuelles">
-                  <button type="button" disabled={currentAutomaticReviewPage === 1} onclick={() => (automaticReviewPage = Math.max(1, currentAutomaticReviewPage - 1))}>←</button>
-                  <span>{currentAutomaticReviewPage} / {automaticReviewPageCount}</span>
-                  <button type="button" disabled={currentAutomaticReviewPage === automaticReviewPageCount} onclick={() => (automaticReviewPage = Math.min(automaticReviewPageCount, currentAutomaticReviewPage + 1))}>→</button>
+                <div class="automatic-batch-actions">
+                  <small>{selectedAutomaticRenameCandidates.length} sélectionnée(s) sur {automaticRenameCandidates.length}</small>
+                  <button type="button" onclick={selectAllAutomaticBatchChoices}>Tout sélectionner</button>
+                  <button type="button" onclick={clearAutomaticBatchChoices}>Tout désélectionner</button>
+                </div>
+              </header>
+              {#if paginatedAutomaticBatchChoices.length > 0}
+                <table>
+                  <thead><tr><th aria-label="Sélection"></th><th>Fonction actuelle</th><th>Nom proposé</th><th>Source et preuve</th><th>Confiance</th></tr></thead>
+                  <tbody>
+                    {#each paginatedAutomaticBatchChoices as item (item.func.entry_address)}
+                      <tr class:excluded={excludedAutomaticRenameAddresses.has(item.func.entry_address)}>
+                        <td><input type="checkbox" aria-label={`Inclure ${item.func.name}`} checked={!excludedAutomaticRenameAddresses.has(item.func.entry_address)} onchange={() => toggleAutomaticBatchChoice(item.func.entry_address)} /></td>
+                        <td><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></td>
+                        <td><strong>{item.name}</strong><small>{item.source === "generation" ? "Hypothèse IA contrôlée" : item.decisionLabel}</small></td>
+                        <td><span>{identificationSourceLabel(item.source)} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small></td>
+                        <td><b>{item.confidence}%</b><small>{item.alternativeCount > 0 ? `${item.alternativeCount} autre(s)` : "Choix unique"}</small></td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {:else}
+                <div class="no-automatic-choice"><strong>Aucun nom n'atteint le niveau de prudence actuel</strong><span>Ouvre « Révision nécessaire » pour examiner les pistes disponibles.</span></div>
+              {/if}
+              <footer>
+                <small>{automaticRenameGenerationCandidates.length} proposition(s) IA validée(s) sur {generationProposed} nom(s) généré(s) · {manualGenerationHypothesisCount} à vérifier</small>
+                <nav class="identification-pagination" aria-label="Pages du lot automatique">
+                  <button type="button" disabled={currentAutomaticBatchPage === 1} onclick={() => (automaticBatchPage = Math.max(1, currentAutomaticBatchPage - 1))}>←</button>
+                  <span>{currentAutomaticBatchPage} / {automaticBatchPageCount}</span>
+                  <button type="button" disabled={currentAutomaticBatchPage === automaticBatchPageCount} onclick={() => (automaticBatchPage = Math.min(automaticBatchPageCount, currentAutomaticBatchPage + 1))}>→</button>
                 </nav>
-              </div>
-            </details>
+              </footer>
+            </section>
+          {:else}
+            {#if automaticRenameReviewChoices.length > 0}
+              <section class="below-threshold-warning" role="alert">
+                <div class="below-threshold-warning-icon" aria-hidden="true">⚠</div>
+                <div>
+                  <strong>{automaticRenameReviewChoices.length} renommage(s) techniquement applicable(s), mais non validé(s)</strong>
+                  <p>Ils ont un score trop faible, un vérificateur en désaccord ou une corroboration insuffisante. Les ambiguïtés sans choix unique et les protections structurelles restent exclues.</p>
+                  <small>Examine les fonctions dans les trois colonnes avant de forcer leur ajout.</small>
+                </div>
+                <button type="button" class:active={includeBelowThresholdRenames} aria-pressed={includeBelowThresholdRenames} onclick={toggleBelowThresholdRenames}>{includeBelowThresholdRenames ? `✓ Incluses dans le lot (${automaticRenameReviewChoices.length})` : `Inclure quand même (${automaticRenameReviewChoices.length})`}</button>
+              </section>
+            {/if}
+
+            <section class="automatic-review-studio">
+              <aside class="automatic-review-queue-panel">
+                <header><strong>File de révision</strong><small>{automaticReviewItems.length} cas · {automaticReviewLeadCount} avec une piste</small></header>
+                <nav class="automatic-review-categories" aria-label="Catégories de vérification manuelle">
+                  <button type="button" class:active={automaticReviewCategory === "ambiguous"} onclick={() => selectAutomaticReviewCategory("ambiguous")}><span>Ambiguïtés</span><b>{automaticReviewCategoryCounts.ambiguous}</b></button>
+                  <button type="button" class:active={automaticReviewCategory === "insufficient"} onclick={() => selectAutomaticReviewCategory("insufficient")}><span>Preuves faibles</span><b>{automaticReviewCategoryCounts.insufficient}</b></button>
+                  <button type="button" class:active={automaticReviewCategory === "unresolved"} onclick={() => selectAutomaticReviewCategory("unresolved")}><span>Sans piste</span><b>{automaticReviewCategoryCounts.unresolved}</b></button>
+                </nav>
+                <ol>
+                  {#each paginatedAutomaticReviewItems as item (item.func.entry_address)}
+                    <li>
+                      <button type="button" class:active={selectedAutomaticReviewItem?.func.entry_address === item.func.entry_address} onclick={() => selectAutomaticReviewItem(item)}>
+                        <span><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></span>
+                        <span class="automatic-review-queue-candidate"><small>{item.source ? identificationSourceLabel(item.source) : "Aucune source"}</small><b>{item.candidateName ?? "Aucun nom"}</b></span>
+                      </button>
+                    </li>
+                  {:else}
+                    <li class="automatic-review-empty">Aucun cas dans cette catégorie.</li>
+                  {/each}
+                </ol>
+                <nav class="identification-pagination" aria-label="Pages de la file de révision">
+                  <button type="button" disabled={currentAutomaticReviewPage === 1} onclick={() => { automaticReviewPage = Math.max(1, currentAutomaticReviewPage - 1); automaticReviewSelectedAddress = null; }}>←</button>
+                  <span>{currentAutomaticReviewPage} / {automaticReviewPageCount}</span>
+                  <button type="button" disabled={currentAutomaticReviewPage === automaticReviewPageCount} onclick={() => { automaticReviewPage = Math.min(automaticReviewPageCount, currentAutomaticReviewPage + 1); automaticReviewSelectedAddress = null; }}>→</button>
+                </nav>
+              </aside>
+
+              {#if selectedAutomaticReviewItem}
+                {@const reviewItem = selectedAutomaticReviewItem}
+                {@const reviewFidCandidates = uniqueFidCandidates(identifications.get(reviewItem.func.entry_address) ?? [])}
+                {@const reviewBsimCandidates = bsimMatchesForAddress(reviewItem.func.entry_address)}
+                {@const reviewGeneration = generationResults.get(reviewItem.func.entry_address)}
+                {@const reviewArbitration = arbitrationResults.get(reviewItem.func.entry_address)}
+                <section class="automatic-review-evidence-panel">
+                  <header><div><small>Fonction à départager</small><h3>{reviewItem.func.name}</h3><code>{reviewItem.func.entry_address}</code></div><span class={`review-category-badge ${reviewItem.category}`}>{reviewItem.category === "ambiguous" ? "Ambiguë" : reviewItem.category === "insufficient" ? "Preuve faible" : "Sans piste"}</span></header>
+                  <div class="automatic-review-primary-reason">
+                    <strong>{reviewItem.candidateName ?? "Aucun nom suffisamment défendable"}</strong>
+                    <p>{reviewItem.reason}</p>
+                    {#if reviewItem.evidenceLabel}<small>{reviewItem.evidenceLabel}</small>{/if}
+                  </div>
+                  <div class="automatic-candidate-stack">
+                    {#if reviewFidCandidates.length > 0}<h4>FunctionID</h4>{#each reviewFidCandidates.slice(0, 5) as candidate}<article><strong>{displayCandidateName(candidate.name)}</strong><span>score {candidate.overall_score.toFixed(1)}</span><small>{candidate.library_family} {candidate.library_version} · {candidate.match_mode}</small></article>{/each}{/if}
+                    {#if reviewBsimCandidates.length > 0}<h4>BSim</h4>{#each reviewBsimCandidates.slice(0, 5) as candidate}<article><strong>{displayCandidateName(candidate.name)}</strong><span>{candidate.similarity.toFixed(3)}</span><small>{candidate.corpus} · significativité {candidate.significance.toFixed(1)}</small></article>{/each}{/if}
+                    {#if reviewGeneration?.suggested_name}<h4>Analyse IA</h4><article class="generation"><strong>{reviewGeneration.suggested_name}</strong><span>{reviewGeneration.confidence}%</span><small>{reviewGeneration.reasoning}</small></article>{/if}
+                    {#if reviewArbitration && (reviewArbitration.reasoning || reviewArbitration.evidence.length > 0)}<h4>Arbitrage</h4><article class="arbitration"><strong>{reviewArbitration.chosen_name ?? "Abstention de l'agent"}</strong><span>{reviewArbitration.confidence}%</span><small>{reviewArbitration.reasoning}</small>{#if reviewArbitration.evidence.length > 0}<ul>{#each reviewArbitration.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}</article>{/if}
+                    {#if reviewFidCandidates.length === 0 && reviewBsimCandidates.length === 0 && !reviewGeneration?.suggested_name}<div class="automatic-review-empty">Aucun candidat nommé. Le pseudocode reste disponible pour une analyse manuelle.</div>{/if}
+                  </div>
+                  <footer><button type="button" onclick={() => reviewIdentificationFunction(reviewItem.func.entry_address)}>Passer en validation manuelle</button></footer>
+                </section>
+
+                <section class="automatic-review-context-panel">
+                  <header><div><small>Contexte de contrôle</small><h3>Pseudocode et indices</h3></div><span>{reviewItem.func.calls.length} appel(s) · {reviewItem.func.strings.length} chaîne(s)</span></header>
+                  <div class="automatic-review-code">
+                    {#if isDecompilingSelected}<p>Décompilation Ghidra en cours…</p>{:else if selectedDecompileError}<p class="error">{selectedDecompileError}</p>{:else if selectedDecompiledCode}<pre><code>{selectedDecompiledCode}</code></pre>{:else}<p>Aucun pseudocode disponible pour cette fonction.</p>{/if}
+                  </div>
+                  <div class="automatic-review-context-facts">
+                    <section><h4>Chaînes référencées</h4>{#if reviewItem.func.strings.length > 0}<ul>{#each reviewItem.func.strings.slice(0, 8) as value}<li>{value}</li>{/each}</ul>{:else}<p>Aucune chaîne.</p>{/if}</section>
+                    <section><h4>Appels sortants</h4>{#if reviewItem.func.calls.length > 0}<ul>{#each reviewItem.func.calls.slice(0, 8) as call}<li><span>{call.target_name}</span><code>{call.target_address ?? "?"}</code></li>{/each}</ul>{:else}<p>Aucun appel sortant.</p>{/if}</section>
+                  </div>
+                </section>
+              {:else}
+                <div class="automatic-review-empty-state">Aucune fonction à examiner dans cette catégorie.</div>
+              {/if}
+            </section>
           {/if}
+
         {:else if remainingIdentificationFunctions.length === 0}
           <div class="identification-complete">
             <span aria-hidden="true">✓</span>
@@ -10602,100 +10673,177 @@ interface ApplyRenamesResult {
   }
   .identification-verification-resume button:hover:not(:disabled) { background: #0e7490; }
 
-  .automatic-choice-preview {
-    border: 1px solid #22324a;
+  .automatic-workspace-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+  }
+
+  .automatic-workspace-tabs button {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.12rem 0.7rem;
+    padding: 0.72rem 0.85rem;
+    border: 1px solid #2e3d56;
+    background: #0d1829;
+    color: #d8e2f0;
+    text-align: left;
+  }
+
+  .automatic-workspace-tabs button:hover:not(:disabled) { border-color: #64748b; background: #132238; }
+  .automatic-workspace-tabs button.active { border-color: #8b5cf6; background: #211940; box-shadow: inset 3px 0 #8b5cf6; }
+  .automatic-workspace-tabs span { font-size: 0.76rem; font-weight: 800; }
+  .automatic-workspace-tabs b { color: #67e8f9; font-size: 0.88rem; }
+  .automatic-workspace-tabs small { grid-column: 1 / -1; color: #8ea0ba; font-size: 0.59rem; }
+
+  .automatic-batch-workspace {
+    border: 1px solid #26354d;
     border-radius: 8px;
-    background: #0b1423;
+    background: #0a1423;
     overflow: hidden;
   }
 
-  .automatic-choice-preview > header {
+  .automatic-batch-workspace > header,
+  .automatic-batch-workspace > footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    padding: 0.65rem 0.75rem;
-    border-bottom: 1px solid #22324a;
+    padding: 0.65rem 0.78rem;
   }
 
-  .automatic-choice-preview > header div { display: grid; gap: 0.12rem; }
-  .automatic-choice-preview h3 { margin: 0; font-size: 0.8rem; }
-  .automatic-choice-preview header span,
-  .automatic-choice-preview header small { color: #8292ad; font-size: 0.58rem; }
-  .automatic-choice-preview table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  .automatic-choice-preview th { padding: 0.5rem 0.65rem; background: #101d30; color: #8292ad; font-size: 0.58rem; text-align: left; }
-  .automatic-choice-preview th:nth-child(1) { width: 24%; }
-  .automatic-choice-preview th:nth-child(2) { width: 23%; }
-  .automatic-choice-preview th:nth-child(3) { width: 35%; }
-  .automatic-choice-preview th:nth-child(4) { width: 18%; }
-  .automatic-choice-preview td { padding: 0.55rem 0.65rem; border-top: 1px solid #1d2a40; color: #dbe5f2; font-size: 0.66rem; overflow: hidden; text-overflow: ellipsis; }
-  .automatic-choice-preview td:first-child,
-  .automatic-choice-preview td:nth-child(3) { display: grid; gap: 0.12rem; }
-  .automatic-choice-preview td strong,
-  .automatic-choice-preview td:nth-child(2) { color: #f1f5f9; font-weight: 700; }
-  .automatic-choice-preview td:nth-child(2) { color: #86efac; }
-  .automatic-choice-preview td code { color: #7db7e8; font-size: 0.56rem; }
-  .automatic-choice-preview td span { color: #a7f3d0; }
-  .automatic-choice-preview td small { color: #8292ad; font-size: 0.55rem; }
-  .automatic-choice-preview td small.automatic-decision-reason { color: #6ee7b7; }
+  .automatic-batch-workspace > header { border-bottom: 1px solid #26354d; }
+  .automatic-batch-workspace > header > div:first-child { display: grid; gap: 0.12rem; }
+  .automatic-batch-workspace h3 { margin: 0; color: #eef4fb; font-size: 0.78rem; }
+  .automatic-batch-workspace header span,
+  .automatic-batch-workspace footer > small { color: #8ea0ba; font-size: 0.59rem; }
+  .automatic-batch-actions { display: flex; align-items: center; gap: 0.4rem; }
+  .automatic-batch-actions small { color: #a7f3d0; font-size: 0.59rem; }
+  .automatic-batch-actions button { padding: 0.36rem 0.5rem; border: 1px solid #3b4d68; background: #101d30; color: #c9d5e5; font-size: 0.56rem; }
+  .automatic-batch-actions button:hover:not(:disabled) { background: #172a43; }
+  .automatic-batch-workspace table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .automatic-batch-workspace th { padding: 0.48rem 0.55rem; background: #101d30; color: #8292ad; font-size: 0.57rem; text-align: left; }
+  .automatic-batch-workspace th:nth-child(1) { width: 3.5%; }
+  .automatic-batch-workspace th:nth-child(2) { width: 20%; }
+  .automatic-batch-workspace th:nth-child(3) { width: 24%; }
+  .automatic-batch-workspace th:nth-child(4) { width: 42%; }
+  .automatic-batch-workspace th:nth-child(5) { width: 10.5%; }
+  .automatic-batch-workspace td { padding: 0.48rem 0.55rem; border-top: 1px solid #1e2d43; color: #dce6f3; font-size: 0.63rem; vertical-align: middle; }
+  .automatic-batch-workspace td:not(:first-child) { min-width: 0; overflow: hidden; }
+  .automatic-batch-workspace td:nth-child(2),
+  .automatic-batch-workspace td:nth-child(3),
+  .automatic-batch-workspace td:nth-child(4),
+  .automatic-batch-workspace td:nth-child(5) { display: grid; gap: 0.1rem; }
+  .automatic-batch-workspace td code { color: #78b9ee; font-size: 0.54rem; }
+  .automatic-batch-workspace td small { color: #8395ae; font-size: 0.54rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .automatic-batch-workspace td:nth-child(3) strong { color: #86efac; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .automatic-batch-workspace td:nth-child(4) span { color: #a7f3d0; }
+  .automatic-batch-workspace td:nth-child(5) b { color: #67e8f9; }
+  .automatic-batch-workspace tr.excluded { opacity: 0.45; }
+  .automatic-batch-workspace input[type="checkbox"] { width: 0.9rem; height: 0.9rem; accent-color: #8b5cf6; }
+  .automatic-batch-workspace > footer { border-top: 1px solid #26354d; }
+  .automatic-batch-workspace > footer .identification-pagination { padding: 0; }
+
+  .automatic-review-studio {
+    display: grid;
+    grid-template-columns: minmax(255px, 0.78fr) minmax(360px, 1.12fr) minmax(430px, 1.35fr);
+    min-height: 610px;
+    border: 1px solid #29374e;
+    border-radius: 8px;
+    background: #091321;
+    overflow: hidden;
+  }
+
+  .automatic-review-queue-panel,
+  .automatic-review-evidence-panel,
+  .automatic-review-context-panel { min-width: 0; }
+  .automatic-review-queue-panel,
+  .automatic-review-evidence-panel { border-right: 1px solid #29374e; }
+  .automatic-review-queue-panel > header,
+  .automatic-review-evidence-panel > header,
+  .automatic-review-context-panel > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    min-height: 58px;
+    padding: 0.62rem 0.72rem;
+    border-bottom: 1px solid #29374e;
+  }
+  .automatic-review-queue-panel > header { display: grid; gap: 0.1rem; }
+  .automatic-review-queue-panel > header strong,
+  .automatic-review-evidence-panel h3,
+  .automatic-review-context-panel h3 { margin: 0; color: #eef4fb; font-size: 0.75rem; }
+  .automatic-review-queue-panel > header small,
+  .automatic-review-evidence-panel header small,
+  .automatic-review-context-panel header small,
+  .automatic-review-context-panel header span { color: #8395ae; font-size: 0.55rem; }
+  .automatic-review-evidence-panel header > div,
+  .automatic-review-context-panel header > div { display: grid; gap: 0.08rem; }
+  .automatic-review-evidence-panel header code { color: #78b9ee; font-size: 0.54rem; }
+  .review-category-badge { padding: 0.28rem 0.42rem; border: 1px solid #6d4d19; border-radius: 999px; color: #fbbf24; font-size: 0.53rem; white-space: nowrap; }
+  .review-category-badge.insufficient { border-color: #7f4f5f; color: #fda4af; }
+  .review-category-badge.unresolved { border-color: #475569; color: #94a3b8; }
+
+  .automatic-review-queue-panel .automatic-review-categories { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0.45rem; gap: 0.3rem; }
+  .automatic-review-queue-panel .automatic-review-categories button { display: grid; grid-template-columns: 1fr; justify-items: start; gap: 0.08rem; padding: 0.42rem; }
+  .automatic-review-queue-panel .automatic-review-categories b { font-size: 0.7rem; }
+  .automatic-review-queue-panel ol { min-height: 442px; margin: 0; padding: 0; list-style: none; }
+  .automatic-review-queue-panel li { border-bottom: 1px solid #1d2a40; }
+  .automatic-review-queue-panel li > button { display: grid; width: 100%; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 0.45rem; padding: 0.52rem 0.6rem; border: 0; border-radius: 0; background: transparent; color: #dce6f3; text-align: left; }
+  .automatic-review-queue-panel li > button:hover:not(:disabled) { background: #122039; }
+  .automatic-review-queue-panel li > button.active { background: #192b4c; box-shadow: inset 3px 0 #8b5cf6; }
+  .automatic-review-queue-panel li span { display: grid; min-width: 0; gap: 0.08rem; }
+  .automatic-review-queue-panel li strong,
+  .automatic-review-queue-panel li b { overflow: hidden; font-size: 0.62rem; text-overflow: ellipsis; white-space: nowrap; }
+  .automatic-review-queue-panel li code { color: #78b9ee; font-size: 0.52rem; }
+  .automatic-review-queue-candidate small { color: #8395ae; font-size: 0.5rem; }
+  .automatic-review-queue-candidate b { color: #fbbf24; }
+
+  .automatic-review-primary-reason { display: grid; gap: 0.25rem; margin: 0.65rem; padding: 0.62rem; border: 1px solid #58431d; border-radius: 6px; background: #1b170d; }
+  .automatic-review-primary-reason strong { color: #fbbf24; font-size: 0.7rem; overflow-wrap: anywhere; }
+  .automatic-review-primary-reason p { margin: 0; color: #d4c29b; font-size: 0.59rem; line-height: 1.45; }
+  .automatic-review-primary-reason small { color: #9d8f70; font-size: 0.53rem; }
+  .automatic-candidate-stack { max-height: 420px; padding: 0 0.65rem 0.65rem; overflow: auto; }
+  .automatic-candidate-stack h4 { margin: 0.55rem 0 0.28rem; color: #c4b5fd; font-size: 0.62rem; text-transform: uppercase; }
+  .automatic-candidate-stack article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.12rem 0.5rem; margin-bottom: 0.3rem; padding: 0.5rem 0.55rem; border: 1px solid #30415b; border-radius: 6px; background: #101d30; }
+  .automatic-candidate-stack article strong { color: #e8eef7; font-size: 0.62rem; overflow-wrap: anywhere; }
+  .automatic-candidate-stack article span { color: #86efac; font-size: 0.56rem; }
+  .automatic-candidate-stack article small { grid-column: 1 / -1; color: #8292ad; font-size: 0.53rem; line-height: 1.4; }
+  .automatic-candidate-stack article.generation { border-color: #6d4d19; }
+  .automatic-candidate-stack article.arbitration { border-color: #5b4a8d; }
+  .automatic-candidate-stack article ul { grid-column: 1 / -1; margin: 0.2rem 0 0; padding-left: 1rem; color: #9fb0c9; font-size: 0.53rem; }
+  .automatic-review-evidence-panel > footer { padding: 0.62rem; border-top: 1px solid #29374e; }
+  .automatic-review-evidence-panel > footer button { width: 100%; background: #5b21b6; color: #fff; font-size: 0.61rem; }
+
+  .automatic-review-code { height: 390px; margin: 0.65rem; border: 1px solid #263a55; border-radius: 6px; background: #050c16; overflow: auto; }
+  .automatic-review-code > p { margin: 0; padding: 1rem; color: #8ea0ba; font-size: 0.6rem; }
+  .automatic-review-code pre { min-width: max-content; margin: 0; padding: 0.8rem; }
+  .automatic-review-code code { color: #d8f3e4; font-size: 0.58rem; line-height: 1.55; }
+  .automatic-review-context-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; padding: 0 0.65rem 0.65rem; }
+  .automatic-review-context-facts section { min-width: 0; padding: 0.55rem; border: 1px solid #26374f; border-radius: 6px; background: #0d192a; }
+  .automatic-review-context-facts h4 { margin: 0 0 0.3rem; color: #c4b5fd; font-size: 0.59rem; }
+  .automatic-review-context-facts ul { display: grid; gap: 0.2rem; margin: 0; padding: 0; list-style: none; }
+  .automatic-review-context-facts li { display: flex; justify-content: space-between; gap: 0.35rem; color: #bac7d8; font-size: 0.53rem; overflow-wrap: anywhere; }
+  .automatic-review-context-facts li code { color: #78b9ee; }
+  .automatic-review-context-facts p { margin: 0; color: #71839e; font-size: 0.53rem; }
+  .automatic-review-empty-state { grid-column: 2 / -1; display: grid; place-items: center; color: #8292ad; font-size: 0.65rem; }
+
+  @media (max-width: 1450px) {
+    .automatic-review-studio { grid-template-columns: minmax(235px, 0.75fr) minmax(330px, 1fr) minmax(380px, 1.2fr); }
+  }
+
+  @media (max-width: 1120px) {
+    .automatic-workspace-tabs { grid-template-columns: 1fr; }
+    .automatic-batch-workspace > header,
+    .automatic-batch-workspace > footer { align-items: flex-start; flex-direction: column; }
+    .automatic-review-studio { grid-template-columns: minmax(240px, 0.8fr) minmax(0, 1.4fr); }
+    .automatic-review-context-panel { grid-column: 1 / -1; border-top: 1px solid #29374e; }
+  }
+
   .no-automatic-choice { display: grid; place-items: center; min-height: 270px; align-content: center; gap: 0.25rem; color: #8292ad; text-align: center; }
   .no-automatic-choice strong { color: #cbd5e1; font-size: 0.78rem; }
   .no-automatic-choice span { font-size: 0.65rem; }
-  .generation-choice-preview { border-color: #4a3a14; }
-  .generation-choice-preview > summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.65rem 0.75rem;
-    cursor: pointer;
-    list-style: none;
-  }
-  .generation-choice-preview > summary::-webkit-details-marker { display: none; }
-  .generation-choice-preview[open] > summary { border-bottom: 1px solid #4a3a14; }
-  .generation-choice-preview > summary > div:first-child { display: grid; gap: 0.12rem; }
-  .generation-choice-summary-action { display: grid; justify-items: end; gap: 0.18rem; white-space: nowrap; }
-  .generation-choice-summary-action small { color: #cbb98a; font-size: 0.57rem; }
-  .generation-choice-summary-action b { color: #fbbf24; font-size: 0.62rem; }
-  .generation-choice-preview[open] .generation-choice-summary-action b { font-size: 0; }
-  .generation-choice-preview[open] .generation-choice-summary-action b::after { content: "Masquer"; font-size: 0.62rem; }
-  .generation-choice-preview h3 { color: #fbbf24; }
-  .generation-choice-list { display: grid; gap: 0.55rem; padding: 0.75rem; }
-  .generation-choice-item { display: grid; gap: 0.25rem; padding: 0.6rem 0.7rem; border: 1px solid #4a3a14; border-radius: 6px; background: #1a1608; }
-  .generation-choice-item > div:first-child { display: flex; align-items: baseline; gap: 0.5rem; }
-  .generation-choice-item strong { color: #f1f5f9; font-size: 0.7rem; }
-  .generation-choice-item code { color: #7db7e8; font-size: 0.56rem; }
-  .generation-choice-name { color: #fbbf24; font-size: 0.7rem; }
-  .generation-choice-reasoning { margin: 0; color: #cbb98a; font-size: 0.64rem; line-height: 1.5; }
-  .generation-choice-pagination { border-top: 1px solid #4a3a14; }
-
-  .automatic-rejections {
-    border: 1px solid #513444;
-    border-radius: 8px;
-    background: #111522;
-    overflow: hidden;
-  }
-
-  .automatic-rejections > summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.7rem 0.78rem;
-    cursor: pointer;
-    list-style: none;
-  }
-
-  .automatic-rejections > summary::-webkit-details-marker { display: none; }
-  .automatic-rejections > summary > span { display: grid; gap: 0.15rem; }
-  .automatic-rejections > summary strong { color: #fecdd3; font-size: 0.74rem; }
-  .automatic-rejections > summary small { color: #8f8291; font-size: 0.59rem; }
-  .automatic-rejections > summary b { color: #fda4af; font-size: 0.63rem; }
-  .automatic-rejections[open] > summary { border-bottom: 1px solid #3d2937; }
-  .automatic-rejections[open] > summary b { font-size: 0; }
-  .automatic-rejections[open] > summary b::after { font-size: 0.63rem; content: "Masquer"; }
-
-  .automatic-review-workspace { display: grid; }
   .automatic-review-categories {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -10717,20 +10865,6 @@ interface ApplyRenamesResult {
   .automatic-review-categories button.active { border-color: #8b5cf6; box-shadow: inset 3px 0 #8b5cf6; background: #201a3a; }
   .automatic-review-categories span { font-size: 0.68rem; font-weight: 750; }
   .automatic-review-categories b { color: #fbbf24; font-size: 0.78rem; }
-  .automatic-review-categories small { grid-column: 1 / -1; color: #8292ad; font-size: 0.56rem; }
-  .automatic-review-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.65rem 0.78rem;
-    border-bottom: 1px solid #292334;
-    background: #0d1625;
-  }
-  .automatic-review-heading > div { display: grid; gap: 0.15rem; }
-  .automatic-review-heading strong { color: #e7edf6; font-size: 0.69rem; }
-  .automatic-review-heading span,
-  .automatic-review-heading small { color: #8292ad; font-size: 0.57rem; }
 
   .below-threshold-warning {
     display: grid;
@@ -10770,45 +10904,12 @@ interface ApplyRenamesResult {
     color: #fff7ed;
   }
 
-  .automatic-rejection-list {
-    display: grid;
-  }
-
-  .automatic-rejection-list article {
-    display: grid;
-    grid-template-columns: minmax(150px, 0.75fr) minmax(220px, 1fr) minmax(320px, 1.65fr) auto;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.65rem 0.78rem;
-    border-bottom: 1px solid #292334;
-    box-shadow: inset 3px 0 #b45309;
-  }
-
-  .automatic-rejection-list article.ambiguous { background: rgb(120 53 15 / 8%); box-shadow: inset 3px 0 #f59e0b; }
-  .automatic-rejection-list article.unresolved { background: rgb(51 65 85 / 8%); box-shadow: inset 3px 0 #64748b; }
-  .automatic-rejection-list article:last-child { border-bottom: 0; }
-  .automatic-rejection-list article > div { display: grid; min-width: 0; gap: 0.13rem; }
-  .automatic-rejection-list strong { color: #e7edf6; font-size: 0.68rem; }
-  .automatic-rejection-list span { color: #fbcfe8; font-size: 0.68rem; overflow-wrap: anywhere; }
-  .automatic-rejection-list code,
-  .automatic-rejection-list small { color: #7891af; font-size: 0.56rem; overflow-wrap: anywhere; }
-  .automatic-rejection-list b { color: #fda4af; font-size: 0.62rem; font-weight: 600; line-height: 1.35; }
-  .automatic-rejection-list button { padding: 0.42rem 0.58rem; border: 1px solid #604052; background: #251724; color: #fecdd3; font-size: 0.6rem; white-space: nowrap; }
-  .automatic-rejection-list button:hover:not(:disabled) { background: #392033; }
-  .automatic-review-candidate > span:first-child { font-weight: 700; }
-  .automatic-rejection-list article.unresolved .automatic-review-candidate span { color: #8292ad; font-style: italic; }
-  .automatic-review-reason details { margin-top: 0.25rem; }
-  .automatic-review-reason details summary { width: fit-content; cursor: pointer; color: #c4b5fd; font-size: 0.57rem; font-weight: 700; }
-  .automatic-review-reason details p { margin: 0.35rem 0 0; color: #a9b8d2; font-size: 0.58rem; line-height: 1.45; }
-  .automatic-review-reason details ul { display: grid; gap: 0.2rem; margin: 0.35rem 0 0; padding-left: 1rem; color: #94a3b8; font-size: 0.56rem; }
   .automatic-review-empty { padding: 2rem 1rem; color: #8292ad; font-size: 0.65rem; text-align: center; }
-  .automatic-review-pagination { border-top: 1px solid #292334; }
 
   @media (max-width: 1180px) {
     .below-threshold-warning { grid-template-columns: auto 1fr; }
     .below-threshold-warning button { grid-column: 1 / -1; }
     .automatic-review-categories { grid-template-columns: 1fr; }
-    .automatic-rejection-list article { grid-template-columns: 1fr 1fr; }
   }
 
   .identification-layout {
