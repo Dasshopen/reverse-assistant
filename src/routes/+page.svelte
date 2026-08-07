@@ -10939,8 +10939,24 @@ interface ApplyRenamesResult {
   .identification-queue > header span,
   .identification-queue > header small { color: #8292ad; font-size: 0.58rem; }
   .identification-queue-tools { display: grid; gap: 0.45rem; padding: 0.55rem 0.6rem; border-bottom: 1px solid #22324a; }
-  .identification-queue-tools > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.3rem; }
-  .identification-queue-tools button { min-width: 0; padding: 0.35rem 0.3rem; border: 1px solid #30425e; background: #101d30; color: #9fb0c8; font-size: 0.52rem; white-space: nowrap; }
+  .identification-queue-tools > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.35fr) minmax(72px, 0.75fr);
+    gap: 0.3rem;
+  }
+  .identification-queue-tools button {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 0.22rem;
+    padding: 0.35rem 0.28rem;
+    border: 1px solid #30425e;
+    background: #101d30;
+    color: #9fb0c8;
+    font-size: 0.52rem;
+    white-space: nowrap;
+  }
   .identification-queue-tools button b { color: #67e8f9; }
   .identification-queue-tools button.active { border-color: #8b5cf6; background: #241b48; color: #f5f3ff; }
   .identification-queue-tools input { min-width: 0; padding: 0.42rem 0.5rem; font-size: 0.58rem; }
