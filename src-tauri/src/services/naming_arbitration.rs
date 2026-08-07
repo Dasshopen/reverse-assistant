@@ -599,6 +599,25 @@ struct ArbitrationBatchItemJson {
     evidence: Vec<String>,
 }
 
+/// Local models sometimes copy the current Ghidra placeholder instead of
+/// returning JSON null when they cannot resolve a closed-set tie. That is an
+/// abstention, not a usable out-of-list proposal. Keep the pattern narrow so
+/// a genuinely invented semantic name outside the candidate set is still a
+/// hard validation error.
+fn is_address_shaped_generated_name(name: &str) -> bool {
+    let upper = name.trim().to_ascii_uppercase();
+    let without_thunk = upper.strip_prefix("THUNK_").unwrap_or(&upper);
+    ["FUN_", "SUB_", "LAB_", "LOC_"]
+        .iter()
+        .find_map(|prefix| without_thunk.strip_prefix(prefix))
+        .is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+        })
+}
+
 pub fn parse_arbitration_batch_response(
     response: &ChatCompletionResponse,
     requests: &[(String, ArbitrationRequest)],
@@ -625,6 +644,7 @@ pub fn parse_arbitration_batch_response(
                 {
                     Some(name.clone())
                 }
+                Some(name) if is_address_shaped_generated_name(name) => None,
                 Some(name) => {
                     return Err(format!(
                         "the model chose '{name}' outside the candidate list for '{address}'"
@@ -659,6 +679,7 @@ pub fn parse_arbitration_response(
 
     let chosen_name = match parsed.chosen_name {
         Some(name) if candidates.iter().any(|candidate| candidate.name == name) => Some(name),
+        Some(name) if is_address_shaped_generated_name(&name) => None,
         Some(name) => {
             return Err(format!(
                 "the model chose '{name}', which is not one of the provided candidates"
@@ -1113,6 +1134,30 @@ mod tests {
 
         assert!(error.contains("some_invented_name"));
         assert!(error.contains("not one of the provided candidates"));
+    }
+
+    #[test]
+    fn a_copied_ghidra_placeholder_becomes_an_explicit_abstention() {
+        let candidates = sample_candidates();
+        let response = ChatCompletionResponse {
+            content: r#"{"chosen_name":"FUN_0040bc80","confidence":80,"evidence":[],"reasoning":"Je ne peux pas trancher."}"#.to_owned(),
+        };
+
+        let result = parse_arbitration_response(&response, &candidates)
+            .expect("a copied address-shaped placeholder should not become a visible error");
+
+        assert_eq!(result.chosen_name, None);
+    }
+
+    #[test]
+    fn a_semantic_name_starting_with_fun_is_still_rejected_outside_the_closed_set() {
+        let candidates = sample_candidates();
+        let response = ChatCompletionResponse {
+            content: r#"{"chosen_name":"fun_dispatcher","reasoning":"..."}"#.to_owned(),
+        };
+
+        parse_arbitration_response(&response, &candidates)
+            .expect_err("only address-shaped Ghidra placeholders may become abstentions");
     }
 
     #[test]
