@@ -19,6 +19,8 @@
 Use a VM with no Java, Ghidra, Node.js, Rust, Visual Studio or application cache.
 Do not validate only on the development account.
 
+Use the [VM test procedure](WINDOWS_VM_TEST.md) to record actual results.
+
 - Install as a standard user; check WebView2 installation where absent.
 - Open the app, accept licenses, and complete automatic setup.
 - Confirm no compilation, terminal setup or environment-variable edits.
@@ -31,6 +33,8 @@ Do not validate only on the development account.
 ## Publish
 
 Create a **draft prerelease** targeting the verified commit in GitHub Releases.
+Use the [prepared alpha notes](RELEASE_NOTES_0.1.0_ALPHA.md) as a starting point,
+updating pending checks only after they have actually passed.
 Attach the setup executable, checksum file and third-party notices. Mention
 alpha limitations, network-required first setup and whether the binary is signed.
 Publish only after clean-Windows checks and redistribution review pass.
