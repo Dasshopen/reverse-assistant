@@ -1,35 +1,43 @@
-# Installer et tester Reverse Assistant sur Windows
+# Install and test Reverse Assistant on Windows
 
-Ce guide concerne la version alpha, principalement testée sur Windows x64.
-Analyser un exécutable Linux ELF depuis Windows est possible : cela ne signifie
-pas que l'installation de l'application sur Linux a été validée.
+This guide covers the alpha release, primarily tested on Windows x64.
+The application can analyze Linux ELF binaries from Windows. Installing the
+application on Linux has not been validated by this guide.
 
-Le dépôt fournit les **sources de l'application**. Télécharger le ZIP ne fournit
-ni un `.exe` prêt à lancer, ni les dépendances, ni le corpus BSim généré.
-Le premier démarrage nécessite donc une compilation.
+The repository contains **source code**, not a ready-to-run executable.
+The GitHub ZIP does not include dependencies or the generated BSim corpus.
+Build the application before running it.
 
-## 1. Installer les prérequis
+Use these directories throughout this guide:
 
-Installer depuis les sites officiels, puis fermer et rouvrir le terminal.
+- Project: `C:\Projects\reverse-assistant`.
+- Ghidra: `C:\Tools\ghidra_12.1.2_PUBLIC`.
 
-| Logiciel | Utilité et installation |
+Keep the project outside OneDrive and synchronized folders. Short paths help
+avoid Windows path-length issues during EDK2 builds.
+
+## 1. Install prerequisites
+
+Install from the official websites. Close and reopen the terminal after
+installation to load the updated environment variables.
+
+| Tool | Installation instructions |
 | --- | --- |
-| [Node.js](https://nodejs.org/en/download) | Installer une version LTS avec npm ; Node 22 ou 24 convient au projet. |
-| [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) | Dans l'installateur, sélectionner **Développement Desktop en C++**, avec MSVC v143 x64/x86 et un Windows SDK. Nécessaire pour Rust/Tauri et les références du corpus. |
-| [Rust via rustup](https://rustup.rs/) | Installer la chaîne stable **MSVC**, pas GNU, pour Windows x64. |
-| [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) | Moteur d'affichage de Tauri ; souvent déjà présent. Installer le runtime Evergreen s'il manque. |
-| [JDK 21, Eclipse Temurin](https://adoptium.net/temurin/releases/?version=21) | Choisir Windows x64, **JDK**, pas seulement JRE. Activer les options `JAVA_HOME` et ajout au `PATH` dans l'installateur. |
-| [Ghidra 12.1.2](https://github.com/NationalSecurityAgency/ghidra/releases/tag/Ghidra_12.1.2_build) | Télécharger l'archive de distribution `ghidra_12.1.2_PUBLIC_20260605.zip`, **pas** les archives « Source code ». Extraire, par exemple, dans `C:\Tools\ghidra_12.1.2_PUBLIC`. Cette version correspond à l'intégration actuelle. |
-| [Git pour Windows](https://git-scm.com/downloads/win) | Facultatif pour télécharger le ZIP ; utile pour cloner et récupérer les mises à jour. |
-| [Ollama](https://ollama.com/download/windows) | Facultatif : seulement pour les fonctionnalités IA locales. L'analyse Ghidra et les correspondances déterministes ne nécessitent pas de modèle IA. |
+| [Node.js](https://nodejs.org/en/download) | Install Node.js 22 or 24 LTS with npm. |
+| [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) | Select **Desktop development with C++**, including MSVC v143 x64/x86 and a Windows SDK. Required for Rust/Tauri and reference corpus builds. |
+| [Rust through rustup](https://rustup.rs/) | Install the stable Windows x64 **MSVC** toolchain, not GNU. |
+| [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) | Install the Evergreen Runtime if it is not already installed. Tauri uses it to render the interface. |
+| [Eclipse Temurin JDK 21](https://adoptium.net/temurin/releases/?version=21) | Select Windows x64 and **JDK**, not JRE. Enable the installer options to set `JAVA_HOME` and add Java to `PATH`. |
+| [Ghidra 12.1.2](https://github.com/NationalSecurityAgency/ghidra/releases/tag/Ghidra_12.1.2_build) | Download `ghidra_12.1.2_PUBLIC_20260605.zip`, not the “Source code” archives. Extract the distribution into `C:\Tools` so that `C:\Tools\ghidra_12.1.2_PUBLIC\support\analyzeHeadless.bat` exists. Use this version for the current integration. |
+| [Git for Windows](https://git-scm.com/downloads/win) | Install to clone the repository and receive updates. Not required for the ZIP method. |
+| [Ollama](https://ollama.com/download/windows) | Install to enable local AI features. Ghidra analysis and deterministic matching do not require an AI model. |
 
-Les prérequis de compilation Windows sont également détaillés dans la
-[documentation officielle Tauri](https://v2.tauri.app/start/prerequisites/#windows).
-Il n'est pas nécessaire d'installer globalement Tauri, Gradle, Python ou NASM :
-Tauri est une dépendance npm du projet, Ghidra fournit le lanceur Gradle,
-et les scripts de corpus téléchargent leurs outils portables nécessaires.
+See the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#windows)
+for Windows build requirements. Do not install Tauri, Gradle, Python or NASM
+globally for this project: npm installs the Tauri CLI, Ghidra provides the
+Gradle launcher, and corpus scripts download their required portable tools.
 
-Dans PowerShell, vérifier :
+Run these checks in PowerShell:
 
 ```powershell
 node --version
@@ -42,53 +50,64 @@ javac -version
 Test-Path 'C:\Tools\ghidra_12.1.2_PUBLIC\support\analyzeHeadless.bat'
 ```
 
-La chaîne Rust doit indiquer `x86_64-pc-windows-msvc`, Java et javac une version
-21, et le dernier test doit retourner `True` (adapter le chemin si nécessaire).
-Si plusieurs JDK sont installés, `JAVA_HOME` doit désigner le dossier du JDK 21,
-et son sous-dossier `bin` doit être prioritaire dans le `PATH`.
+Confirm that the Rust toolchain includes `x86_64-pc-windows-msvc`, Java and
+javac report version 21, and the final check returns `True`.
+If multiple JDKs are installed, set `JAVA_HOME` to the JDK 21 directory and
+place its `bin` directory first among Java entries in `PATH`.
 
-## 2. Récupérer le projet
+## 2. Download the project
 
-**Avec Git**, depuis un terminal :
+Choose one download method.
+
+### Clone with Git
 
 ```powershell
 git clone https://github.com/Dasshopen/reverse-assistant.git C:\Projects\reverse-assistant
 Set-Location C:\Projects\reverse-assistant
 ```
 
-Le dépôt est privé : être connecté à un compte GitHub autorisé. Ne jamais
-coller de jeton d'accès dans une URL, un fichier du projet ou une capture.
+The repository is private. Sign in with a GitHub account that has access.
+Never paste an access token into a URL, project file or screenshot.
 
-**Sans Git** : sur GitHub, cliquer sur **Code → Download ZIP**, extraire toute
-l'archive, puis ouvrir PowerShell dans le dossier contenant `package.json`.
-Le dossier extrait peut s'appeler `reverse-assistant-main` ; adapter les chemins.
-Ne pas lancer l'application directement depuis l'archive ZIP.
+### Download the ZIP
 
-Privilégier un chemin court comme `C:\Projects\reverse-assistant`, hors OneDrive
-ou dossier synchronisé, notamment pour les builds EDK2.
+Select **Code → Download ZIP** on GitHub. Extract the entire archive.
+Move the extracted `reverse-assistant-main` directory to `C:\Projects` and
+rename it to `reverse-assistant`. Confirm that
+`C:\Projects\reverse-assistant\package.json` exists. Do not run the project
+inside the ZIP or leave an extra nested project directory.
+
+Open PowerShell and enter the project directory:
+
+```powershell
+Set-Location C:\Projects\reverse-assistant
+```
+
+### Install project dependencies
+
+From the project root, run:
 
 ```powershell
 npm.cmd ci
 ```
 
-Cette commande installe les versions verrouillées dans `package-lock.json`.
-Ne pas copier `node_modules` depuis une autre machine.
+This installs the versions locked in `package-lock.json`. Do not copy
+`node_modules` from another machine.
 
-## 3. Générer le corpus BSim local
+## 3. Generate the local BSim corpus
 
-**Ne pas sauter cette étape pour un premier test complet.** La configuration
-de bundle attend `bsim-corpus\build\reverse-assistant-seed.mv.db`, absent du ZIP
-et du dépôt Git. Une ancienne installation peut avoir un corpus en cache et
-masquer cette absence ; une machine neuve ne l'aura pas.
+**Complete this step before your first full test.** The bundle configuration
+expects `bsim-corpus\build\reverse-assistant-seed.mv.db`, which is not included
+in Git or the ZIP. An existing installation can hide its absence by reusing
+a cached corpus. A clean installation has no such cache.
 
-Fermer Reverse Assistant et Ghidra pendant la génération. Les scripts
-téléchargent des sources avec hashes épinglés, compilent les références avec
-symboles, puis les analysent pour construire la base. Cette étape est plus
-longue qu'une simple installation npm : prévoir du temps, de l'espace disque
-et une connexion Internet. Ne pas interrompre un script parce qu'il reste
-plusieurs minutes sur une compilation ou une analyse.
+Close Reverse Assistant and Ghidra. The scripts download sources with pinned
+hashes, compile reference binaries with symbols, and analyze them to build the
+database. Allow time, disk space and Internet access. Several minutes on a
+compilation or analysis step do not, by themselves, indicate a failure.
+Monitor the terminal output.
 
-Depuis la racine du projet, exécuter les scripts dans cet ordre :
+Run the reference build scripts in this order from the project root:
 
 ```powershell
 $referenceBuildScripts = @(
@@ -104,148 +123,142 @@ $referenceBuildScripts = @(
 )
 foreach ($referenceBuildScript in $referenceBuildScripts) {
     & powershell.exe -NoProfile -File (Join-Path '.\bsim-corpus\scripts' $referenceBuildScript)
-    if ($LASTEXITCODE -ne 0) { throw "Échec : $referenceBuildScript. Corriger avant de continuer." }
+    if ($LASTEXITCODE -ne 0) { throw "Build failed: $referenceBuildScript. Fix the error before continuing." }
 }
 ```
 
-Puis générer et vérifier la base (adapter le chemin de Ghidra) :
+Generate and verify the database:
 
 ```powershell
 & powershell.exe -NoProfile -File .\bsim-corpus\scripts\build-corpus-database.ps1 -GhidraInstallDir 'C:\Tools\ghidra_12.1.2_PUBLIC'
-if ($LASTEXITCODE -ne 0) { throw 'La génération du corpus a échoué.' }
+if ($LASTEXITCODE -ne 0) { throw 'Corpus generation failed.' }
 & powershell.exe -NoProfile -File .\bsim-corpus\scripts\verify-corpus.ps1 -GhidraInstallDir 'C:\Tools\ghidra_12.1.2_PUBLIC'
-if ($LASTEXITCODE -ne 0) { throw 'La vérification du corpus a échoué.' }
+if ($LASTEXITCODE -ne 0) { throw 'Corpus verification failed.' }
 Get-Item .\bsim-corpus\build\reverse-assistant-seed.mv.db
 ```
 
-Les téléchargements et builds restent dans `bsim-corpus/sources` et
-`bsim-corpus/build`, exclus de Git. Les licences et détails de reproduction
-sont dans [le guide du corpus](../bsim-corpus/README.md).
-BSim et Function ID sont distincts : ce pipeline génère la base **BSim**,
-pas une base FID couvrant toutes les bibliothèques. Les résultats FID dépendent
-des bases de référence disponibles/configurées dans Ghidra.
+Downloads and generated files remain in `bsim-corpus/sources` and
+`bsim-corpus/build`, excluded from Git. Read the
+[corpus documentation](../bsim-corpus/README.md) for licenses and build details.
+BSim and Function ID are separate: this pipeline generates the **BSim**
+database, not a universal FID database. FID results depend on the reference
+databases available and configured in Ghidra.
 
-Si Windows bloque les scripts téléchargés, lire et vérifier leur provenance
-avant de les débloquer via les propriétés du fichier. Si une politique locale
-le permet, une commande ponctuelle peut utiliser
+If Windows blocks a downloaded script, review its contents and provenance
+before unblocking it through its file properties. Where local policy permits,
+run a reviewed script with a process-scoped option:
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <script> <arguments>`.
-Cela concerne uniquement ce processus : ne pas désactiver globalement les
-protections ni contourner une politique d'organisation.
+Do not disable protections globally or bypass an organization policy.
 
-## 4. Lancer et configurer l'application
+## 4. Launch and configure the application
 
-Depuis la racine contenant `package.json` :
+From the project root, run:
 
 ```powershell
 npm.cmd run tauri dev
 ```
 
-Le premier build Rust peut prendre plusieurs minutes. Garder le terminal
-ouvert pendant le test. La fenêtre native Tauri est l'application complète :
-ouvrir seulement `http://localhost:1420` dans un navigateur ne fournit pas
-le backend Rust.
+The first Rust build can take several minutes. Keep the terminal open during
+the test. Use the native Tauri window: opening `http://localhost:1420` in a
+browser alone does not provide the Rust backend.
 
-Dans l'assistant de configuration de l'application :
+In the application's setup assistant:
 
-1. Vérifier Java et Ghidra ; sélectionner la racine de Ghidra, pas son dossier
-   `support` ni le fichier ZIP.
-2. Installer/configurer l'extension **Reverse Assistant Exporter** proposée
-   par l'assistant ; fermer les autres fenêtres Ghidra pendant cette étape.
-3. Vérifier que le corpus BSim local est détecté.
-4. Si l'assistant propose des téléchargements Java/Ghidra, ils peuvent préparer
-   ces outils, mais **ils ne remplacent pas la génération du corpus à l'étape 3**.
+1. Check Java and Ghidra. Select `C:\Tools\ghidra_12.1.2_PUBLIC` as the
+   installation directory, not its `support` directory or ZIP archive.
+2. Install/configure **Reverse Assistant Exporter** through the assistant.
+   Close other Ghidra windows during installation.
+3. Confirm that the local BSim corpus is detected.
+4. If the assistant offers Java/Ghidra downloads, use them to prepare those
+   tools. **They do not replace corpus generation in step 3.**
 
-L'extension peut être compilée depuis les sources incluses ; sa première
-compilation Gradle peut également télécharger des dépendances.
-Pour une installation manuelle, lancer Ghidra une fois puis le fermer afin
-de créer son dossier utilisateur, puis utiliser :
+The extension can be built from the included sources. Its first Gradle build
+can download dependencies. For manual deployment, launch Ghidra once and close
+it to create its user directory, then run:
 
 ```powershell
 & powershell.exe -NoProfile -File .\scripts\deploy-ghidra-extension.ps1 -GhidraInstallDir 'C:\Tools\ghidra_12.1.2_PUBLIC'
 ```
 
-## 5. Activer l'IA locale (facultatif)
+## 5. Enable local AI (optional)
 
-Installer et démarrer Ollama, puis télécharger le modèle :
+Install and start Ollama, then download the model:
 
 ```powershell
 ollama pull qwen2.5-coder:7b
 ollama list
 ```
 
-Dans la configuration des fournisseurs IA de Reverse Assistant, ajouter un
-fournisseur compatible OpenAI avec :
+Add an OpenAI-compatible provider in Reverse Assistant's AI provider settings:
 
-- Adresse : `http://localhost:11434/v1`.
-- Modèle : `qwen2.5-coder:7b` (le nom doit correspondre à `ollama list`).
-- Clé : aucune clé secrète Ollama nécessaire pour ce serveur local standard.
-- Ajouter le fournisseur et vérifier qu'il apparaît comme **Actif**.
+- URL: `http://localhost:11434/v1`.
+- Model: `qwen2.5-coder:7b`. Use the exact name returned by `ollama list`.
+- API key: leave empty for the standard local Ollama server.
+- Add the provider and confirm that it is enabled.
 
-Pour vérifier le serveur local depuis PowerShell :
+Check the local server from PowerShell:
 
 ```powershell
 Invoke-RestMethod http://localhost:11434/api/tags
 ```
 
-Puis lancer une analyse IA dans l'application pour vérifier l'appel complet.
+Run an AI analysis in the application to check the complete request path.
+Model downloads and memory requirements are substantial. Analysis speed
+depends on CPU/GPU, RAM/VRAM and context size. Increasing context does not
+guarantee better names and can slow responses. Keep Ollama local; do not expose
+it to the network for this test. A remote provider receives submitted context,
+including pseudocode and strings. Read [SECURITY.md](../SECURITY.md) before
+sending confidential data.
 
-Le téléchargement du modèle et ses besoins mémoire sont importants ; les temps
-d'analyse dépendent du CPU/GPU, de la RAM/VRAM et du contexte. Augmenter le
-contexte ne garantit pas de meilleurs noms et peut ralentir les réponses.
-Ne pas exposer Ollama au réseau pour ce test : le serveur local suffit.
-Un fournisseur distant est possible, mais reçoit le contexte transmis
-(pseudocode, chaînes, etc.) : voir [SECURITY.md](../SECURITY.md).
+## 6. Run your first test
 
-## 6. Faire un premier test
+Use a small binary you are authorized to analyze. No challenge binaries are
+included. Do not execute the target binary to analyze it.
 
-Utiliser un petit binaire que l'on est autorisé à analyser ; aucun binaire de
-challenge n'est livré dans le dépôt. Ne pas exécuter le binaire pour l'analyser.
+1. Open the binary and wait for Ghidra analysis to finish.
+2. Open a **local function** in the Code Browser. Check its assembly and
+   pseudocode. Imported functions have no local implementation; their local
+   relay, where present, is a separate entry.
+3. Inspect FID/BSim proposals. Zero matches can be valid when the corpus does
+   not cover the binary's libraries.
+4. If AI is enabled, wait for results and review provenance, evidence and
+   manual-review suggestions. A proposed name is not a guaranteed recovery
+   of the original symbol.
+5. Verify a proposal, rename the function, check its name in other views,
+   save the project and reopen it.
 
-1. Ouvrir le fichier et attendre la fin de l'analyse Ghidra.
-2. Ouvrir une **fonction locale** dans le Code Browser : vérifier assembleur
-   et pseudocode. Une fonction importée n'a pas de corps local ; son relais
-   local, s'il existe, est distinct.
-3. Vérifier les propositions FID/BSim ; zéro correspondance peut être normal
-   si le corpus ne couvre pas les bibliothèques présentes.
-4. Si l'IA est activée, attendre ses résultats et examiner provenance, preuves
-   et propositions à revoir. Un nom proposé n'est pas un nom original garanti.
-5. Renommer une fonction après vérification, contrôler le nom dans les autres
-   vues, sauvegarder et rouvrir le projet.
+Use a VM or a separate Windows account to test a clean installation.
+Downloading the repository again under your current account can reuse existing
+Java, Ghidra, providers, corpus and projects from application data. Do not
+delete those data without a backup.
 
-Pour tester réellement une installation neuve, utiliser idéalement une VM ou
-un autre compte Windows : retélécharger le dépôt sous le même compte peut
-réutiliser Java, Ghidra, fournisseurs, corpus et projets déjà présents dans
-les données de l'application. Ne pas supprimer ces données pour faire le test
-sans les sauvegarder.
+## 7. Build an installer (optional)
 
-## 7. Créer un installateur (facultatif)
-
-Après un test réussi et avec le corpus généré :
+After a successful test, with the corpus generated, run:
 
 ```powershell
 npm.cmd run tauri build
 ```
 
-Les paquets Windows sont produits sous `src-tauri\target\release\bundle`
-(sous-dossiers selon les formats générés). Un installateur compilé n'est pas
-nécessairement signé. Vérifier les droits de redistribution des composants
-et du corpus avant de partager un paquet. Les étapes ci-dessus ne publient
-pas automatiquement de Release sur GitHub.
+Windows packages are generated under `src-tauri\target\release\bundle`, in
+format-specific subdirectories. A compiled installer is not necessarily signed.
+Check component and corpus redistribution rights before sharing a package.
+These steps do not automatically publish a GitHub Release.
 
-## Dépannage
+## Troubleshooting
 
-| Symptôme | À vérifier |
+| Symptom | Action |
 | --- | --- |
-| `npm.ps1` bloqué | Utiliser `npm.cmd`, comme dans ce guide. |
-| `cargo`, `node` ou `javac` introuvable | Rouvrir le terminal après installation ; vérifier le `PATH` et le JDK, pas seulement un JRE. |
-| `link.exe` ou MSVC introuvable | Ajouter la charge C++ et le Windows SDK avec Visual Studio Installer. |
-| Ressource `reverse-assistant-seed.mv.db` absente | Finir l'étape 3 ; ne pas créer un fichier vide ni renommer un ZIP en `.mv.db`. |
-| Base BSim occupée/verrouillée | Fermer les autres analyses et Ghidra utilisant cette base, puis réessayer. |
-| Port `1420` déjà utilisé | Arrêter l'ancien terminal de développement avec Ctrl+C ; ne lancer qu'une instance. Ne pas tuer un processus inconnu. |
-| Fichier `.exe` ou extension `.jar` verrouillé | Fermer l'application ou Ghidra avant reconstruction/déploiement. |
-| Timeout Ollama / connexion refusée | Vérifier qu'Ollama tourne, le modèle installé, l'URL et la mémoire disponible. |
-| Aucun code pour une fonction importée | Normal : l'implémentation est dans une bibliothèque externe, pas dans le binaire analysé. |
-| Première compilation/analyse lente | Attendre et regarder les logs ; téléchargements, compilations et démarrage Ghidra coûtent plus que les accès en cache. |
+| `npm.ps1` is blocked | Use `npm.cmd`, as shown in this guide. |
+| `cargo`, `node` or `javac` is missing | Reopen the terminal after installation. Check `PATH` and install a JDK, not just a JRE. |
+| `link.exe` or MSVC is missing | Add the C++ workload and Windows SDK through Visual Studio Installer. |
+| `reverse-assistant-seed.mv.db` is missing | Complete step 3. Do not create an empty file or rename a ZIP to `.mv.db`. |
+| BSim database is busy or locked | Close other analyses and Ghidra instances using the database, then retry. |
+| Port `1420` is already in use | Stop the previous development terminal with Ctrl+C and run one instance. Do not terminate an unidentified process. |
+| An `.exe` or extension `.jar` is locked | Close Reverse Assistant or Ghidra before rebuilding or deploying. |
+| Ollama timeout or connection refused | Check that Ollama is running, the model is installed, the URL is correct and sufficient memory is available. |
+| No code for an imported function | Its implementation is in an external library, not the analyzed binary. Select the local relay if available. |
+| First build or analysis is slow | Monitor the logs. Downloads, compilation and cold Ghidra startup take longer than cached operations. |
 
-En cas d'échec, conserver la commande, le message complet, la version de Windows
-et les versions des outils. Ne jamais joindre de clé API ni de binaire privé.
+When reporting a failure, include the command, full error message, Windows
+version and tool versions. Never attach an API key or a confidential binary.
