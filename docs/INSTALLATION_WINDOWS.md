@@ -6,10 +6,11 @@ Open [GitHub Releases](https://github.com/Dasshopen/reverse-assistant/releases)
 and download the Windows x64 file ending in **`-setup.exe`** from the selected
 release. Download the installer, not the “Source code” ZIP.
 
-**Release status:** the first test installer has been built locally, but has not
-been published in Releases or validated on clean Windows. If no
-setup executable is attached to a release, no packaged download is available
-yet. The source archive is not a replacement installer.
+**Release status:** clean-Windows acceptance testing is in progress. Use the
+0.1.1 candidate when available; automatic Java setup in 0.1.0 has a known
+checksum-redirect failure. If no setup executable is attached to a release,
+no packaged download is available yet. The source archive is not a replacement
+installer.
 
 Use Windows 10 or 11, 64-bit. Keep an Internet connection available for first
 setup. This alpha is an analysis tool, not a sandbox for untrusted files.

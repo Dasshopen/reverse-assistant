@@ -15,10 +15,11 @@ name, and decide which changes to apply.
 2. Install and open Reverse Assistant.
 3. Complete the guided setup, then open a binary you are authorized to analyze.
 
-**Download status:** a Windows test installer has been built locally. It has
-not yet been published in Releases or validated on a clean Windows machine.
-If no setup executable is attached to a release, there is no packaged download
-available. **The “Source code” ZIP is not an installer.**
+**Download status:** clean-Windows acceptance testing is in progress. The 0.1.0
+installer has a known automatic Java setup failure; use the corrected 0.1.1
+candidate when its setup executable is available in Releases. If no setup
+executable is attached to a release, there is no packaged download available.
+**The “Source code” ZIP is not an installer.**
 
 The packaged installer includes the reference corpus and Ghidra extension.
 First-time setup downloads Java and Ghidra when needed. You do not need to

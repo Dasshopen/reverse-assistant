@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager};
@@ -20,8 +20,8 @@ const GHIDRA_VERSION_LABEL: &str = "ghidra_12.1.2_PUBLIC";
 const GHIDRA_ARCHIVE_NAME: &str = "ghidra_12.1.2_PUBLIC_20260605.zip";
 const GHIDRA_DOWNLOAD_URL: &str = "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip";
 const GHIDRA_SHA256: &str = "b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d";
-const TEMURIN_DOWNLOAD_URL: &str =
-    "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse";
+const TEMURIN_METADATA_URL: &str =
+    "https://api.adoptium.net/v3/assets/latest/21/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse";
 const EXTENSION_RESOURCE: &str = "managed/ReverseAssistantExporter.zip";
 const EXTENSION_SOURCE_RESOURCE: &str = "managed/extension-source";
 const EXTENSION_CHECKSUM_RESOURCE: &str = "managed/ReverseAssistantExporter.sha256";
@@ -186,19 +186,106 @@ fn verify_file(path: &Path, expected_sha256: &str) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct TemurinAsset {
+    vendor: String,
+    version: TemurinVersion,
+    binary: TemurinBinary,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemurinVersion {
+    major: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemurinBinary {
+    architecture: String,
+    os: String,
+    image_type: String,
+    jvm_impl: String,
+    package: TemurinPackage,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemurinPackage {
+    link: String,
+    checksum: String,
+}
+
+fn parse_temurin_package(metadata: &str) -> Result<TemurinPackage, String> {
+    let assets: Vec<TemurinAsset> = serde_json::from_str(metadata)
+        .map_err(|_| "Java download metadata has an invalid format.".to_owned())?;
+    let mut packages = assets.into_iter().filter_map(|asset| {
+        let binary = asset.binary;
+        (asset.vendor == "eclipse"
+            && asset.version.major == REQUIRED_JAVA_MAJOR
+            && binary.architecture == "x64"
+            && binary.os == "windows"
+            && binary.image_type == "jdk"
+            && binary.jvm_impl == "hotspot")
+            .then_some(binary.package)
+    });
+    let package = packages.next().ok_or_else(|| {
+        "No supported Java 21 Windows x64 package was returned by Adoptium.".to_owned()
+    })?;
+    if packages.next().is_some() {
+        return Err("Adoptium returned multiple matching Java packages.".to_owned());
+    }
+    if package.checksum.len() != 64
+        || !package
+            .checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Java download metadata has an invalid SHA-256 checksum.".to_owned());
+    }
+    // Use the versioned official asset and its checksum from the SAME metadata
+    // response. Never append a checksum suffix to an expiring CDN redirect URL.
+    if !package
+        .link
+        .starts_with("https://github.com/adoptium/temurin21-binaries/releases/download/")
+        || !package.link.ends_with(".zip")
+        || package.link.contains(['?', '#'])
+    {
+        return Err("Java download metadata has an unsupported archive URL.".to_owned());
+    }
+    Ok(package)
+}
+
+fn resolve_temurin_package() -> Result<TemurinPackage, String> {
+    let response = ureq::get(TEMURIN_METADATA_URL)
+        .set("User-Agent", "Reverse-Assistant-Setup")
+        .timeout(std::time::Duration::from_secs(60))
+        .call()
+        .map_err(|_| {
+            "Unable to retrieve Java download metadata. Check connectivity and retry.".to_owned()
+        })?;
+    let mut metadata = String::new();
+    response
+        .into_reader()
+        .take(256 * 1024 + 1)
+        .read_to_string(&mut metadata)
+        .map_err(|_| "Unable to read Java download metadata.".to_owned())?;
+    if metadata.len() > 256 * 1024 {
+        return Err("Java download metadata exceeded the size limit.".to_owned());
+    }
+    parse_temurin_package(&metadata)
+}
+
 fn download_to_file(
     app: &AppHandle,
     url: &str,
     destination: &Path,
-    expected_sha256: Option<&str>,
+    expected_sha256: &str,
     progress_start: u8,
     progress_end: u8,
 ) -> Result<(), String> {
-    if destination.is_file()
-        && expected_sha256
-            .map(|expected| verify_file(destination, expected).is_ok())
-            .unwrap_or(false)
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
+        return Err("Download requires a valid SHA-256 checksum.".to_owned());
+    }
+    if destination.is_file() && verify_file(destination, expected_sha256).is_ok() {
         return Ok(());
     }
 
@@ -228,7 +315,6 @@ fn download_to_file(
         .set("User-Agent", "Reverse-Assistant-Setup")
         .call()
         .map_err(|error| format!("failed to download '{url}': {error}"))?;
-    let final_url = response.get_url().to_owned();
     let total = response
         .header("Content-Length")
         .and_then(|value| value.parse::<u64>().ok());
@@ -242,7 +328,7 @@ fn download_to_file(
     let mut hasher = Sha256::new();
     let mut downloaded = 0_u64;
     let mut last_percent = progress_start;
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let count = reader
             .read(&mut buffer)
@@ -272,31 +358,17 @@ fn download_to_file(
     output
         .flush()
         .map_err(|error| format!("failed to finish '{}': {error}", temporary.display()))?;
+    drop(output);
 
     let actual: String = hasher
         .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let expected = if let Some(expected) = expected_sha256 {
-        expected.to_owned()
-    } else {
-        let checksum_url = format!("{final_url}.sha256.txt");
-        ureq::get(&checksum_url)
-            .set("User-Agent", "Reverse-Assistant-Setup")
-            .call()
-            .map_err(|error| format!("failed to download checksum '{checksum_url}': {error}"))?
-            .into_string()
-            .map_err(|error| format!("failed to read checksum '{checksum_url}': {error}"))?
-            .split_whitespace()
-            .next()
-            .ok_or_else(|| format!("checksum response was empty: {checksum_url}"))?
-            .to_owned()
-    };
-    if !actual.eq_ignore_ascii_case(&expected) {
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
         let _ = fs::remove_file(&temporary);
         return Err(format!(
-            "downloaded file failed SHA-256 verification: expected {expected}, got {actual}"
+            "downloaded file failed SHA-256 verification: expected {expected_sha256}, got {actual}"
         ));
     }
 
@@ -657,7 +729,9 @@ fn install_extension(
 
 fn install_java(app: &AppHandle, managed_root: &Path) -> Result<PathBuf, String> {
     let archive = managed_root.join("downloads").join("temurin-jdk-21.zip");
-    download_to_file(app, TEMURIN_DOWNLOAD_URL, &archive, None, 5, 25)?;
+    emit_progress(app, "download", "Checking the Java download...", 5);
+    let package = resolve_temurin_package()?;
+    download_to_file(app, &package.link, &archive, &package.checksum, 5, 25)?;
     let staging = managed_root.join("jdk-staging");
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|error| {
@@ -696,14 +770,7 @@ fn install_java(app: &AppHandle, managed_root: &Path) -> Result<PathBuf, String>
 
 fn install_ghidra(app: &AppHandle, managed_root: &Path) -> Result<PathBuf, String> {
     let archive = managed_root.join("downloads").join(GHIDRA_ARCHIVE_NAME);
-    download_to_file(
-        app,
-        GHIDRA_DOWNLOAD_URL,
-        &archive,
-        Some(GHIDRA_SHA256),
-        30,
-        72,
-    )?;
+    download_to_file(app, GHIDRA_DOWNLOAD_URL, &archive, GHIDRA_SHA256, 30, 72)?;
     let staging = managed_root.join("ghidra-staging");
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|error| {
@@ -1111,6 +1178,95 @@ pub fn inspect_setup(app: &AppHandle) -> Result<SetupOverview, String> {
 mod tests {
     use super::*;
     use zip::write::SimpleFileOptions;
+
+    fn temurin_metadata_fixture() -> serde_json::Value {
+        serde_json::json!([{
+            "vendor": "eclipse", "version": { "major": 21 },
+            "binary": {
+                "architecture": "x64", "os": "windows", "image_type": "jdk",
+                "jvm_impl": "hotspot", "package": {
+                    "link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21/example.zip",
+                    "checksum": "a".repeat(64)
+                }
+            }
+        }])
+    }
+
+    #[test]
+    fn java_metadata_resolves_archive_and_checksum_together() {
+        let package = parse_temurin_package(&temurin_metadata_fixture().to_string()).unwrap();
+        assert!(package.link.ends_with("example.zip"));
+        assert_eq!(package.checksum, "a".repeat(64));
+    }
+
+    #[test]
+    fn java_metadata_rejects_missing_invalid_checksum_and_cdn_urls() {
+        for checksum in [
+            serde_json::Value::Null,
+            serde_json::json!("invalid"),
+            serde_json::json!("z".repeat(64)),
+        ] {
+            let mut fixture = temurin_metadata_fixture();
+            fixture[0]["binary"]["package"]["checksum"] = checksum;
+            assert!(parse_temurin_package(&fixture.to_string()).is_err());
+        }
+        for link in [
+            "https://release-assets.githubusercontent.com/example.zip?signature=example",
+            "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21/example.zip?token=example",
+            "https://untrusted.invalid/example.zip",
+        ] {
+            let mut fixture = temurin_metadata_fixture();
+            fixture[0]["binary"]["package"]["link"] = serde_json::json!(link);
+            assert!(parse_temurin_package(&fixture.to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn java_metadata_rejects_wrong_platform_version_and_ambiguous_packages() {
+        assert!(parse_temurin_package("[]").is_err());
+        assert!(parse_temurin_package("not JSON").is_err());
+        let mut fixture = temurin_metadata_fixture();
+        fixture[0]["version"]["major"] = serde_json::json!(25);
+        assert!(parse_temurin_package(&fixture.to_string()).is_err());
+        let mut fixture = temurin_metadata_fixture();
+        fixture[0]["binary"]["os"] = serde_json::json!("linux");
+        assert!(parse_temurin_package(&fixture.to_string()).is_err());
+        let fixture = temurin_metadata_fixture();
+        let duplicate = serde_json::json!([fixture[0], fixture[0]]);
+        assert!(parse_temurin_package(&duplicate.to_string()).is_err());
+    }
+
+    #[test]
+    #[ignore = "Downloads the official Java archive to verify live metadata and SHA-256; no execution"]
+    fn live_java_archive_matches_metadata_checksum() {
+        let package = resolve_temurin_package().expect("official metadata should resolve");
+        let response = ureq::get(&package.link)
+            .set("User-Agent", "Reverse-Assistant-Setup")
+            .timeout(std::time::Duration::from_secs(300))
+            .call()
+            .expect("official archive should download");
+        let mut reader = response.into_reader();
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        let mut count_total = 0_u64;
+        loop {
+            let count = reader
+                .read(&mut buffer)
+                .expect("archive should be readable");
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+            count_total += count as u64;
+        }
+        assert!(count_total > 0);
+        let actual: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert!(actual.eq_ignore_ascii_case(&package.checksum));
+    }
 
     #[test]
     fn parses_modern_java_versions() {

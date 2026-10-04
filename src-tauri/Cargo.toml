@@ -1,6 +1,6 @@
 [package]
 name = "reverse-assistant"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local and AI-agnostic reverse engineering assistant"
 authors = ["Dasshopen"]
 license = "MIT"

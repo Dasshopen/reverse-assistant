@@ -12,12 +12,14 @@ test has passed.
 3. Take a snapshot before installing Reverse Assistant.
 4. Transfer these three files from the same build: the `-setup.exe`,
    `SHA256SUMS.txt`, and `THIRD_PARTY_NOTICES.txt`.
-5. In PowerShell, run `Get-FileHash -LiteralPath '.\Reverse Assistant_0.1.0_x64-setup.exe' -Algorithm SHA256`
+5. In PowerShell, run `Get-FileHash -LiteralPath '.\Reverse Assistant_0.1.1_x64-setup.exe' -Algorithm SHA256`
    from the download folder. Compare the hash with `SHA256SUMS.txt`.
    Do not run the installer if they differ.
 
 The current candidate is unsigned. Do not disable antivirus or other Windows
 security protections. Record any warning or blocked installation.
+Use the 0.1.1 candidate for this retest: automatic Java setup in 0.1.0 failed
+on GitHub CDN checksum redirects.
 
 ## Run the acceptance checks
 

@@ -20,6 +20,7 @@ Do not confuse a source archive with a packaged application.
 - [Windows release checklist](RELEASE_CHECKLIST.md).
 - [Clean Windows VM acceptance test](WINDOWS_VM_TEST.md).
 - [Prepared alpha release notes](RELEASE_NOTES_0.1.0_ALPHA.md).
+- [0.1.1 setup hotfix notes](RELEASE_NOTES_0.1.1_ALPHA.md).
 - [Reference corpus tooling](../bsim-corpus/README.md).
 - [Ghidra regression checks](../tests/ghidra/README.md).
 

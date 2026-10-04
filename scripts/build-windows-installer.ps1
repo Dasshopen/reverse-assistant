@@ -100,7 +100,8 @@ try {
         }
     }
     $installerDirectory = Join-Path $repository 'src-tauri\target\release\bundle\nsis'
-    $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter '*-setup.exe' -File)
+    $applicationVersion = (Get-Content -LiteralPath (Join-Path $repository 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
+    $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter "*_${applicationVersion}_x64-setup.exe" -File)
     if ($installers.Count -ne 1) { throw 'Expected exactly one Windows setup executable.' }
     $installer = $installers[0]
     $installerHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
