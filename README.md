@@ -4,6 +4,16 @@ A local-first reverse-engineering desktop application built with Rust, Tauri 2,
 Svelte 5 and TypeScript, connecting Ghidra with function identification and
 optional AI-assisted naming.
 
+## Installation depuis GitHub
+
+**Commencer ici : [guide d'installation Windows, étape par étape](docs/INSTALLATION_WINDOWS.md).**
+Il explique les logiciels à installer, le téléchargement ZIP ou le clonage,
+la génération du corpus BSim, la configuration de Ghidra et d'Ollama,
+le premier test et les erreurs courantes.
+
+Ce dépôt contient les **sources**, pas un installateur prêt à lancer.
+Le corpus BSim généré n'est pas inclus dans le téléchargement GitHub.
+
 ## Status and features
 
 **Early alpha, primarily tested on Windows.** Only analyze software you are
@@ -40,6 +50,10 @@ Prerequisites:
 - Optional Ollama with a downloaded model, or an OpenAI-compatible AI provider.
 
 From the repository root:
+
+For a fresh download, first follow the installation guide above, including
+the corpus generation step. The short commands below are not a complete
+first-install procedure.
 
 ```powershell
 npm.cmd ci
