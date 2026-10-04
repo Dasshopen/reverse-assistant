@@ -413,6 +413,17 @@ struct ArbitrationBatchOutcome {
     evidence: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct SemanticFallbackBatchOutcome {
+    entry_address: String,
+    suggested_name: Option<String>,
+    reasoning: String,
+    provider_label: String,
+    confidence: u8,
+    evidence: Vec<String>,
+    manual_review_required: bool,
+}
+
 #[tauri::command(async)]
 fn arbitrate_identification_ties(
     app: AppHandle,
@@ -519,6 +530,102 @@ fn arbitrate_identification_ties(
         .collect()
 }
 
+#[tauri::command(async)]
+fn analyze_semantic_fallbacks(
+    app: AppHandle,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    semantic_index_cache: tauri::State<'_, services::semantic_memory::SemanticIndexCache>,
+    items: Vec<ArbitrationBatchInput>,
+    provisional_names: Vec<naming_generation::ProvisionalFunctionName>,
+) -> Result<Vec<SemanticFallbackBatchOutcome>, String> {
+    // This path is deliberately smaller than closed arbitration batches: it
+    // only runs after abstention, and a compact two-function request keeps a
+    // local 7B model responsive even when both functions are large.
+    if items.is_empty() || items.len() > 2 {
+        return Err("a semantic fallback batch must contain one or two functions".to_owned());
+    }
+    let export = export_state
+        .lock()
+        .map_err(|_| "the analysis export lock was poisoned".to_owned())?
+        .clone()
+        .ok_or_else(|| "no analysis is currently loaded".to_owned())?;
+    let semantic_index = semantic_index_cache.get_or_build(&export)?;
+    let neighbor_hints = arbitration_neighbor_hints(&provisional_names);
+    let requests = items
+        .iter()
+        .map(|item| {
+            if item.candidates.len() < 2 {
+                return Err(format!(
+                    "semantic fallback requires an ambiguous candidate set for '{}'",
+                    item.entry_address
+                ));
+            }
+            let candidates = item
+                .candidates
+                .iter()
+                .map(|candidate| naming_arbitration::ArbitrationCandidate {
+                    name: candidate.name.clone(),
+                    source_label: candidate.source_label.clone(),
+                })
+                .collect();
+            let context =
+                naming_arbitration::build_context_for_function_with_index_and_neighbor_hints(
+                    &export,
+                    semantic_index.as_ref(),
+                    &item.entry_address,
+                    &neighbor_hints,
+                )?;
+            Ok((
+                item.entry_address.clone(),
+                naming_arbitration::ArbitrationRequest {
+                    candidates,
+                    context,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let enabled = ai_providers::enabled_providers_for_app(&app)?;
+    if enabled.is_empty() {
+        return Err("no AI provider is enabled. Configure one under Réglages first.".to_owned());
+    }
+
+    // Stop after the first provider that returns a valid structured answer.
+    // Unlike automatic naming, this is a manual-only lead: querying every
+    // provider would multiply latency/cost without increasing its authority.
+    let mut errors = Vec::new();
+    for secrets in enabled {
+        let provider = services::ai_provider::OpenAiCompatibleProvider {
+            base_url: secrets.base_url,
+            api_key: secrets.api_key,
+        };
+        let request =
+            naming_arbitration::build_semantic_fallback_batch_request(&requests, &secrets.model);
+        match provider.complete(&request).and_then(|response| {
+            naming_arbitration::parse_semantic_fallback_batch_response(&response, &requests)
+        }) {
+            Ok(results) => {
+                return Ok(results
+                    .into_iter()
+                    .map(|(entry_address, result)| SemanticFallbackBatchOutcome {
+                        entry_address,
+                        suggested_name: result.suggested_name,
+                        reasoning: result.reasoning,
+                        provider_label: secrets.label.clone(),
+                        confidence: result.confidence,
+                        evidence: result.evidence,
+                        manual_review_required: true,
+                    })
+                    .collect());
+            }
+            Err(error) => errors.push(format!("{}: {error}", secrets.label)),
+        }
+    }
+    Err(format!(
+        "all enabled AI providers failed semantic fallback: {}",
+        errors.join("; ")
+    ))
+}
+
 // Persisted alongside the project (see StoredArbitrationOutcome) so a real
 // AI answer is never re-spent on a reopen: without this, every restart
 // would re-run every pending tied function through the arbitration agent
@@ -531,6 +638,10 @@ fn save_arbitration_result(
     outcome: ArbitrationOutcome,
 ) -> Result<(), String> {
     let mut results = project_storage::load_project_arbitration(&app, &project_id)?;
+    let semantic_fallback = results
+        .iter()
+        .find(|existing| existing.entry_address == entry_address)
+        .and_then(|existing| existing.semantic_fallback.clone());
     let stored = naming_arbitration::StoredArbitrationOutcome {
         entry_address: entry_address.clone(),
         chosen_name: outcome.chosen_name,
@@ -540,6 +651,7 @@ fn save_arbitration_result(
         evidence: outcome.evidence,
         context_complete: true,
         agent_version: naming_arbitration::NAMING_PIPELINE_VERSION,
+        semantic_fallback,
     };
     match results
         .iter_mut()
@@ -548,6 +660,45 @@ fn save_arbitration_result(
         Some(existing) => *existing = stored,
         None => results.push(stored),
     }
+    project_storage::replace_project_arbitration(&app, &project_id, &results)
+}
+
+#[tauri::command]
+fn save_semantic_fallback_result(
+    app: AppHandle,
+    project_id: String,
+    entry_address: String,
+    outcome: SemanticFallbackBatchOutcome,
+) -> Result<(), String> {
+    if outcome.entry_address != entry_address {
+        return Err("semantic fallback address does not match the persistence key".to_owned());
+    }
+    if !outcome.manual_review_required {
+        return Err("semantic fallback outcomes must require manual review".to_owned());
+    }
+    let mut results = project_storage::load_project_arbitration(&app, &project_id)?;
+    let existing = results
+        .iter_mut()
+        .find(|stored| stored.entry_address == entry_address)
+        .ok_or_else(|| {
+            "a semantic fallback can only be attached to a persisted arbitration abstention"
+                .to_owned()
+        })?;
+    if existing.chosen_name.is_some() && existing.confidence >= 65 {
+        return Err(
+            "semantic fallback is forbidden when closed arbitration made a confident choice"
+                .to_owned(),
+        );
+    }
+    existing.semantic_fallback = Some(naming_arbitration::SemanticFallbackOutcome {
+        suggested_name: outcome.suggested_name,
+        reasoning: outcome.reasoning,
+        provider_label: outcome.provider_label,
+        confidence: outcome.confidence,
+        evidence: outcome.evidence,
+        manual_review_required: true,
+    });
+    existing.agent_version = naming_arbitration::NAMING_PIPELINE_VERSION;
     project_storage::replace_project_arbitration(&app, &project_id, &results)
 }
 
@@ -572,6 +723,8 @@ struct GenerationOutcome {
     verification_tier: naming_generation::NameVerificationTier,
     #[serde(default)]
     verifier_verdict: Option<naming_generation::VerificationVerdict>,
+    #[serde(default)]
+    calibration_breakdowns: Vec<naming_generation::CalibrationBreakdown>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -587,6 +740,18 @@ struct GenerationBatchOutcome {
     verification_tier: naming_generation::NameVerificationTier,
     #[serde(default)]
     verifier_verdict: Option<naming_generation::VerificationVerdict>,
+    #[serde(default)]
+    calibration_breakdowns: Vec<naming_generation::CalibrationBreakdown>,
+}
+
+fn labeled_calibration_breakdown(
+    provider_label: &str,
+    result: &naming_generation::GenerationResult,
+) -> Option<naming_generation::CalibrationBreakdown> {
+    result.calibration_breakdown.clone().map(|mut breakdown| {
+        breakdown.provider_label = Some(provider_label.to_owned());
+        breakdown
+    })
 }
 
 fn synthesize_generation_answers(
@@ -594,6 +759,10 @@ fn synthesize_generation_answers(
     answers: &[(String, naming_generation::GenerationResult)],
     analysis_pass: u8,
 ) -> GenerationBatchOutcome {
+    let calibration_breakdowns = answers
+        .iter()
+        .filter_map(|(label, answer)| labeled_calibration_breakdown(label, answer))
+        .collect();
     let named: Vec<_> = answers
         .iter()
         .filter(|(_, answer)| answer.suggested_name.is_some())
@@ -706,6 +875,7 @@ fn synthesize_generation_answers(
         analysis_pass,
         verification_tier,
         verifier_verdict,
+        calibration_breakdowns,
     }
 }
 
@@ -915,6 +1085,56 @@ fn generate_identification_suggestions(
             naming_generation::parse_generation_batch_response(&response, &expected)
         }) {
             Ok(mut results) => {
+                // Some local models ignore the non-null schema and abstain
+                // for superficial reasons (observed: only the hexadecimal
+                // address casing differed) even when a direct diagnostic
+                // string is present. Recover at most two high-information
+                // abstentions per batch so this cannot multiply normal
+                // analysis cost without bound.
+                let mut recoveries = results
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        if item.result.suggested_name.is_some() {
+                            return None;
+                        }
+                        let context = contexts
+                            .iter()
+                            .find(|(address, _)| address == &item.entry_address)?;
+                        let score = naming_generation::abstention_recovery_score(&context.1);
+                        (score >= 20).then_some((index, score))
+                    })
+                    .collect::<Vec<_>>();
+                recoveries.sort_by_key(|item| std::cmp::Reverse(item.1));
+                recoveries.truncate(2);
+                for (index, _) in recoveries {
+                    let item = &results[index];
+                    let Some((_, context)) = contexts
+                        .iter()
+                        .find(|(address, _)| address == &item.entry_address)
+                    else {
+                        continue;
+                    };
+                    let recovery_request = naming_generation::build_abstention_recovery_request(
+                        context,
+                        &item.result.reasoning,
+                        &secrets.model,
+                    );
+                    match provider.complete(&recovery_request).and_then(|response| {
+                        naming_generation::parse_generation_response(&response)
+                    }) {
+                        Ok(mut recovered) if recovered.suggested_name.is_some() => {
+                            recovered.requested_tools.clear();
+                            results[index].result = recovered;
+                        }
+                        Ok(_) => {}
+                        Err(error) => errors.push(format!(
+                            "{} (abstention recovery for {}): {error}",
+                            secrets.label, results[index].entry_address
+                        )),
+                    }
+                }
+
                 let followup_contexts = results
                     .iter()
                     .filter(|item| !item.result.requested_tools.is_empty())
@@ -1206,6 +1426,10 @@ fn refine_identification_suggestions(
                     format!("no refinement context exists for '{}'", item.entry_address)
                 })?;
             let result = item.result;
+            let calibration_breakdowns =
+                labeled_calibration_breakdown(&provider_secrets.label, &result)
+                    .into_iter()
+                    .collect();
             Ok(GenerationBatchOutcome {
                 entry_address: item.entry_address,
                 suggested_name: result.suggested_name,
@@ -1216,6 +1440,7 @@ fn refine_identification_suggestions(
                 analysis_pass: 2,
                 verification_tier: result.verification_tier,
                 verifier_verdict: result.verifier_verdict,
+                calibration_breakdowns,
             })
         })
         .collect()
@@ -1441,6 +1666,7 @@ fn generate_identification_suggestion(
         analysis_pass: 1,
         verification_tier: synthesized.verification_tier,
         verifier_verdict: synthesized.verifier_verdict,
+        calibration_breakdowns: synthesized.calibration_breakdowns,
     })
 }
 
@@ -1485,6 +1711,7 @@ fn save_generation_result(
         analysis_pass: outcome.analysis_pass.max(1),
         verification_tier: outcome.verification_tier,
         verifier_verdict: outcome.verifier_verdict,
+        calibration_breakdowns: outcome.calibration_breakdowns,
     };
     match results
         .iter_mut()
@@ -1519,6 +1746,7 @@ fn save_generation_results(
             analysis_pass: outcome.analysis_pass.max(1),
             verification_tier: outcome.verification_tier,
             verifier_verdict: outcome.verifier_verdict,
+            calibration_breakdowns: outcome.calibration_breakdowns,
         };
         match results
             .iter_mut()
@@ -2005,6 +2233,61 @@ fn apply_function_renames(
 }
 
 #[tauri::command(async)]
+fn load_browser_function(
+    app: AppHandle,
+    session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
+    export_state: tauri::State<'_, Mutex<Option<GhidraExport>>>,
+    decompile_coordinator: tauri::State<'_, DecompileCoordinator>,
+    entry_address: String,
+) -> Result<services::ghidra_browser::BrowserFunctionResult, String> {
+    {
+        let export = export_state
+            .lock()
+            .map_err(|_| "analysis export lock poisoned")?;
+        let function = export
+            .as_ref()
+            .and_then(|export| {
+                export
+                    .functions
+                    .iter()
+                    .find(|function| function.entry_address == entry_address)
+            })
+            .ok_or_else(|| "unknown function address".to_owned())?;
+        if function.is_external {
+            return Err(
+                "Fonction importée : son code appartient à une bibliothèque externe.".to_owned(),
+            );
+        }
+    }
+    let session = session_state
+        .lock()
+        .map_err(|_| "analysis session lock poisoned")?
+        .clone()
+        .ok_or_else(|| "No live Ghidra session is open.".to_owned())?;
+    let result = decompile_coordinator.run_exclusive(|| {
+        services::ghidra_browser::load_browser_function(&app, &session, &entry_address)
+    })?;
+    if let Some(code) = result
+        .details
+        .as_ref()
+        .and_then(|details| details.decompiled_code.as_ref())
+    {
+        let mut export = export_state
+            .lock()
+            .map_err(|_| "analysis export lock poisoned")?;
+        if let Some(function) = export.as_mut().and_then(|export| {
+            export
+                .functions
+                .iter_mut()
+                .find(|function| function.entry_address == entry_address)
+        }) {
+            function.decompiled_code = Some(code.clone());
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command(async)]
 fn decompile_function(
     app: AppHandle,
     session_state: tauri::State<'_, Mutex<Option<AnalysisSession>>>,
@@ -2179,7 +2462,9 @@ pub fn run() {
             remove_ai_provider,
             arbitrate_identification_tie,
             arbitrate_identification_ties,
+            analyze_semantic_fallbacks,
             save_arbitration_result,
+            save_semantic_fallback_result,
             get_arbitration_results,
             generate_identification_suggestion,
             generate_identification_suggestions,
@@ -2199,6 +2484,7 @@ pub fn run() {
             decompile_function,
             prepare_ai_function_contexts,
             disassemble_function,
+            load_browser_function,
             disassemble_functions,
             get_call_graph,
             get_global_strings,
@@ -2228,7 +2514,8 @@ mod tests {
         synthesize_arbitration_answers, synthesize_generation_answers, DecompileCoordinator,
     };
     use crate::services::naming_generation::{
-        GenerationResult, NameVerificationTier, VerificationVerdict,
+        CalibrationBreakdown, EvidenceCategory, EvidenceStrength, GenerationResult,
+        NameVerificationTier, VerificationVerdict,
     };
 
     fn generated(name: Option<&str>, confidence: u8) -> GenerationResult {
@@ -2257,6 +2544,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier,
             verifier_verdict,
+            calibration_breakdown: None,
         }
     }
 
@@ -2282,6 +2570,59 @@ mod tests {
             "agent disagreement must reduce confidence"
         );
         assert_eq!(result.provider_label, "agent A + agent B + agent C");
+    }
+
+    #[test]
+    fn generation_synthesis_preserves_each_providers_calibration_breakdown() {
+        let mut first = generated_with_tier_and_verdict(
+            Some("open_file"),
+            60,
+            NameVerificationTier::Supported,
+            Some(VerificationVerdict::Supported),
+        );
+        first.calibration_breakdown = Some(CalibrationBreakdown {
+            provider_label: None,
+            formula: "legacy_min_v1".to_owned(),
+            raw_agent_confidence: 60,
+            verifier_confidence: Some(92),
+            evidence_score: 75,
+            final_score: 60,
+            strongest_evidence: Some(EvidenceStrength::KnownApi),
+            name_tokens: vec!["file".to_owned(), "open".to_owned()],
+            covered_tokens: vec!["file".to_owned(), "open".to_owned()],
+            unsupported_tokens: Vec::new(),
+            independent_source_groups: 1,
+            primary_categories: vec![EvidenceCategory::FileIo],
+            secondary_categories: Vec::new(),
+            secondary_only: false,
+            deterministic_contradictions: Vec::new(),
+            verifier_verdict: Some(VerificationVerdict::Supported),
+            verifier_disagreement: false,
+            verification_tier: NameVerificationTier::Supported,
+        });
+        let mut second = first.clone();
+        second.confidence = 74;
+        let second_breakdown = second.calibration_breakdown.as_mut().expect("breakdown");
+        second_breakdown.raw_agent_confidence = 74;
+        second_breakdown.final_score = 74;
+
+        let answers = vec![
+            ("agent A".to_owned(), first),
+            ("agent B".to_owned(), second),
+        ];
+        let result = synthesize_generation_answers("0x1", &answers, 1);
+
+        assert_eq!(result.calibration_breakdowns.len(), 2);
+        assert_eq!(
+            result.calibration_breakdowns[0].provider_label.as_deref(),
+            Some("agent A")
+        );
+        assert_eq!(
+            result.calibration_breakdowns[1].provider_label.as_deref(),
+            Some("agent B")
+        );
+        assert_eq!(result.calibration_breakdowns[0].raw_agent_confidence, 60);
+        assert_eq!(result.calibration_breakdowns[1].raw_agent_confidence, 74);
     }
 
     #[test]

@@ -130,7 +130,7 @@ impl From<DecompileResultJson> for DecompiledFunctionDetails {
     }
 }
 
-fn parse_decompile_result(json: &str) -> Result<DecompiledFunctionDetails, String> {
+pub(crate) fn parse_decompile_result(json: &str) -> Result<DecompiledFunctionDetails, String> {
     serde_json::from_str::<DecompileResultJson>(json)
         .map(DecompiledFunctionDetails::from)
         .map_err(|error| format!("invalid decompile result JSON from Ghidra: {error}"))

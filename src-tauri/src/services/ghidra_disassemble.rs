@@ -111,7 +111,7 @@ pub struct FunctionDisassembly {
     pub instructions: Vec<DisassembledInstruction>,
 }
 
-fn parse_disassembly_result(json: &str) -> Result<FunctionDisassembly, String> {
+pub(crate) fn parse_disassembly_result(json: &str) -> Result<FunctionDisassembly, String> {
     serde_json::from_str::<FunctionDisassembly>(json)
         .map_err(|error| format!("invalid disassembly result JSON from Ghidra: {error}"))
 }

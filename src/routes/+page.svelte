@@ -185,6 +185,13 @@ interface FunctionDisassembly {
   instructions: DisassembledInstruction[];
 }
 
+interface BrowserFunctionResult {
+  details: DecompiledFunctionDetails | null;
+  disassembly: FunctionDisassembly | null;
+  decompile_error: string | null;
+  disassembly_error: string | null;
+}
+
 interface BsimCandidate {
   name: string;
   executable: string;
@@ -201,6 +208,13 @@ interface MergedBsimCandidate extends BsimCandidate {
   // corroborating evidence, distinct from (and stronger than) any single
   // raw similarity/significance score.
   matchingExecutables: string[];
+}
+
+interface BsimCandidateFamily {
+  key: string;
+  label: string;
+  representative: MergedBsimCandidate;
+  variants: MergedBsimCandidate[];
 }
 
 interface BsimCorpusSummary {
@@ -224,6 +238,16 @@ interface ArbitrationOutcome {
   evidence: string[];
 }
 
+interface SemanticFallbackOutcome {
+  entry_address: string;
+  suggested_name: string | null;
+  reasoning: string;
+  provider_label: string;
+  confidence: number;
+  evidence: string[];
+  manual_review_required: true;
+}
+
 interface ArbitrationBatchOutcome extends ArbitrationOutcome {
   entry_address: string;
 }
@@ -232,6 +256,7 @@ interface StoredArbitrationOutcome extends ArbitrationOutcome {
   entry_address: string;
   context_complete: boolean;
   agent_version: number;
+  semantic_fallback?: Omit<SemanticFallbackOutcome, "entry_address"> | null;
 }
 
 // Mirrors naming_generation::NameVerificationTier (Rust): a deterministic,
@@ -250,7 +275,45 @@ type NameVerificationTier = "unsupported" | "partial" | "supported" | "strong";
 // gating must catch on its own (see isEligibleForAutomaticNaming below).
 // `null` means no adversarial verification actually ran for this result and
 // must be treated exactly like "unsupported", never as an implicit pass.
-type VerificationVerdict = "unsupported" | "partial" | "supported";
+  type VerificationVerdict = "unsupported" | "partial" | "supported";
+
+  type EvidenceStrength = "literal" | "behavioral_pattern" | "known_api" | "explicit_identity";
+  type EvidenceCategory =
+    | "type_identity"
+    | "lifecycle"
+    | "memory"
+    | "file_io"
+    | "network"
+    | "synchronization"
+    | "error_exception"
+    | "crypto_encoding"
+    | "process_thread"
+    | "windows_system"
+    | "control_flow"
+    | "call_graph"
+    | "literal"
+    | "other";
+
+  interface CalibrationBreakdown {
+    provider_label: string | null;
+    formula: string;
+    raw_agent_confidence: number;
+    verifier_confidence: number | null;
+    evidence_score: number;
+    final_score: number;
+    strongest_evidence: EvidenceStrength | null;
+    name_tokens: string[];
+    covered_tokens: string[];
+    unsupported_tokens: string[];
+    independent_source_groups: number;
+    primary_categories: EvidenceCategory[];
+    secondary_categories: EvidenceCategory[];
+    secondary_only: boolean;
+    deterministic_contradictions: string[];
+    verifier_verdict: VerificationVerdict | null;
+    verifier_disagreement: boolean;
+    verification_tier: NameVerificationTier;
+  }
 
 interface GenerationOutcome {
   suggested_name: string | null;
@@ -259,9 +322,10 @@ interface GenerationOutcome {
   confidence: number;
   evidence: string[];
   analysis_pass?: number;
-  verification_tier: NameVerificationTier;
-  verifier_verdict: VerificationVerdict | null;
-}
+    verification_tier: NameVerificationTier;
+    verifier_verdict: VerificationVerdict | null;
+    calibration_breakdowns: CalibrationBreakdown[];
+  }
 
 // The deterministic tier is the ceiling: it can never be raised by the
 // verifier's verdict, only narrowed by it. A name is only eligible for
@@ -334,7 +398,7 @@ interface FunctionIdentification {
 interface AutomaticRenameChoice {
   func: GhidraFunction;
   name: string;
-  source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation";
+  source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation" | "semantic_fallback";
   scoreLabel: string;
   evidenceLabel: string;
   alternativeCount: number;
@@ -1015,6 +1079,12 @@ interface ApplyRenamesResult {
   let arbitrationErrors = $state(new Map<string, string>());
   let arbitratingAddresses = $state(new Set<string>());
   let isBackgroundArbitrating = $state(false);
+  // Manual-only open-ended recovery for closed-set arbitration abstentions.
+  // Kept separate so no confidence value can accidentally make it eligible
+  // for the automatic rename batch.
+  let semanticFallbackResults = $state(new Map<string, SemanticFallbackOutcome>());
+  let semanticFallbackErrors = $state(new Map<string, string>());
+  let isBackgroundSemanticFallback = $state(false);
   // Same per-address/background rationale as arbitration, for functions
   // with no FunctionID/BSim candidates at all -- see runBackgroundGeneration.
   let generationResults = $state(new Map<string, GenerationOutcome>());
@@ -1182,13 +1252,49 @@ interface ApplyRenamesResult {
   }
 
   function identificationSourceLabel(
-    source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation" | null,
+    source: AutomaticRenameChoice["source"] | null,
   ): string {
     if (source === null) return "Aucune source";
     if (source === "rtti") return "RTTI";
     if (source === "arbitration") return "Agent IA (arbitrage)";
     if (source === "generation") return "Agent IA (invention)";
+    if (source === "semantic_fallback") return "Agent IA (fallback sémantique)";
     return source === "function_id" ? "FunctionID" : "BSim";
+  }
+
+  function evidenceStrengthLabel(strength: EvidenceStrength | null): string {
+    if (strength === "explicit_identity") return "Identité explicite";
+    if (strength === "known_api") return "API connue";
+    if (strength === "behavioral_pattern") return "Pattern comportemental";
+    if (strength === "literal") return "Constante / chaîne";
+    return "Aucune preuve retenue";
+  }
+
+  function evidenceCategoryLabel(category: EvidenceCategory): string {
+    const labels: Record<EvidenceCategory, string> = {
+      type_identity: "Type / identité",
+      lifecycle: "Cycle de vie",
+      memory: "Mémoire",
+      file_io: "Fichier / I/O",
+      network: "Réseau",
+      synchronization: "Synchronisation",
+      error_exception: "Erreur / exception",
+      crypto_encoding: "Crypto / encodage",
+      process_thread: "Processus / thread",
+      windows_system: "API Windows",
+      control_flow: "Contrôle / comportement",
+      call_graph: "Graphe d'appels",
+      literal: "Constante / chaîne",
+      other: "Autre",
+    };
+    return labels[category];
+  }
+
+  function verifierVerdictLabel(verdict: VerificationVerdict | null): string {
+    if (verdict === "supported") return "Supported";
+    if (verdict === "partial") return "Partial";
+    if (verdict === "unsupported") return "Unsupported";
+    return "Absent";
   }
 
   function displayCandidateName(name: string): string {
@@ -1253,7 +1359,10 @@ interface ApplyRenamesResult {
     reservedNames: Set<string>,
   ): AutomaticRenameChoice | null {
     const arbitration = arbitrationResults.get(func.entry_address);
-    if (!arbitration?.chosen_name) return null;
+    // A low-confidence closed choice is still useful context for a human,
+    // but it is not a sufficiently resolved tie for automatic application.
+    // It is routed to the open semantic fallback below, which is manual-only.
+    if (!arbitration?.chosen_name || arbitration.confidence < 65) return null;
     const normalizedName = normalizedAutomaticSymbolName(arbitration.chosen_name);
     if (!normalizedName) return null;
     const safeName = reserveUniqueAutomaticName(normalizedName, func.entry_address, reservedNames);
@@ -1318,6 +1427,51 @@ interface ApplyRenamesResult {
     );
     uniqueBsimCandidatesCache.set(candidates, result);
     return result;
+  }
+
+  // Display-only family key. It collapses template arguments and unstable
+  // lambda ordinals, but deliberately keeps the enclosing namespace/class,
+  // operation name and exact BSim scores. This removes repeated compiler
+  // spellings without claiming that semantically different operations are
+  // equivalent or changing the raw evidence used by automatic decisions.
+  function readableBsimFamilyName(name: string): string {
+    let output = "";
+    let templateDepth = 0;
+    for (const character of name) {
+      if (character === "<") {
+        if (templateDepth === 0) output += "<…>";
+        templateDepth += 1;
+      } else if (character === ">" && templateDepth > 0) {
+        templateDepth -= 1;
+      } else if (templateDepth === 0) {
+        output += character;
+      }
+    }
+    return output
+      .replace(/\{lambda(?:\([^)]*\))?#\d+\}/gi, "{lambda}")
+      .replace(/<lambda(?:_\d+|_?[0-9a-f]+)?>/gi, "<lambda>")
+      .replace(/lambda[_$]?\d+/gi, "lambda")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function bsimCandidateFamilies(candidates: MergedBsimCandidate[]): BsimCandidateFamily[] {
+    const byKey = new Map<string, BsimCandidateFamily>();
+    for (const candidate of candidates) {
+      const label = readableBsimFamilyName(displayCandidateName(candidate.name));
+      const semanticKey = label.toLowerCase().replace(/\s+/g, "");
+      const key = `${semanticKey}|${candidate.similarity.toFixed(6)}|${candidate.significance.toFixed(3)}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.variants.push(candidate);
+        if (candidate.name.length < existing.representative.name.length) {
+          existing.representative = candidate;
+        }
+      } else {
+        byKey.set(key, { key, label, representative: candidate, variants: [candidate] });
+      }
+    }
+    return [...byKey.values()];
   }
 
   function bsimMatchesForAddress(entryAddress: string): MergedBsimCandidate[] {
@@ -1781,19 +1935,48 @@ interface ApplyRenamesResult {
       const normalizedReason = rejection.reason.toLocaleLowerCase("fr");
       const isAmbiguous = normalizedReason.includes("plusieurs noms") ||
         normalizedReason.includes("ex æquo") || normalizedReason.includes("ambigu");
+      const fallback = semanticFallbackResults.get(rejection.func.entry_address);
+      const fallbackName = fallback?.suggested_name
+        ? (normalizedAutomaticSymbolName(fallback.suggested_name) ?? fallback.suggested_name)
+        : null;
       items.push({
         category: isAmbiguous ? "ambiguous" : "insufficient",
         func: rejection.func,
-        candidateName: rejection.candidateDisplayName,
-        candidateRawName: rejection.candidateName,
-        source: rejection.source,
-        evidenceLabel: rejection.evidenceLabel,
-        reason: rejection.reason,
-        confidence: null,
+        candidateName: fallbackName ?? rejection.candidateDisplayName,
+        candidateRawName: fallbackName ? null : rejection.candidateName,
+        source: fallbackName ? "semantic_fallback" : rejection.source,
+        evidenceLabel: fallbackName
+          ? `${fallback!.provider_label} · hypothèse sémantique · confiance ${fallback!.confidence}% · vérification manuelle obligatoire`
+          : rejection.evidenceLabel,
+        reason: fallbackName
+          ? `L'arbitrage fermé n'a pas départagé les candidats. Le fallback propose « ${fallbackName} » à partir du comportement du pseudocode, sans l'autoriser au renommage automatique.`
+          : rejection.reason,
+        confidence: fallbackName ? fallback!.confidence : null,
       });
     }
 
     for (const choice of automaticRenameCandidates) coveredAddresses.add(choice.func.entry_address);
+
+    // A semantic fallback is intentionally absent from every automatic and
+    // force-include collection. Surface it here even if the deterministic
+    // rejection that led to it changes shape in a future pipeline version.
+    for (const func of unidentifiedFunctions) {
+      if (coveredAddresses.has(func.entry_address)) continue;
+      const fallback = semanticFallbackResults.get(func.entry_address);
+      if (!fallback?.suggested_name) continue;
+      const displayedName = normalizedAutomaticSymbolName(fallback.suggested_name) ?? fallback.suggested_name;
+      coveredAddresses.add(func.entry_address);
+      items.push({
+        category: "ambiguous",
+        func,
+        candidateName: displayedName,
+        candidateRawName: displayedName === fallback.suggested_name ? null : fallback.suggested_name,
+        source: "semantic_fallback",
+        evidenceLabel: `${fallback.provider_label} · hypothèse sémantique · confiance ${fallback.confidence}% · vérification manuelle obligatoire`,
+        reason: "L'arbitrage fermé est resté indécis. Cette proposition ouverte décrit le comportement observé, mais ne peut jamais entrer automatiquement dans le lot.",
+        confidence: fallback.confidence,
+      });
+    }
 
     // A generative answer that failed the automatic gate is still a real
     // hypothesis worth showing to a human. Previously these named answers
@@ -2533,6 +2716,13 @@ interface ApplyRenamesResult {
 
   $effect(() => {
     if (activeWorkspaceView !== "identification") return;
+    // The manual queue and the automatic review workspace do not own the
+    // same selection. In automatic review, forcing the selected function
+    // back into `identificationQueue` can fight the review effect below:
+    // generated hypotheses without FID/BSim evidence are absent from the
+    // default manual "matched" queue, so both effects keep selecting a
+    // different address and lock the UI in a reactive loop.
+    if (automaticIdentificationMode) return;
     if (
       identificationQueueFilter === "matched" &&
       matchedIdentificationCount === 0 &&
@@ -2649,14 +2839,17 @@ interface ApplyRenamesResult {
     );
   }
 
-  async function runBackgroundBsimScan(projectId: string): Promise<boolean> {
+  async function runBackgroundBsimScan(
+    projectId: string,
+    runAiAfterScan = true,
+  ): Promise<boolean> {
     try {
       const evidence = await invoke<FunctionIdentification[]>("scan_project_with_bsim", {
         projectId,
       });
       if (projectId !== activeProjectId) return false;
       installIdentificationEvidence(evidence);
-      await runBackgroundAiAnalysis(projectId);
+      if (runAiAfterScan) await runBackgroundAiAnalysis(projectId);
       return true;
     } catch (error) {
       if (projectId !== activeProjectId) return false;
@@ -2690,6 +2883,8 @@ interface ApplyRenamesResult {
     backgroundBsimResults = new Map();
     arbitrationResults = new Map();
     arbitrationErrors = new Map();
+    semanticFallbackResults = new Map();
+    semanticFallbackErrors = new Map();
     generationResults = new Map();
     generationErrors = new Map();
     generationAnchorsSeen = new Map();
@@ -2728,6 +2923,27 @@ interface ApplyRenamesResult {
             },
           ]),
         );
+        semanticFallbackResults = new Map(
+          storedArbitration
+            .filter(
+              (stored) =>
+                stored.agent_version >= 5 &&
+                (stored.chosen_name === null || (stored.confidence ?? 0) < 65) &&
+                stored.semantic_fallback?.manual_review_required === true,
+            )
+            .map((stored) => [
+              stored.entry_address,
+              {
+                entry_address: stored.entry_address,
+                suggested_name: stored.semantic_fallback!.suggested_name,
+                reasoning: stored.semantic_fallback!.reasoning,
+                provider_label: stored.semantic_fallback!.provider_label,
+                confidence: stored.semantic_fallback!.confidence,
+                evidence: stored.semantic_fallback!.evidence ?? [],
+                manual_review_required: true as const,
+              },
+            ]),
+        );
       } catch (error) {
         console.error("Failed to load stored arbitration results", error);
       }
@@ -2743,6 +2959,12 @@ interface ApplyRenamesResult {
               (stored) =>
                 stored.context_complete &&
                 stored.agent_version >= 4 &&
+                // Protocol v13 introduces weighted semantic evidence across
+                // reusable domains (identity, known API, behavior, literal).
+                // Protocol v15 additionally prevents Secondary-only words
+                // from diluting a real Primary role. Recompute older names:
+                // otherwise their stale calibration would survive forever.
+                stored.agent_version >= 15 &&
                 isUsableStoredGeneration(stored),
             )
             .map((stored) => [
@@ -2772,6 +2994,8 @@ interface ApplyRenamesResult {
               // "unsupported" verdict, never as an implicit pass.
               verifier_verdict:
                 stored.agent_version >= 11 ? stored.verifier_verdict ?? "unsupported" : "unsupported",
+              calibration_breakdowns:
+                stored.agent_version >= 14 ? stored.calibration_breakdowns ?? [] : [],
             },
           ]),
         );
@@ -2808,15 +3032,17 @@ interface ApplyRenamesResult {
         analysisTargetName = loaded.export.program.name;
         analysisProgressMinimized = true;
         analysisProgressVisible = true;
-        void runBackgroundBsimScan(loaded.project.id).then((completed) => {
+        // Reopening a saved project may finish deterministic BSim evidence,
+        // but must never silently spend model time or disable the explicit
+        // AI resume controls. A fresh analysis still chains BSim -> AI via
+        // the default `runAiAfterScan` value.
+        void runBackgroundBsimScan(loaded.project.id, false).then((completed) => {
           if (completed) {
             setTimeout(() => {
               analysisProgressVisible = false;
             }, 1200);
           }
         });
-      } else if (loaded.project.session_available) {
-        void runBackgroundAiAnalysis();
       }
     } catch (error) {
       projectActionError = String(error);
@@ -3142,7 +3368,7 @@ interface ApplyRenamesResult {
   $effect(() => {
     const func = selectedFunction;
 
-    if (!func || analysisSource !== "automatic" || func.is_external) return;
+    if (!func || analysisSource !== "automatic" || func.is_external || activeWorkspaceView === "browser") return;
     if (func.decompiled_code !== null) return;
     if (decompileCache.has(func.entry_address)) return;
     // A failed request stays visible until the user explicitly retries; do
@@ -3194,13 +3420,15 @@ interface ApplyRenamesResult {
       func.is_external
     )
       return;
-    if (
-      disassemblyCache.has(func.entry_address) ||
-      pendingDisassemblies.has(func.entry_address)
-    )
-      return;
-
-    requestDisassembly(func.entry_address);
+    const needsListing = !disassemblyCache.has(func.entry_address) && !disassemblyErrors.has(func.entry_address);
+    const needsCode = func.decompiled_code === null && !decompileCache.has(func.entry_address) && !decompileErrors.has(func.entry_address);
+    if ((!needsListing && !needsCode) || pendingDisassemblies.size > 0 || pendingDecompiles.size > 0) return;
+    // Coalesce navigation before opening a JVM. Only the latest selection is
+    // loaded after the active request finishes, not every intermediate click.
+    const timer = window.setTimeout(() => {
+      if (selectedFunctionAddress === func.entry_address) void requestBrowserFunction(func.entry_address);
+    }, 150);
+    return () => window.clearTimeout(timer);
   });
 
   $effect(() => {
@@ -3234,6 +3462,10 @@ interface ApplyRenamesResult {
     const address = selectedFunctionAddress;
     const direction = callGraphDirection;
     const depth = callGraphDepth;
+    // Function names are part of the refreshed export returned after a
+    // rename. Reading it here makes the graph refresh even though the binary
+    // SHA and selected address themselves have not changed.
+    const currentExport = importedExport;
 
     // Automatic review displays the calls already present in the export, not
     // the interactive graph. Avoid a backend BFS on every queue click.
@@ -3245,7 +3477,7 @@ interface ApplyRenamesResult {
       automaticWorkspaceMode === "review"
     ) return;
 
-    if (!address || analysisSource === "none") {
+    if (!address || !currentExport || analysisSource === "none") {
       callGraphResult = null;
       callGraphError = "";
       return;
@@ -3340,27 +3572,62 @@ interface ApplyRenamesResult {
     return Boolean(details?.decompiled_code?.trim());
   }
 
-  async function requestDisassembly(entryAddress: string) {
+  async function requestBrowserFunction(entryAddress: string) {
+    if (pendingDisassemblies.size > 0 || pendingDecompiles.size > 0) return;
+    const source = importedExport;
     pendingDisassemblies = new Set(pendingDisassemblies).add(entryAddress);
-
-    const errorsWithoutCurrentAddress = new Map(disassemblyErrors);
-    errorsWithoutCurrentAddress.delete(entryAddress);
-    disassemblyErrors = errorsWithoutCurrentAddress;
-
+    pendingDecompiles = new Set(pendingDecompiles).add(entryAddress);
+    disassemblyErrors = new Map(disassemblyErrors);
+    disassemblyErrors.delete(entryAddress);
+    decompileErrors = new Map(decompileErrors);
+    decompileErrors.delete(entryAddress);
     try {
-      const disassembly = await invoke<FunctionDisassembly>(
-        "disassemble_function",
-        { entryAddress },
-      );
-
-      disassemblyCache = new Map(disassemblyCache).set(entryAddress, disassembly);
+      const result = await invoke<BrowserFunctionResult>("load_browser_function", { entryAddress });
+      // Never install an old project's or pre-rename result in the new view.
+      if (importedExport !== source) return;
+      if (result.disassembly) disassemblyCache = new Map(disassemblyCache).set(entryAddress, result.disassembly);
+      if (result.details) {
+        const existingBsim = decompileCache.get(entryAddress)?.bsim;
+        decompileCache = new Map(decompileCache).set(entryAddress, {
+          ...result.details, bsim: existingBsim ?? result.details.bsim,
+        });
+        if (result.details.decompiled_code) void requestProgramOverview();
+      }
+      if (result.disassembly_error) disassemblyErrors = new Map(disassemblyErrors).set(entryAddress, result.disassembly_error);
+      if (result.decompile_error) decompileErrors = new Map(decompileErrors).set(entryAddress, result.decompile_error);
     } catch (error) {
+      if (importedExport !== source) return;
       disassemblyErrors = new Map(disassemblyErrors).set(entryAddress, String(error));
+      decompileErrors = new Map(decompileErrors).set(entryAddress, String(error));
     } finally {
-      const remainingDisassemblies = new Set(pendingDisassemblies);
-      remainingDisassemblies.delete(entryAddress);
-      pendingDisassemblies = remainingDisassemblies;
+      if (importedExport === source) {
+        pendingDisassemblies = new Set([...pendingDisassemblies].filter((address) => address !== entryAddress));
+        pendingDecompiles = new Set([...pendingDecompiles].filter((address) => address !== entryAddress));
+      }
     }
+  }
+
+  function localImportRelay(address: string): string | null {
+    const functions = importedExport?.functions ?? [];
+    const byAddress = new Map(functions.map((func) => [func.entry_address, func]));
+    let best: string | null = null;
+    let bestDepth = 0;
+    for (const func of functions) {
+      if (func.is_external || !func.is_thunk) continue;
+      const visited = new Set<string>();
+      let target = func;
+      while (target.thunk_target_address && !visited.has(target.entry_address)) {
+        visited.add(target.entry_address);
+        if (target.thunk_target_address === address) {
+          if (visited.size > bestDepth) { best = func.entry_address; bestDepth = visited.size; }
+          break;
+        }
+        const next = byAddress.get(target.thunk_target_address);
+        if (!next) break;
+        target = next;
+      }
+    }
+    return best;
   }
 
   async function requestProgramListingPage(page: number, entryAddresses: string[]) {
@@ -3411,6 +3678,26 @@ interface ApplyRenamesResult {
     selectedFunctionAddress = browserHistory[browserHistoryIndex];
   }
 
+  function installRenamedExport(imported: ImportedGhidraExport) {
+    // `imported.export` is the authoritative post-transaction snapshot from
+    // Ghidra. Replace the shared model once, then invalidate every secondary
+    // view whose cached text can contain an old function name.
+    importedExport = imported.export;
+    pendingDecompiles = new Set();
+    pendingDisassemblies = new Set();
+    importSummary = imported.summary;
+    decompileCache = new Map();
+    decompileErrors = new Map();
+    disassemblyCache = new Map();
+    disassemblyErrors = new Map();
+    programListingCache = new Map();
+    programListingError = "";
+    callGraphResult = null;
+    callGraphError = "";
+    clearProjectComparison();
+    pdfReportResult = null;
+  }
+
   async function applySelectedFunctionRename(): Promise<boolean> {
     if (!selectedFunction || !activeProjectId || analysisSource !== "automatic") {
       functionRenameError = "Open a live saved project before applying a rename.";
@@ -3432,10 +3719,7 @@ interface ApplyRenamesResult {
         projectId: activeProjectId,
         renames: [{ entry_address: entryAddress, new_name: newName }],
       });
-      importedExport = result.imported.export;
-      importSummary = result.imported.summary;
-      decompileCache = new Map();
-      decompileErrors = new Map();
+      installRenamedExport(result.imported);
       functionRenameSuccess = `Renamed in Ghidra: ${result.applied[0].old_name} → ${result.applied[0].new_name}`;
       await requestProjectList();
       return true;
@@ -3504,10 +3788,7 @@ interface ApplyRenamesResult {
           new_name: name,
         })),
       });
-      importedExport = result.imported.export;
-      importSummary = result.imported.summary;
-      decompileCache = new Map();
-      decompileErrors = new Map();
+      installRenamedExport(result.imported);
       automaticRenameSuccess = `${result.applied.length} fonction(s) renommée(s) dans Ghidra.`;
       selectedFunctionAddress = null;
       await requestProjectList();
@@ -3541,7 +3822,6 @@ interface ApplyRenamesResult {
       const item = selectedAutomaticReviewItem;
       if (item) {
         automaticReviewSelectedAddress = item.func.entry_address;
-        openFunction(item.func.entry_address, false);
       }
     }
   }
@@ -3707,14 +3987,43 @@ interface ApplyRenamesResult {
         provisionalNames: deterministicArbitrationNeighborHints(),
       });
       arbitrationResults = new Map(arbitrationResults).set(entryAddress, result);
-      // Best-effort: a real AI answer must never be re-spent on a reopen.
-      // A failure to persist it doesn't affect this session (it's already
-      // in arbitrationResults above), only whether it survives a restart.
       if (activeProjectId) {
-        const projectId = activeProjectId;
-        void invoke("save_arbitration_result", { projectId, entryAddress, outcome: result }).catch(
-          (error) => console.error("Failed to persist the arbitration result", error),
-        );
+        try {
+          await invoke("save_arbitration_result", {
+            projectId: activeProjectId,
+            entryAddress,
+            outcome: result,
+          });
+        } catch (error) {
+          console.error("Failed to persist the arbitration result", error);
+        }
+      }
+
+      // The same rule applies to a one-function/manual arbitration as to the
+      // background batch: abstention or a weak closed choice immediately
+      // receives one open, manual-only semantic attempt.
+      if (result.chosen_name === null || result.confidence < 65) {
+        try {
+          const [fallback] = await invoke<SemanticFallbackOutcome[]>(
+            "analyze_semantic_fallbacks",
+            {
+              items: [{ entry_address: entryAddress, candidates }],
+              provisionalNames: deterministicArbitrationNeighborHints(),
+            },
+          );
+          if (fallback?.manual_review_required === true) {
+            semanticFallbackResults = new Map(semanticFallbackResults).set(entryAddress, fallback);
+            if (activeProjectId) {
+              await invoke("save_semantic_fallback_result", {
+                projectId: activeProjectId,
+                entryAddress,
+                outcome: fallback,
+              });
+            }
+          }
+        } catch (error) {
+          semanticFallbackErrors = new Map(semanticFallbackErrors).set(entryAddress, String(error));
+        }
       }
     } catch (error) {
       arbitrationErrors = new Map(arbitrationErrors).set(entryAddress, String(error));
@@ -3772,11 +4081,15 @@ interface ApplyRenamesResult {
             nextResults.set(result.entry_address, result);
             if (activeProjectId) {
               const projectId = activeProjectId;
-              void invoke("save_arbitration_result", {
-                projectId,
-                entryAddress: result.entry_address,
-                outcome: result,
-              }).catch((error) => console.error("Failed to persist arbitration result", error));
+              try {
+                await invoke("save_arbitration_result", {
+                  projectId,
+                  entryAddress: result.entry_address,
+                  outcome: result,
+                });
+              } catch (error) {
+                console.error("Failed to persist arbitration result", error);
+              }
             }
           }
           arbitrationResults = nextResults;
@@ -3794,6 +4107,87 @@ interface ApplyRenamesResult {
       }
     } finally {
       isBackgroundArbitrating = false;
+    }
+  }
+
+  // Open-ended recovery is deliberately small and manual-only. We inspect
+  // at most eight high-information abstentions per run (four calls with two
+  // functions each), persist the answer as a cache, and leave every other
+  // ambiguity for a later run instead of making the normal analysis drag on.
+  async function runBackgroundSemanticFallback(run?: BackgroundAiRun) {
+    if (!backgroundAiRunIsCurrent(run)) return;
+    if (isBackgroundSemanticFallback) return;
+    if (!aiProviders.some((provider) => provider.enabled)) return;
+
+    const pending = unidentifiedFunctions
+      .filter((func) => {
+        const arbitration = arbitrationResults.get(func.entry_address);
+        return (
+          !!arbitration &&
+          (arbitration.chosen_name === null || arbitration.confidence < 65) &&
+          tiedCandidatesFor(func.entry_address).length >= 2 &&
+          !semanticFallbackResults.has(func.entry_address)
+        );
+      })
+      .sort((left, right) => {
+        const score = (func: GhidraFunction) => {
+          const bsimSignificance = bsimMatchesForAddress(func.entry_address)
+            .reduce((best, candidate) => Math.max(best, candidate.significance), 0);
+          const code = decompileCache.get(func.entry_address)?.decompiled_code ?? func.decompiled_code ?? "";
+          return bsimSignificance * 10 + Math.min(code.length, 30_000) / 100 + func.calls.length * 4 + func.strings.length * 8;
+        };
+        return score(right) - score(left);
+      })
+      .slice(0, 8);
+    if (pending.length === 0) return;
+
+    isBackgroundSemanticFallback = true;
+    try {
+      const batchSize = 2;
+      for (let start = 0; start < pending.length; start += batchSize) {
+        if (!backgroundAiRunIsCurrent(run)) return;
+        const functions = pending.slice(start, start + batchSize);
+        const items = functions.map((func) => ({
+          entry_address: func.entry_address,
+          candidates: tiedCandidatesFor(func.entry_address),
+        }));
+        try {
+          const results = await invoke<SemanticFallbackOutcome[]>(
+            "analyze_semantic_fallbacks",
+            { items, provisionalNames: deterministicArbitrationNeighborHints() },
+          );
+          if (!backgroundAiRunIsCurrent(run)) return;
+          const nextResults = new Map(semanticFallbackResults);
+          const nextErrors = new Map(semanticFallbackErrors);
+          for (const result of results) {
+            // This backend invariant is repeated at the UI boundary so a
+            // future schema regression cannot turn an open hypothesis into
+            // an automatic choice.
+            if (result.manual_review_required !== true) continue;
+            nextResults.set(result.entry_address, result);
+            nextErrors.delete(result.entry_address);
+            if (activeProjectId) {
+              try {
+                await invoke("save_semantic_fallback_result", {
+                  projectId: activeProjectId,
+                  entryAddress: result.entry_address,
+                  outcome: result,
+                });
+              } catch (error) {
+                console.error("Failed to persist semantic fallback", error);
+              }
+            }
+          }
+          semanticFallbackResults = nextResults;
+          semanticFallbackErrors = nextErrors;
+        } catch (error) {
+          const nextErrors = new Map(semanticFallbackErrors);
+          for (const func of functions) nextErrors.set(func.entry_address, String(error));
+          semanticFallbackErrors = nextErrors;
+        }
+      }
+    } finally {
+      isBackgroundSemanticFallback = false;
     }
   }
 
@@ -4382,6 +4776,13 @@ interface ApplyRenamesResult {
         completed_percent: 68,
       };
       await runBackgroundArbitration(run);
+      if (!backgroundAiRunIsCurrent(run)) return;
+      analysisProgress = {
+        stage: "ai-semantic-fallback",
+        message: "Analyse sémantique ciblée des arbitrages restés ambigus…",
+        completed_percent: 72,
+      };
+      await runBackgroundSemanticFallback(run);
       await runBackgroundGeneration(run);
       await runBackgroundRefinement(run);
       if (!backgroundAiRunIsCurrent(run)) return;
@@ -4745,9 +5146,6 @@ interface ApplyRenamesResult {
     aiProvidersError = "";
     try {
       aiProviders = await invoke<AiProviderSummary[]>("list_ai_providers");
-      if (aiProviders.some((provider) => provider.enabled) && activeProjectId && analysisSource === "automatic") {
-        void runBackgroundAiAnalysis(activeProjectId);
-      }
     } catch (error) {
       aiProviders = [];
       aiProvidersError = String(error);
@@ -4925,6 +5323,8 @@ interface ApplyRenamesResult {
     backgroundBsimResults = new Map();
     arbitrationResults = new Map();
     arbitrationErrors = new Map();
+    semanticFallbackResults = new Map();
+    semanticFallbackErrors = new Map();
     generationResults = new Map();
     generationErrors = new Map();
     generationAnchorsSeen = new Map();
@@ -6251,7 +6651,11 @@ interface ApplyRenamesResult {
               type="button"
               disabled={isApplyingAutomaticRenames || automaticRenameApplicationCount === 0 || analysisSource !== "automatic" || !activeProjectId}
               onclick={applyAutomaticFunctionRenames}
-            >{isApplyingAutomaticRenames ? "Application en cours…" : `Appliquer les propositions (${automaticRenameApplicationCount})`}</button>
+            >{isApplyingAutomaticRenames
+              ? "Application en cours…"
+              : automaticRenameApplicationCount === 0
+              ? "Aucune proposition à appliquer"
+              : `Appliquer les propositions (${automaticRenameApplicationCount})`}</button>
           </section>
           {#if automaticRenameError}<p class="error identification-message" role="alert">{automaticRenameError}</p>{/if}
           {#if automaticRenameSuccess}<p class="status identification-message">{automaticRenameSuccess}</p>{/if}
@@ -6266,7 +6670,11 @@ interface ApplyRenamesResult {
                 type="button"
                 disabled={isBackgroundAiRunning || isBackgroundRefining}
                 onclick={resumeGenerationVerification}
-              >{isBackgroundRefining ? "Vérification en cours…" : "Reprendre la vérification"}</button>
+              >{isBackgroundRefining
+                ? "Vérification en cours…"
+                : isBackgroundAiRunning
+                ? "Analyse IA en cours…"
+                : "Reprendre la vérification"}</button>
             </section>
           {/if}
 
@@ -6365,6 +6773,7 @@ interface ApplyRenamesResult {
                 {@const reviewBsimCandidates = bsimMatchesForAddress(reviewItem.func.entry_address)}
                 {@const reviewGeneration = generationResults.get(reviewItem.func.entry_address)}
                 {@const reviewArbitration = arbitrationResults.get(reviewItem.func.entry_address)}
+                {@const reviewSemanticFallback = semanticFallbackResults.get(reviewItem.func.entry_address)}
                 <section class="automatic-review-evidence-panel">
                   <header><div><small>Fonction à départager</small><h3>{reviewItem.func.name}</h3><code>{reviewItem.func.entry_address}</code></div><span class={`review-category-badge ${reviewItem.category}`}>{reviewItem.category === "ambiguous" ? "Ambiguë" : reviewItem.category === "insufficient" ? "Preuve faible" : "Sans piste"}</span></header>
                   <div class="automatic-review-primary-reason">
@@ -6374,9 +6783,50 @@ interface ApplyRenamesResult {
                   </div>
                   <div class="automatic-candidate-stack">
                     {#if reviewFidCandidates.length > 0}<h4>FunctionID</h4>{#each reviewFidCandidates.slice(0, 5) as candidate}<article><strong>{displayCandidateName(candidate.name)}</strong><span>score {candidate.overall_score.toFixed(1)}</span><small>{candidate.library_family} {candidate.library_version} · {candidate.match_mode}</small></article>{/each}{/if}
-                    {#if reviewBsimCandidates.length > 0}<h4>BSim</h4>{#each reviewBsimCandidates.slice(0, 5) as candidate}<article><strong>{displayCandidateName(candidate.name)}</strong><span>{candidate.similarity.toFixed(3)}</span><small>{candidate.corpus} · significativité {candidate.significance.toFixed(1)}</small></article>{/each}{/if}
-                    {#if reviewGeneration?.suggested_name}<h4>Analyse IA</h4><article class="generation"><strong>{reviewGeneration.suggested_name}</strong><span>{reviewGeneration.confidence}%</span><small>{reviewGeneration.reasoning}</small></article>{/if}
+                    {#if reviewBsimCandidates.length > 0}
+                      {@const reviewBsimFamilies = bsimCandidateFamilies(reviewBsimCandidates)}
+                      <h4>BSim · {reviewBsimFamilies.length} famille(s), {reviewBsimCandidates.length} symbole(s) brut(s)</h4>
+                      {#each reviewBsimFamilies.slice(0, 5) as family}
+                        <article>
+                          <strong>{family.label}</strong><span>{family.representative.similarity.toFixed(3)}</span>
+                          <small>{family.representative.corpus} · significativité {family.representative.significance.toFixed(1)} · {family.variants.length} variante(s)</small>
+                          {#if family.variants.length > 1}
+                            <details class="bsim-family-details"><summary>Voir les symboles bruts</summary><ul>{#each family.variants as variant}<li><code>{variant.name}</code> · {variant.executable}</li>{/each}</ul></details>
+                          {/if}
+                        </article>
+                      {/each}
+                    {/if}
+                    {#if reviewGeneration?.suggested_name}
+                      <h4>Analyse IA</h4>
+                      <article class="generation">
+                        <strong>{reviewGeneration.suggested_name}</strong><span>{reviewGeneration.confidence}%</span><small>{reviewGeneration.reasoning}</small>
+                        {#if reviewGeneration.calibration_breakdowns.length > 0}
+                          <details class="calibration-breakdown">
+                            <summary>Voir la calibration</summary>
+                            {#each reviewGeneration.calibration_breakdowns as breakdown}
+                              <section>
+                                <header><strong>{breakdown.provider_label ?? "Fournisseur inconnu"}</strong><code>{breakdown.formula}</code></header>
+                                <dl>
+                                  <div><dt>Confiance brute</dt><dd>{breakdown.raw_agent_confidence}%</dd></div>
+                                  <div><dt>Score de preuve</dt><dd>{breakdown.evidence_score}%</dd></div>
+                                  <div><dt>Score actuel</dt><dd>{breakdown.final_score}%</dd></div>
+                                  <div><dt>Couverture</dt><dd>{breakdown.covered_tokens.length}/{breakdown.name_tokens.length} mots</dd></div>
+                                  <div><dt>Sources indépendantes</dt><dd>{breakdown.independent_source_groups}</dd></div>
+                                  <div><dt>Vérificateur</dt><dd>{verifierVerdictLabel(breakdown.verifier_verdict)} · {breakdown.verifier_confidence === null ? "—" : `${breakdown.verifier_confidence}%`}</dd></div>
+                                </dl>
+                                <p><b>Preuve la plus forte :</b> {evidenceStrengthLabel(breakdown.strongest_evidence)}</p>
+                                <p><b>Tier déterministe :</b> {breakdown.verification_tier} · <b>Mots couverts :</b> {breakdown.covered_tokens.length > 0 ? breakdown.covered_tokens.join(", ") : "aucun"} · <b>Non couverts :</b> {breakdown.unsupported_tokens.length > 0 ? breakdown.unsupported_tokens.join(", ") : "aucun"}</p>
+                                <p><b>Primary :</b> {breakdown.primary_categories.length > 0 ? breakdown.primary_categories.map(evidenceCategoryLabel).join(", ") : "aucune"}</p>
+                                <p><b>Secondary :</b> {breakdown.secondary_categories.length > 0 ? breakdown.secondary_categories.map(evidenceCategoryLabel).join(", ") : "aucune"}</p>
+                                <p><b>Contradictions :</b> {breakdown.deterministic_contradictions.length > 0 ? breakdown.deterministic_contradictions.join(", ") : "aucune"}{breakdown.verifier_disagreement ? " · désaccord explicite du vérificateur" : ""}</p>
+                              </section>
+                            {/each}
+                          </details>
+                        {/if}
+                      </article>
+                    {/if}
                     {#if reviewArbitration && (reviewArbitration.reasoning || reviewArbitration.evidence.length > 0)}<h4>Arbitrage</h4><article class="arbitration"><strong>{reviewArbitration.chosen_name ?? "Abstention de l'agent"}</strong><span>{reviewArbitration.confidence}%</span><small>{reviewArbitration.reasoning}</small>{#if reviewArbitration.evidence.length > 0}<ul>{#each reviewArbitration.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}</article>{/if}
+                    {#if reviewSemanticFallback?.suggested_name}<h4>Fallback sémantique · manuel uniquement</h4><article class="semantic-fallback"><strong>{reviewSemanticFallback.suggested_name}</strong><span>{reviewSemanticFallback.confidence}%</span><small>{reviewSemanticFallback.reasoning}</small>{#if reviewSemanticFallback.evidence.length > 0}<ul>{#each reviewSemanticFallback.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}<small>Hypothèse ouverte — vérification manuelle requise, jamais incluse automatiquement.</small></article>{/if}
                     {#if reviewFidCandidates.length === 0 && reviewBsimCandidates.length === 0 && !reviewGeneration?.suggested_name}<div class="automatic-review-empty">Aucun candidat nommé. Le pseudocode reste disponible pour une analyse manuelle.</div>{/if}
                   </div>
                   <footer><button type="button" onclick={() => reviewIdentificationFunction(reviewItem.func.entry_address)}>Passer en validation manuelle</button></footer>
@@ -6552,6 +7002,7 @@ interface ApplyRenamesResult {
 
                     {#if selectedTiedCandidates.length > 1}
                       {@const currentResult = arbitrationResults.get(selectedFunction.entry_address)}
+                      {@const currentSemanticFallback = semanticFallbackResults.get(selectedFunction.entry_address)}
                       {@const currentError = arbitrationErrors.get(selectedFunction.entry_address)}
                       {@const isRunning = arbitratingAddresses.has(selectedFunction.entry_address)}
                       {@const tiedFromBsim = selectedTiedCandidates[0]?.source_label.startsWith("BSim")}
@@ -6587,6 +7038,16 @@ interface ApplyRenamesResult {
                           {:else}
                             <p class="arbitration-status">Aucun fournisseur IA activé — configure-le dans Réglages pour que l'arbitrage se fasse automatiquement, ou lance-le manuellement.</p>
                             <button type="button" class="secondary-button" onclick={requestArbitration}>Demander à l'agent d'arbitrage</button>
+                          {/if}
+                          {#if currentSemanticFallback?.suggested_name}
+                            {@const fallbackSafeName = normalizedAutomaticSymbolName(currentSemanticFallback.suggested_name) ?? currentSemanticFallback.suggested_name}
+                            <div class="arbitration-result semantic-fallback-result">
+                              <strong>{fallbackSafeName} — hypothèse sémantique — vérification manuelle requise</strong>
+                              <p>{currentSemanticFallback.reasoning}</p>
+                              {#if currentSemanticFallback.evidence.length > 0}<ul>{#each currentSemanticFallback.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}
+                              <small>Confiance : {currentSemanticFallback.confidence}% · {currentSemanticFallback.provider_label} · jamais appliqué automatiquement</small>
+                              <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(fallbackSafeName)}>Préparer ce nom pour vérification</button>
+                            </div>
                           {/if}
                         </div>
                       </div>
@@ -6634,26 +7095,26 @@ interface ApplyRenamesResult {
 
                     {#if selectedBsimResult?.status === "available" && selectedBsimResult.matches.length > 0}
                       {@const mergedBsimCandidates = uniqueBsimCandidates(selectedBsimResult.matches)}
+                      {@const bsimFamilies = bsimCandidateFamilies(mergedBsimCandidates)}
                       <div class="evidence-source-group">
-                        <h5>BSim</h5>
-                        {#each mergedBsimCandidates as candidate}
-                          {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "bsim")}
-                          {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
-                          <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
-                            <span>
-                              <strong>{candidate.name}</strong>
-                              <small>Nom propre proposé : {proposedName}</small>
-                              <small>
-                                {candidate.corpus}
-                                {#if candidate.matchingExecutables.length > 1}
-                                  · confirmé par {candidate.matchingExecutables.length} bibliothèques ({candidate.matchingExecutables.join(", ")})
-                                {:else}
-                                  · {candidate.executable}
-                                {/if}
-                              </small>
-                            </span>
-                            <span><code>{candidate.similarity.toFixed(3)}</code><small>significativité {candidate.significance.toFixed(1)}</small></span>
-                          </button>
+                        <h5>BSim <span>{bsimFamilies.length} famille(s) lisible(s) · {mergedBsimCandidates.length} symbole(s) brut(s)</span></h5>
+                        {#each bsimFamilies as family}
+                          <details class="bsim-family" open={family.variants.length === 1}>
+                            <summary>
+                              <span><strong>{family.label}</strong><small>{family.variants.length} variante(s) · {family.representative.corpus}</small></span>
+                              <span><code>{family.representative.similarity.toFixed(3)}</code><small>significativité {family.representative.significance.toFixed(1)}</small></span>
+                            </summary>
+                            <div class="bsim-family-variants">
+                              {#each family.variants as candidate}
+                                {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "bsim")}
+                                {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
+                                <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
+                                  <span><strong>{candidate.name}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.matchingExecutables.join(", ")}</small></span>
+                                  <span><code>{candidate.similarity.toFixed(3)}</code><small>{candidate.significance.toFixed(1)}</small></span>
+                                </button>
+                              {/each}
+                            </div>
+                          </details>
                         {/each}
                       </div>
                     {/if}
@@ -6686,6 +7147,29 @@ interface ApplyRenamesResult {
                                 <p>{currentResult.reasoning}</p>
                                 {#if currentResult.evidence.length > 0}<ul>{#each currentResult.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}
                                 <small>Confiance : {currentResult.confidence}% · Agent(s) : {currentResult.provider_label}</small>
+                                {#if currentResult.calibration_breakdowns.length > 0}
+                                  <details class="calibration-breakdown">
+                                    <summary>Détail de la calibration ({currentResult.calibration_breakdowns.length})</summary>
+                                    {#each currentResult.calibration_breakdowns as breakdown}
+                                      <section>
+                                        <header><strong>{breakdown.provider_label ?? "Fournisseur inconnu"}</strong><code>{breakdown.formula}</code></header>
+                                        <dl>
+                                          <div><dt>Confiance brute</dt><dd>{breakdown.raw_agent_confidence}%</dd></div>
+                                          <div><dt>Score de preuve</dt><dd>{breakdown.evidence_score}%</dd></div>
+                                          <div><dt>Score actuel</dt><dd>{breakdown.final_score}%</dd></div>
+                                          <div><dt>Couverture</dt><dd>{breakdown.covered_tokens.length}/{breakdown.name_tokens.length} mots</dd></div>
+                                          <div><dt>Sources indépendantes</dt><dd>{breakdown.independent_source_groups}</dd></div>
+                                          <div><dt>Vérificateur</dt><dd>{verifierVerdictLabel(breakdown.verifier_verdict)} · {breakdown.verifier_confidence === null ? "—" : `${breakdown.verifier_confidence}%`}</dd></div>
+                                        </dl>
+                                        <p><b>Preuve la plus forte :</b> {evidenceStrengthLabel(breakdown.strongest_evidence)}</p>
+                                        <p><b>Tier déterministe :</b> {breakdown.verification_tier} · <b>Mots couverts :</b> {breakdown.covered_tokens.length > 0 ? breakdown.covered_tokens.join(", ") : "aucun"} · <b>Non couverts :</b> {breakdown.unsupported_tokens.length > 0 ? breakdown.unsupported_tokens.join(", ") : "aucun"}</p>
+                                        <p><b>Primary :</b> {breakdown.primary_categories.length > 0 ? breakdown.primary_categories.map(evidenceCategoryLabel).join(", ") : "aucune"}</p>
+                                        <p><b>Secondary :</b> {breakdown.secondary_categories.length > 0 ? breakdown.secondary_categories.map(evidenceCategoryLabel).join(", ") : "aucune"}</p>
+                                        <p><b>Contradictions :</b> {breakdown.deterministic_contradictions.length > 0 ? breakdown.deterministic_contradictions.join(", ") : "aucune"}{breakdown.verifier_disagreement ? " · désaccord explicite du vérificateur" : ""}</p>
+                                      </section>
+                                    {/each}
+                                  </details>
+                                {/if}
                               </div>
                             {:else if currentError}
                               <p class="settings-inline-error" role="alert">{currentError}</p>
@@ -6801,7 +7285,7 @@ interface ApplyRenamesResult {
                       class:active={func.entry_address === selectedFunctionAddress}
                       onclick={() => openInBrowser(func.entry_address)}
                     >
-                      <span>{func.name}</span>
+                      <span class="browser-symbol-name">{func.name}<small>{func.is_external ? "Importé · code externe" : func.is_thunk ? "Relais local" : "Fonction locale"}</small></span>
                       <code>{func.entry_address}</code>
                     </button>
                   </li>
@@ -6851,12 +7335,29 @@ interface ApplyRenamesResult {
               {#if !selectedFunction}
                 <p>Sélectionne une fonction dans la liste.</p>
               {:else if selectedFunction.is_external}
-                <p>Fonction externe — pas de désassemblage local disponible.</p>
+                <p>Fonction importée : son implémentation se trouve dans une bibliothèque externe, pas dans ce binaire.</p>
+                {@const relay = localImportRelay(selectedFunction.entry_address)}
+                {#if relay}
+                  <button type="button" onclick={() => openInBrowser(relay)}>Voir le relais local →</button>
+                {/if}
               {:else if isDisassemblingSelected}
                 <p>Désassemblage en cours…</p>
               {:else if selectedDisassemblyError}
                 <p class="error" role="alert">{selectedDisassemblyError}</p>
+                <button type="button" onclick={() => requestBrowserFunction(selectedFunction.entry_address)}>Réessayer le chargement</button>
+              {:else if selectedDisassembly && selectedDisassembly.instructions.length === 0}
+                {#if selectedFunction.is_thunk}
+                  <p>Entrée de liaison sans instructions locales : elle désigne la cible d’un import, pas un corps de fonction.</p>
+                  {#if selectedFunction.thunk_target_address}
+                    <button type="button" onclick={() => openInBrowser(selectedFunction.thunk_target_address)}>Voir la cible →</button>
+                  {/if}
+                {:else}
+                  <p>Ghidra n’a identifié aucune instruction dans le corps de cette fonction.</p>
+                {/if}
               {:else if selectedDisassembly}
+                {#if selectedFunction.is_thunk}
+                  <p class="browser-relay-note">Relais local : ces instructions redirigent vers une autre fonction ; ce n’est pas son implémentation complète.</p>
+                {/if}
                 <div class="code-browser-listing-scroll">
                   <table class="disasm-table">
                     <tbody>
@@ -6964,10 +7465,13 @@ interface ApplyRenamesResult {
 
             {#if !selectedFunction}
               <p>—</p>
+            {:else if selectedFunction.is_external}
+              <p>Pas de pseudocode local : le code de cette fonction appartient à une bibliothèque externe.</p>
             {:else if isDecompilingSelected}
               <p>Décompilation en cours…</p>
             {:else if selectedDecompileError}
               <p class="error" role="alert">{selectedDecompileError}</p>
+              <button type="button" onclick={() => requestBrowserFunction(selectedFunction.entry_address)}>Réessayer le chargement</button>
             {:else if selectedDecompiledCode}
               <pre><code>{selectedDecompiledCode}</code></pre>
             {:else}
@@ -7535,35 +8039,26 @@ interface ApplyRenamesResult {
                       <p>No sufficiently similar function was found in the seed corpus.</p>
                     {:else}
                       {@const mergedBsimCandidates = uniqueBsimCandidates(selectedBsimResult.matches)}
+                      {@const bsimFamilies = bsimCandidateFamilies(mergedBsimCandidates)}
+                      <p class="bsim-family-summary">{bsimFamilies.length} semantic family/families from {mergedBsimCandidates.length} raw symbol(s). Raw symbols remain available below.</p>
                       <ul>
-                        {#each mergedBsimCandidates as candidate}
-                          {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction?.entry_address && choice.source === "bsim")}
-                          {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : candidate.name}
-                          <li
-                            class="rename-suggestion-item"
-                            class:selected={functionRenameDraft === proposedName}
-                          >
-                            <button
-                              type="button"
-                              class="rename-suggestion"
-                              title={`Use ${candidate.name} as the proposed Ghidra name`}
-                              onclick={() => selectFunctionRenameSuggestion(proposedName)}
-                            >
-                              <span>
-                                {candidate.name}
-                                <em>
-                                  {#if candidate.matchingExecutables.length > 1}
-                                    ({candidate.corpus} · confirmed by {candidate.matchingExecutables.length} libraries: {candidate.matchingExecutables.join(", ")})
-                                  {:else}
-                                    ({candidate.corpus} · {candidate.executable})
-                                  {/if}
-                                </em>
-                              </span>
-                              <code>
-                                similarity {candidate.similarity.toFixed(3)} · significance
-                                {candidate.significance.toFixed(1)}
-                              </code>
-                            </button>
+                        {#each bsimFamilies as family}
+                          <li class="bsim-browser-family">
+                            <details open={family.variants.length === 1}>
+                              <summary><strong>{family.label}</strong><span>{family.variants.length} variant(s) · similarity {family.representative.similarity.toFixed(3)}</span></summary>
+                              <ul>
+                                {#each family.variants as candidate}
+                                  {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction?.entry_address && choice.source === "bsim")}
+                                  {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : candidate.name}
+                                  <li class="rename-suggestion-item" class:selected={functionRenameDraft === proposedName}>
+                                    <button type="button" class="rename-suggestion" title={`Use ${candidate.name} as the proposed Ghidra name`} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
+                                      <span>{candidate.name}<em>({candidate.corpus} · {candidate.matchingExecutables.join(", ")})</em></span>
+                                      <code>similarity {candidate.similarity.toFixed(3)} · significance {candidate.significance.toFixed(1)}</code>
+                                    </button>
+                                  </li>
+                                {/each}
+                              </ul>
+                            </details>
                           </li>
                         {/each}
                       </ul>
@@ -7719,7 +8214,7 @@ interface ApplyRenamesResult {
   }
 
   button:disabled {
-    cursor: wait;
+    cursor: not-allowed;
     opacity: 0.65;
   }
 
@@ -8461,6 +8956,12 @@ interface ApplyRenamesResult {
     background-color: #164e63;
   }
 
+  .bsim-family-summary { margin: 0 0 0.55rem; font-size: 0.72rem; }
+  .function-section li.bsim-browser-family { display: block; padding: 0.55rem; }
+  .bsim-browser-family summary { display: flex; justify-content: space-between; gap: 0.75rem; color: #dbeafe; cursor: pointer; }
+  .bsim-browser-family summary span { color: #94a3b8; font-size: 0.68rem; }
+  .bsim-browser-family details > ul { margin-top: 0.5rem; }
+
   .rename-suggestion {
     display: flex;
     width: 100%;
@@ -9173,6 +9674,19 @@ interface ApplyRenamesResult {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .code-browser-symbol-list .browser-symbol-name small {
+    display: block;
+    color: #93a4bd;
+    font-size: 0.64rem;
+    font-weight: 400;
+    margin-top: 0.15rem;
+  }
+
+  .browser-relay-note {
+    color: #93a4bd;
+    font-size: 0.78rem;
   }
 
   .code-browser-symbol-list code {
@@ -10712,6 +11226,7 @@ interface ApplyRenamesResult {
   .automatic-rename-panel span { color: #91a0b8; font-size: 0.64rem; }
   .automatic-rename-panel > button { flex: 0 0 auto; padding: 0.5rem 0.7rem; background: #6d28d9; color: white; font-size: 0.66rem; }
   .automatic-rename-panel > button:hover:not(:disabled) { background: #7c3aed; }
+  .automatic-rename-panel > button:disabled { border-color: #344258; background: #202b3c; color: #8292a9; box-shadow: none; opacity: 1; }
   .automatic-rename-panel .prudence-options button:hover:not(.active) { background: #17263d; color: #d7e1ef; }
   .identification-verification-resume {
     margin: 0 0.8rem 0.65rem;
@@ -10795,7 +11310,15 @@ interface ApplyRenamesResult {
   .automatic-batch-workspace td:nth-child(2),
   .automatic-batch-workspace td:nth-child(3),
   .automatic-batch-workspace td:nth-child(4),
-  .automatic-batch-workspace td:nth-child(5) { display: grid; gap: 0.1rem; }
+  .automatic-batch-workspace td:nth-child(5) { white-space: normal; }
+  .automatic-batch-workspace td:nth-child(2) > *,
+  .automatic-batch-workspace td:nth-child(3) > *,
+  .automatic-batch-workspace td:nth-child(4) > *,
+  .automatic-batch-workspace td:nth-child(5) > * { display: block; }
+  .automatic-batch-workspace td:nth-child(2) > * + *,
+  .automatic-batch-workspace td:nth-child(3) > * + *,
+  .automatic-batch-workspace td:nth-child(4) > * + *,
+  .automatic-batch-workspace td:nth-child(5) > * + * { margin-top: 0.1rem; }
   .automatic-batch-workspace td code { color: #78b9ee; font-size: 0.54rem; }
   .automatic-batch-workspace td small { color: #8395ae; font-size: 0.54rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .automatic-batch-workspace td:nth-child(3) strong { color: #86efac; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -10874,7 +11397,23 @@ interface ApplyRenamesResult {
   .automatic-candidate-stack article small { grid-column: 1 / -1; color: #8292ad; font-size: 0.53rem; line-height: 1.4; }
   .automatic-candidate-stack article.generation { border-color: #6d4d19; }
   .automatic-candidate-stack article.arbitration { border-color: #5b4a8d; }
+  .automatic-candidate-stack article.semantic-fallback { border-color: #b7791f; background: #251d12; }
+  .automatic-candidate-stack article.semantic-fallback strong { color: #fde68a; }
   .automatic-candidate-stack article ul { grid-column: 1 / -1; margin: 0.2rem 0 0; padding-left: 1rem; color: #9fb0c9; font-size: 0.53rem; }
+  .calibration-breakdown { grid-column: 1 / -1; margin-top: 0.45rem; padding-top: 0.4rem; border-top: 1px solid #34445d; }
+  .calibration-breakdown summary { color: #93c5fd; cursor: pointer; font-size: 0.56rem; font-weight: 700; }
+  .calibration-breakdown section { margin-top: 0.45rem; padding: 0.5rem; border: 1px solid #31445f; border-radius: 6px; background: #0b1728; }
+  .calibration-breakdown section > header { display: flex; justify-content: space-between; gap: 0.6rem; margin-bottom: 0.4rem; }
+  .calibration-breakdown section > header strong { color: #dbeafe; }
+  .calibration-breakdown section > header code { color: #8292ad; font-size: 0.5rem; }
+  .calibration-breakdown dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 0.35rem; margin: 0; }
+  .calibration-breakdown dl div { padding: 0.35rem; border-radius: 4px; background: #111f33; }
+  .calibration-breakdown dt { color: #8292ad; font-size: 0.48rem; }
+  .calibration-breakdown dd { margin: 0.12rem 0 0; color: #e8eef7; font-size: 0.58rem; font-weight: 700; }
+  .calibration-breakdown section > p { margin: 0.3rem 0 0; color: #a9b8ce; font-size: 0.51rem; line-height: 1.35; }
+  .calibration-breakdown section > p b { color: #c7d2fe; }
+  .semantic-fallback-result { margin-top: 0.65rem; border-color: #b7791f !important; background: #251d12 !important; }
+  .semantic-fallback-result > strong { color: #fde68a; }
   .automatic-review-evidence-panel > footer { padding: 0.62rem; border-top: 1px solid #29374e; }
   .automatic-review-evidence-panel > footer button { width: 100%; background: #5b21b6; color: #fff; font-size: 0.61rem; }
 
@@ -11103,6 +11642,14 @@ interface ApplyRenamesResult {
   .evidence-source-group button > span { display: grid; min-width: 0; gap: 0.12rem; }
   .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
   .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+  .bsim-family { border: 1px solid #2d405b; border-radius: 7px; background: #0d192a; }
+  .bsim-family > summary { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; padding: 0.55rem; color: #dbeafe; cursor: pointer; }
+  .bsim-family > summary > span { display: grid; gap: 0.12rem; }
+  .bsim-family > summary > span:last-child { flex: 0 0 auto; text-align: right; }
+  .bsim-family-variants { display: grid; gap: 0.3rem; padding: 0 0.45rem 0.45rem; }
+  .bsim-family-details { grid-column: 1 / -1; margin-top: 0.2rem; color: #93c5fd; }
+  .bsim-family-details summary { cursor: pointer; font-size: 0.52rem; }
+  .bsim-family-details ul { margin-top: 0.25rem !important; }
   .rtti-evidence-group h5 { color: #86efac; }
   .arbitration-evidence-group h5 { color: #c4b5fd; }
   .generation-evidence-group h5 { color: #fbbf24; }

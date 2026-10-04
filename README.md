@@ -1,123 +1,92 @@
 # Reverse Assistant
 
-Reverse Assistant is an open-source, local-first reverse engineering assistant built with Rust, Tauri, SvelteKit, and TypeScript.
+A local-first reverse-engineering desktop application built with Rust, Tauri 2,
+Svelte 5 and TypeScript, connecting Ghidra with function identification and
+optional AI-assisted naming.
 
-The project is designed to support reverse engineering workflows without requiring binaries or analysis data to be uploaded to a public server.
+## Status and features
 
-## Project principles
+**Early alpha, primarily tested on Windows.** Only analyze software you are
+authorized to inspect. Naming suggestions are not ground truth.
 
-- Local-first processing
-- Open-source development
-- Rust-based analysis engine
-- AI is optional and provider-agnostic
-- The application must remain usable without AI
-- Structured integration with Ghidra
-- Minimal and controlled token usage
-- Separation between the analysis engine and the user interface
+- Automatic Ghidra Headless analysis and import of JSON exports (schemas v1/v2).
+- Function explorer, assembly, pseudocode, strings, types, imports/exports,
+  call graphs, comparison and reporting tools.
+- Symbols, RTTI, FunctionID (FID) and BSim reference matches before AI naming.
+- Arbitration of ambiguous matches and manual review of unconfirmed hypotheses.
+- Confirmed renaming in the local Ghidra project, saved projects and reopening.
+- Combined assembly/pseudocode loading in the Code Browser, without BSim work
+  just to display code, plus local caching.
 
-## Current status
+FID uses reference fingerprints; BSim compares function features with a reference
+database. Both have limited coverage. AI confidence is a signal, not a calibrated
+probability, and the AI layer does not replace evidence.
 
-Phases 1 to 6 — completed.
+## Privacy
 
-The current application provides:
+Analysis runs locally. With local Ollama, AI prompts can also remain local.
+**A configured remote provider receives analysis context, including pseudocode
+and strings.** Review its policy before using confidential binaries.
+See [SECURITY.md](SECURITY.md) for data boundaries and publication precautions.
 
-- A working Tauri desktop application (SvelteKit, TypeScript, Rust)
-- A versioned JSON contract (schema v1) between Ghidra and the Rust engine
-- A Ghidra extension (`ReverseAssistantExporter`) that exports program and function metadata as JSON
-- A Rust service that imports, validates, and summarizes a Ghidra export
-- A native file dialog and a function explorer showing parameters, calls, referenced strings, and decompiled code
+## Development setup (Windows)
 
-The Ghidra export/import step is still manual: the user runs the extension inside Ghidra, then selects the resulting JSON file in Reverse Assistant. Automating this end-to-end (Ghidra Headless driven by Rust), connecting BSim for known-function recognition, and adding an AI naming agent for the remaining functions are the next phases — see the roadmap below.
+Prerequisites:
 
-## Architecture
+- Node.js/npm and stable Rust with the MSVC toolchain.
+- Microsoft C++ Build Tools, Windows SDK and WebView2.
+- Ghidra 12.1.2 and Java 21 for the current integration. The setup assistant can
+  help configure these tools and the Reverse Assistant extension.
+- Optional Ollama with a downloaded model, or an OpenAI-compatible AI provider.
 
-```text
-SvelteKit / TypeScript interface
-              |
-              | Tauri commands
-              v
-        Tauri Rust adapter
-              |
-              v
-   Independent Rust analysis core
-              |
-              v
-       Ghidra JSON exchange
-              |
-              v
- Optional AI provider adapters
+From the repository root:
 
-The long-term objective is to keep the Rust analysis engine independent from Tauri and from any specific AI provider.
+```powershell
+npm.cmd ci
+npm.cmd run tauri dev
+```
 
-Technology stack
-Rust
-Tauri 2
-SvelteKit
-Svelte 5
-TypeScript
-Vite
-npm
-Serde and serde_json
-Prerequisites
+Configure Ghidra through the setup assistant. Manual extension deployment is
+available in [scripts/deploy-ghidra-extension.ps1](scripts/deploy-ghidra-extension.ps1).
 
-For Windows development:
+### BSim corpus and installers
 
-Git
-Node.js and npm
-Rust with the stable MSVC toolchain
-Microsoft C++ Build Tools
-Windows SDK
-Microsoft Edge WebView2
-Visual Studio Code, recommended
-Installation
+Downloaded sources, reference binaries and generated databases are not committed.
+Build scripts, pinned hashes and license metadata are documented in
+[bsim-corpus/README.md](bsim-corpus/README.md).
 
-Clone the repository and enter the project directory:
+The Tauri bundle currently expects `bsim-corpus/build/reverse-assistant-seed.mv.db`.
+Generate it with the documented pipeline before `npm.cmd run tauri build`.
+A clean checkout does not include this generated resource. Verify third-party
+redistribution rights before publishing corpus assets or reference binaries.
 
-git clone <repository-url>
-cd reverse-assistant
+## Checks
 
-Install the frontend dependencies:
+```powershell
+npm.cmd run check
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+.\scripts\audit-publication.ps1 -IncludeHistory
+```
 
-npm install
+Close a running development app before rebuilding its executable on Windows.
+Real Ghidra checks are documented in [tests/ghidra/README.md](tests/ghidra/README.md).
+The publication scanner is a read-only heuristic, not a security certification.
 
-Launch the desktop application in development mode:
+## Known limitations
 
-npm run tauri dev
-Quality checks
+- Cold code display starts Ghidra and can take several seconds; cached loads
+  are much faster.
+- Imported functions have no local implementation. Only their local relay can
+  be displayed when present.
+- Corpus coverage is limited; similar matches can remain ambiguous.
+- Local models can abstain or return malformed/truncated responses. Review
+  diagnostics instead of assuming every function will receive a name.
+- Provider keys are stored in local app-data settings, not an encrypted vault.
+  Never share those settings.
 
-Check the Svelte and TypeScript code:
+## License
 
-npm run check
-
-Check the Rust code:
-
-cargo check --manifest-path src-tauri/Cargo.toml
-
-Audit npm dependencies:
-
-npm audit
-Roadmap
-Phase 1: Tauri application skeleton and TypeScript-to-Rust communication — completed
-Phase 2: Stable JSON contract — completed
-Phase 3: Ghidra export integration — completed
-Phase 4: Ghidra export import, validation, and summary in Rust — completed
-Phase 5: Tauri import command and import interface — completed
-Phase 6: Native file dialog and function explorer — completed
-Phase 7: Ghidra Headless automation driven by Rust (no manual export/import step)
-Phase 8: BSim integration for known-function recognition
-Phase 9: AI naming agent and validated rename back into Ghidra
-Security
-
-Reverse Assistant is intended to process reverse engineering data locally.
-
-The project follows these principles:
-
-No mandatory upload to a public server
-No mandatory AI provider
-Explicit Tauri capabilities
-Minimal plugin usage
-Audited npm dependencies
-Locked dependency versions
-No secrets committed to Git
-
-Security controls will be expanded as the application gains file access, Ghidra integration, and optional external-provider communication.
+Application source: [MIT](LICENSE). Tools, models, reference libraries and corpus
+artifacts retain their own licenses.

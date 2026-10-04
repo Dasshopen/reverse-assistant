@@ -33,7 +33,13 @@ pub use crate::services::naming_arbitration::ArbitrationContext;
 /// never went through the contradictory verifier as a separate, persisted
 /// signal, so it must be treated as if the verifier had said `unsupported`
 /// (i.e. manual review only) regardless of its `verification_tier`.
-pub const NAMING_GENERATION_VERSION: u32 = 11;
+/// Bumped to 13 because deterministic verification now uses a weighted,
+/// domain-independent evidence taxonomy (identity, API, behavior, literal).
+/// Bumped to 14 to persist `CalibrationBreakdown`. This is observability-only:
+/// the production scoring formula and automatic gates are unchanged.
+/// Bumped to 15 so names that mix a real primary role with words supported
+/// only by secondary bookkeeping are recalibrated for manual review.
+pub const NAMING_GENERATION_VERSION: u32 = 15;
 
 fn default_analysis_pass() -> u8 {
     1
@@ -198,6 +204,36 @@ pub enum NameVerificationTier {
     Strong,
 }
 
+/// Complete, replayable inputs and outputs of the current confidence
+/// calibration. Observability only: no automatic gate reads this structure.
+/// Keeping the raw inputs makes it possible to compare candidate formulas
+/// offline without calling the model again or changing production scoring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalibrationBreakdown {
+    #[serde(default)]
+    pub provider_label: Option<String>,
+    pub formula: String,
+    pub raw_agent_confidence: u8,
+    #[serde(default)]
+    pub verifier_confidence: Option<u8>,
+    pub evidence_score: u8,
+    pub final_score: u8,
+    #[serde(default)]
+    pub strongest_evidence: Option<EvidenceStrength>,
+    pub name_tokens: Vec<String>,
+    pub covered_tokens: Vec<String>,
+    pub unsupported_tokens: Vec<String>,
+    pub independent_source_groups: u8,
+    pub primary_categories: Vec<EvidenceCategory>,
+    pub secondary_categories: Vec<EvidenceCategory>,
+    pub secondary_only: bool,
+    pub deterministic_contradictions: Vec<String>,
+    #[serde(default)]
+    pub verifier_verdict: Option<VerificationVerdict>,
+    pub verifier_disagreement: bool,
+    pub verification_tier: NameVerificationTier,
+}
+
 /// A generative naming answer, persisted alongside the project so it
 /// survives an app restart -- same rationale as
 /// naming_arbitration::StoredArbitrationOutcome.
@@ -234,6 +270,9 @@ pub struct StoredGenerationOutcome {
     /// `Some(VerificationVerdict::Unsupported)`, never as an implicit pass.
     #[serde(default)]
     pub verifier_verdict: Option<VerificationVerdict>,
+    /// Empty for projects produced before protocol v14.
+    #[serde(default)]
+    pub calibration_breakdowns: Vec<CalibrationBreakdown>,
 }
 
 /// A bounded, durable record of an AI naming attempt that did not produce a
@@ -273,6 +312,7 @@ pub struct GenerationResult {
     /// `StoredGenerationOutcome` for why gating must treat `None` as
     /// `Unsupported`, never as a pass.
     pub verifier_verdict: Option<VerificationVerdict>,
+    pub calibration_breakdown: Option<CalibrationBreakdown>,
 }
 
 /// Small local models regularly report near-certainty for a plausible-sounding
@@ -581,6 +621,272 @@ pub enum VerificationEvidenceKind {
     Callsite,
 }
 
+/// Internal semantic taxonomy used to rank real evidence. This is deliberately
+/// independent from `VerificationEvidenceKind`, which is the small wire format
+/// understood by local models. Adding a new domain therefore does not require
+/// changing persisted JSON or trusting a model-supplied category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceCategory {
+    TypeIdentity,
+    Lifecycle,
+    Memory,
+    FileIo,
+    Network,
+    Synchronization,
+    ErrorException,
+    CryptoEncoding,
+    ProcessThread,
+    WindowsSystem,
+    ControlFlow,
+    CallGraph,
+    Literal,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceStrength {
+    Literal = 1,
+    BehavioralPattern = 2,
+    KnownApi = 3,
+    ExplicitIdentity = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceRole {
+    Primary,
+    Secondary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvidenceEntry {
+    id: String,
+    kind: VerificationEvidenceKind,
+    value: String,
+    category: EvidenceCategory,
+    strength: EvidenceStrength,
+    role: EvidenceRole,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ApiEvidenceRule {
+    category: EvidenceCategory,
+    role: EvidenceRole,
+    label: &'static str,
+    needles: &'static [&'static str],
+}
+
+/// Declarative API taxonomy. Entries describe reusable semantic families; no
+/// function address or concrete C++ application type belongs here. Exact API
+/// spellings are data, not control-flow branches, so extending coverage is a
+/// table edit rather than another special-case `if`.
+const API_EVIDENCE_RULES: &[ApiEvidenceRule] = &[
+    ApiEvidenceRule {
+        category: EvidenceCategory::Lifecycle,
+        role: EvidenceRole::Secondary,
+        label: "register_exit_cleanup_callback",
+        needles: &["atexit", "_onexit", "onexit"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::Memory,
+        role: EvidenceRole::Primary,
+        label: "allocate_memory_object",
+        needles: &[
+            "malloc",
+            "calloc",
+            "realloc",
+            "heapalloc",
+            "virtualalloc",
+            "operatornew",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::Memory,
+        role: EvidenceRole::Primary,
+        label: "free_release_memory_object",
+        needles: &["free", "heapfree", "virtualfree", "operatordelete"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::Memory,
+        role: EvidenceRole::Primary,
+        label: "copy_move_initialize_memory",
+        needles: &[
+            "memcpy",
+            "memmove",
+            "memset",
+            "rtlmovememory",
+            "rtlfillmemory",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::FileIo,
+        role: EvidenceRole::Primary,
+        label: "open_create_file_stream",
+        needles: &[
+            "createfile",
+            "openfile",
+            "fopen",
+            "ifstream",
+            "ofstream",
+            "filebuf",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::FileIo,
+        role: EvidenceRole::Primary,
+        label: "read_file_stream_input",
+        needles: &["readfile", "fread", "readconsole", "istream"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::FileIo,
+        role: EvidenceRole::Primary,
+        label: "write_file_stream_output",
+        needles: &["writefile", "fwrite", "writeconsole", "ostream"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::Network,
+        role: EvidenceRole::Primary,
+        label: "create_connect_network_socket",
+        needles: &["socket", "connect", "wsaconnect", "internetconnect"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::Network,
+        role: EvidenceRole::Primary,
+        label: "send_network_socket_data",
+        needles: &["send", "wsasend", "httpsendrequest"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::Network,
+        role: EvidenceRole::Primary,
+        label: "receive_network_socket_data",
+        needles: &["recv", "wsarecv", "internetreadfile"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::Synchronization,
+        role: EvidenceRole::Primary,
+        label: "lock_unlock_synchronize_mutex_atomic",
+        needles: &[
+            "mutex",
+            "criticalsection",
+            "acrtlock",
+            "acrtunlock",
+            "interlocked",
+            "waitforsingleobject",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::ErrorException,
+        role: EvidenceRole::Primary,
+        label: "raise_throw_error_exception",
+        needles: &[
+            "throw",
+            "raiseexception",
+            "xthrow",
+            "length_error",
+            "out_of_range",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::ErrorException,
+        role: EvidenceRole::Primary,
+        label: "abort_terminate_assert_failure",
+        needles: &["abort", "terminate", "assert", "invalidparameter"],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::CryptoEncoding,
+        role: EvidenceRole::Primary,
+        label: "encrypt_decrypt_crypto_data",
+        needles: &[
+            "cryptencrypt",
+            "cryptdecrypt",
+            "bcryptencrypt",
+            "bcryptdecrypt",
+            "evp_encrypt",
+            "evp_decrypt",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::CryptoEncoding,
+        role: EvidenceRole::Primary,
+        label: "hash_digest_checksum_data",
+        needles: &[
+            "bcrypt_hash",
+            "crypt_hash",
+            "sha1",
+            "sha256",
+            "sha512",
+            "md5",
+            "crc32",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::CryptoEncoding,
+        role: EvidenceRole::Primary,
+        label: "encode_decode_convert_data",
+        needles: &[
+            "base64",
+            "multibytetowidechar",
+            "widechartomultibyte",
+            "iconv",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::ProcessThread,
+        role: EvidenceRole::Primary,
+        label: "create_manage_process",
+        needles: &[
+            "createprocess",
+            "openprocess",
+            "terminateprocess",
+            "getcurrentprocess",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::ProcessThread,
+        role: EvidenceRole::Primary,
+        label: "create_manage_thread",
+        needles: &[
+            "createthread",
+            "beginthread",
+            "openthread",
+            "getcurrentthread",
+            "tls",
+            "fls",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::WindowsSystem,
+        role: EvidenceRole::Primary,
+        label: "query_modify_windows_registry",
+        needles: &[
+            "regopenkey",
+            "regqueryvalue",
+            "regsetvalue",
+            "regcreatekey",
+            "regdelete",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::WindowsSystem,
+        role: EvidenceRole::Primary,
+        label: "create_manage_windows_service",
+        needles: &[
+            "openservice",
+            "createservice",
+            "startservice",
+            "controlservice",
+            "servicecontrolmanager",
+        ],
+    },
+    ApiEvidenceRule {
+        category: EvidenceCategory::WindowsSystem,
+        role: EvidenceRole::Primary,
+        label: "load_resolve_dynamic_library_api",
+        needles: &["loadlibrary", "getprocaddress", "getmodulehandle"],
+    },
+];
+
 /// Real local-model responses were observed capitalising this field
 /// ("Behavior", "Import") instead of the requested snake_case ("behavior",
 /// "import") -- 8 of 11 real verifier parse failures on a serpentine.exe
@@ -704,36 +1010,291 @@ fn fact_matches_claim(fact: &str, claim: &str) -> bool {
             || (claim.chars().count() >= 3 && contains_ci(fact, claim)))
 }
 
-fn evidence_catalog(
-    context: &GenerationContext,
-) -> Vec<(String, VerificationEvidenceKind, String)> {
+fn compact_semantic_text(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .replace(['_', ' ', '-', ':', '.'], "")
+}
+
+fn api_symbol_matches(value: &str, needle: &str) -> bool {
+    let head = value
+        .split(['(', '@', '[', ' '])
+        .next()
+        .unwrap_or(value)
+        .trim_matches('_');
+    let symbol = compact_semantic_text(head);
+    let needle = compact_semantic_text(needle);
+    symbol == needle || (needle.len() >= 5 && symbol.contains(&needle))
+}
+
+fn matching_api_rule(value: &str) -> Option<&'static ApiEvidenceRule> {
+    API_EVIDENCE_RULES.iter().find(|rule| {
+        rule.needles
+            .iter()
+            .any(|needle| api_symbol_matches(value, needle))
+    })
+}
+
+fn api_rule_is_observed(context: &GenerationContext, rule: &ApiEvidenceRule) -> bool {
     let facts = &context.semantic_facts;
-    let mut entries = Vec::new();
-    let mut add = |prefix: &str, kind: VerificationEvidenceKind, values: Vec<String>| {
-        entries.extend(
-            values
-                .into_iter()
-                .take(MAX_CONTEXT_ITEMS)
-                .enumerate()
-                .map(|(index, value)| (format!("{prefix}:{index}"), kind, value)),
-        );
+    if facts
+        .imported_symbols
+        .iter()
+        .map(String::as_str)
+        .chain(facts.callees.iter().map(|callee| callee.name.as_str()))
+        .any(|symbol| {
+            rule.needles
+                .iter()
+                .any(|needle| api_symbol_matches(symbol, needle))
+        })
+    {
+        return true;
+    }
+    let code = context
+        .base
+        .decompiled_code
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    rule.needles.iter().any(|needle| {
+        let needle = needle.trim_start_matches('_').to_ascii_lowercase();
+        code.contains(&format!("{needle}(")) || code.contains(&format!("_{needle}("))
+    })
+}
+
+fn normalize_explicit_type_identity(raw: &str, confirmed_by_vtable: bool) -> Option<String> {
+    let mut value = raw.trim().trim_end_matches([',', ';']).trim().to_owned();
+    let looks_explicit = confirmed_by_vtable
+        || value.contains("::")
+        || value.contains('<')
+        || value.starts_with("struct ")
+        || value.starts_with("class ")
+        || value.starts_with("enum ");
+    if !looks_explicit {
+        return None;
+    }
+    let words = value.split_whitespace().collect::<Vec<_>>();
+    if words.len() >= 2 {
+        let last = words.last().copied().unwrap_or_default();
+        let prior = words[..words.len() - 1].join(" ");
+        let last_is_variable = last.starts_with(['*', '&'])
+            || words.len() >= 3
+            || (prior.contains("::") || prior.contains('<'))
+                && !last.contains("::")
+                && !last.contains('<');
+        if last_is_variable {
+            value = prior.trim_end_matches(['*', '&', ' ']).to_owned();
+        }
+    }
+    (value.chars().count() >= 3).then_some(value)
+}
+
+fn explicit_type_identities(context: &GenerationContext) -> Vec<String> {
+    let mut identities = context.semantic_facts.rtti_class_names.clone();
+    let mut add_identity = |raw: &str, confirmed_by_vtable: bool| {
+        if let Some(value) = normalize_explicit_type_identity(raw, confirmed_by_vtable) {
+            if !identities.iter().any(|known| known == &value) {
+                identities.push(value);
+            }
+        }
     };
+    add_identity(&context.base.return_type, false);
+    for parameter in &context.base.parameters {
+        add_identity(parameter, false);
+    }
+    let Some(code) = context.base.decompiled_code.as_deref() else {
+        return identities;
+    };
+    for line in code.lines() {
+        let lower = line.to_ascii_lowercase();
+        let marker = ["::vftable", "::vtable", "`vftable'"]
+            .iter()
+            .find_map(|marker| lower.find(marker));
+        let Some(marker) = marker else { continue };
+        let before = line[..marker].rsplit('=').next().unwrap_or_default().trim();
+        let identity = before
+            .split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .trim_matches(|character: char| "&*(){};".contains(character));
+        if !semantic_memory::is_generic_function_name(identity) {
+            add_identity(identity, true);
+        }
+    }
+    identities.truncate(MAX_CONTEXT_ITEMS);
+    identities
+}
+
+fn pattern_evidence(context: &GenerationContext) -> Vec<EvidenceEntry> {
+    let code = context
+        .base
+        .decompiled_code
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let has_any = |markers: &[&str]| markers.iter().any(|marker| code.contains(marker));
+    let mut patterns = Vec::new();
+    let mut add = |condition: bool, category: EvidenceCategory, role: EvidenceRole, value: &str| {
+        if condition {
+            patterns.push(EvidenceEntry {
+                id: String::new(),
+                kind: VerificationEvidenceKind::Behavior,
+                value: value.to_owned(),
+                category,
+                strength: EvidenceStrength::BehavioralPattern,
+                role,
+            });
+        }
+    };
+    let writes_vtable = has_any(&["::vftable", "::vtable", "`vftable'"]);
+    let registers_cleanup = API_EVIDENCE_RULES
+        .iter()
+        .filter(|rule| rule.category == EvidenceCategory::Lifecycle)
+        .any(|rule| api_rule_is_observed(context, rule));
     add(
-        "behavior",
-        VerificationEvidenceKind::Behavior,
-        derived_behaviors(context),
+        writes_vtable,
+        EvidenceCategory::TypeIdentity,
+        EvidenceRole::Primary,
+        "virtual_object_type_vtable_setup",
     );
     add(
+        writes_vtable && registers_cleanup,
+        EvidenceCategory::Lifecycle,
+        EvidenceRole::Primary,
+        "static_initialize_construct_global_object_with_lifecycle_cleanup",
+    );
+    add(
+        has_any(&["for (", "while (", "do {"]),
+        EvidenceCategory::ControlFlow,
+        EvidenceRole::Secondary,
+        "iterative_loop_control_flow",
+    );
+    add(
+        has_any(&["xmm", "ymm", "zmm", "vmov", "__m128", "__m256"]),
+        EvidenceCategory::Memory,
+        EvidenceRole::Secondary,
+        "simd_vectorized_memory_or_numeric_operations",
+    );
+    add(
+        has_any(&[
+            "< (ulonglong)",
+            "> (ulonglong)",
+            "<= (ulonglong)",
+            ">= (ulonglong)",
+        ]) || (code.contains("param_") && has_any(&[" < ", " > "]) && code.contains('*')),
+        EvidenceCategory::Memory,
+        EvidenceRole::Secondary,
+        "pointer_address_range_comparison",
+    );
+    add(
+        has_any(&["swi(", "__debugbreak", "__fastfail", "trap"]),
+        EvidenceCategory::ErrorException,
+        EvidenceRole::Secondary,
+        "trap_fail_fast_error_path",
+    );
+    for (index, pattern) in patterns.iter_mut().enumerate() {
+        pattern.id = format!("pattern:{index}");
+    }
+    patterns
+}
+
+fn api_behavior_evidence(context: &GenerationContext) -> Vec<EvidenceEntry> {
+    API_EVIDENCE_RULES
+        .iter()
+        .filter(|rule| api_rule_is_observed(context, rule))
+        .enumerate()
+        .map(|(index, rule)| EvidenceEntry {
+            id: format!("api_behavior:{index}"),
+            kind: VerificationEvidenceKind::Behavior,
+            value: rule.label.to_owned(),
+            category: rule.category,
+            strength: EvidenceStrength::KnownApi,
+            role: rule.role,
+        })
+        .collect()
+}
+
+fn append_evidence_entries(
+    entries: &mut Vec<EvidenceEntry>,
+    prefix: &str,
+    kind: VerificationEvidenceKind,
+    values: Vec<String>,
+    category: EvidenceCategory,
+    strength: EvidenceStrength,
+    role: EvidenceRole,
+) {
+    entries.extend(
+        values
+            .into_iter()
+            .take(MAX_CONTEXT_ITEMS)
+            .enumerate()
+            .map(|(index, value)| EvidenceEntry {
+                id: format!("{prefix}:{index}"),
+                kind,
+                value,
+                category,
+                strength,
+                role,
+            }),
+    );
+}
+
+fn evidence_catalog(context: &GenerationContext) -> Vec<EvidenceEntry> {
+    let facts = &context.semantic_facts;
+    let mut entries = Vec::new();
+    let legacy_behaviors = derived_behaviors(context)
+        .into_iter()
+        .filter(|value| !API_EVIDENCE_RULES.iter().any(|rule| rule.label == value))
+        .collect();
+    append_evidence_entries(
+        &mut entries,
+        "behavior",
+        VerificationEvidenceKind::Behavior,
+        legacy_behaviors,
+        EvidenceCategory::Other,
+        EvidenceStrength::BehavioralPattern,
+        EvidenceRole::Primary,
+    );
+    entries.extend(api_behavior_evidence(context));
+    entries.extend(pattern_evidence(context));
+    append_evidence_entries(
+        &mut entries,
+        "type",
+        VerificationEvidenceKind::Pseudocode,
+        explicit_type_identities(context),
+        EvidenceCategory::TypeIdentity,
+        EvidenceStrength::ExplicitIdentity,
+        EvidenceRole::Primary,
+    );
+    append_evidence_entries(
+        &mut entries,
         "string",
         VerificationEvidenceKind::String,
         facts.referenced_strings.clone(),
+        EvidenceCategory::Literal,
+        EvidenceStrength::Literal,
+        EvidenceRole::Secondary,
     );
-    add(
-        "import",
-        VerificationEvidenceKind::Import,
-        facts.imported_symbols.clone(),
-    );
-    add(
+    for (index, value) in facts
+        .imported_symbols
+        .iter()
+        .take(MAX_CONTEXT_ITEMS)
+        .enumerate()
+    {
+        let rule = matching_api_rule(value);
+        entries.push(EvidenceEntry {
+            id: format!("import:{index}"),
+            kind: VerificationEvidenceKind::Import,
+            value: value.clone(),
+            category: rule.map_or(EvidenceCategory::Other, |rule| rule.category),
+            strength: rule.map_or(EvidenceStrength::BehavioralPattern, |_| {
+                EvidenceStrength::KnownApi
+            }),
+            role: rule.map_or(EvidenceRole::Primary, |rule| rule.role),
+        });
+    }
+    append_evidence_entries(
+        &mut entries,
         "caller",
         VerificationEvidenceKind::Caller,
         facts
@@ -741,40 +1302,68 @@ fn evidence_catalog(
             .iter()
             .map(|value| format!("{}@{}", value.name, value.entry_address))
             .collect(),
+        EvidenceCategory::CallGraph,
+        EvidenceStrength::BehavioralPattern,
+        EvidenceRole::Secondary,
     );
-    add(
-        "callee",
-        VerificationEvidenceKind::Callee,
-        facts
-            .callees
-            .iter()
-            .map(|value| format!("{}@{}", value.name, value.entry_address))
-            .collect(),
-    );
-    add(
+    for (index, callee) in facts.callees.iter().take(MAX_CONTEXT_ITEMS).enumerate() {
+        let value = format!("{}@{}", callee.name, callee.entry_address);
+        let rule = matching_api_rule(&callee.name);
+        entries.push(EvidenceEntry {
+            id: format!("callee:{index}"),
+            kind: VerificationEvidenceKind::Callee,
+            value,
+            category: rule.map_or(EvidenceCategory::CallGraph, |rule| rule.category),
+            strength: rule.map_or(EvidenceStrength::BehavioralPattern, |_| {
+                EvidenceStrength::KnownApi
+            }),
+            role: rule.map_or(EvidenceRole::Secondary, |rule| rule.role),
+        });
+    }
+    append_evidence_entries(
+        &mut entries,
         "rtti",
         VerificationEvidenceKind::Rtti,
         facts.rtti_class_names.clone(),
+        EvidenceCategory::TypeIdentity,
+        EvidenceStrength::ExplicitIdentity,
+        EvidenceRole::Primary,
     );
-    add(
+    append_evidence_entries(
+        &mut entries,
         "constant",
         VerificationEvidenceKind::Constant,
         facts.numeric_constants.clone(),
+        EvidenceCategory::Literal,
+        EvidenceStrength::Literal,
+        EvidenceRole::Secondary,
     );
-    add(
+    append_evidence_entries(
+        &mut entries,
         "global",
         VerificationEvidenceKind::Global,
         facts.global_references.clone(),
+        EvidenceCategory::Other,
+        EvidenceStrength::BehavioralPattern,
+        EvidenceRole::Secondary,
     );
-    add(
+    append_evidence_entries(
+        &mut entries,
         "callsite_out",
         VerificationEvidenceKind::Callsite,
         facts.callsite_arguments.clone(),
+        EvidenceCategory::CallGraph,
+        EvidenceStrength::BehavioralPattern,
+        EvidenceRole::Secondary,
     );
-    add(
+    append_evidence_entries(
+        &mut entries,
         "callsite_in",
         VerificationEvidenceKind::Callsite,
         facts.incoming_callsite_arguments.clone(),
+        EvidenceCategory::CallGraph,
+        EvidenceStrength::BehavioralPattern,
+        EvidenceRole::Secondary,
     );
     entries
 }
@@ -799,6 +1388,9 @@ fn derived_behaviors(context: &GenerationContext) -> Vec<String> {
             behaviors.push(label.to_owned());
         }
     };
+    for rule in API_EVIDENCE_RULES {
+        add(api_rule_is_observed(context, rule), rule.label);
+    }
 
     add(
         has(&["loadlibrary", "getprocaddress"]),
@@ -903,20 +1495,91 @@ fn format_evidence_catalog(context: &GenerationContext) -> String {
         "CATALOGUE DE PREUVES AUTORISEES (cite source_id exactement) :\n{}",
         entries
             .iter()
-            .map(|(id, kind, value)| format!("{id} [{kind:?}] = {}", bounded_text(value, 300)))
+            .map(|entry| format!(
+                "{} [{:?}; categorie={:?}; force={:?}; role={:?}] = {}",
+                entry.id,
+                entry.kind,
+                entry.category,
+                entry.strength,
+                entry.role,
+                bounded_text(&entry.value, 300)
+            ))
             .collect::<Vec<_>>()
             .join("\n")
     )
 }
 
-fn resolved_claim_value(context: &GenerationContext, claim: &VerificationClaim) -> Option<String> {
+fn default_evidence_metadata(
+    kind: VerificationEvidenceKind,
+    value: &str,
+) -> (EvidenceCategory, EvidenceStrength, EvidenceRole) {
+    if matches!(kind, VerificationEvidenceKind::Rtti) {
+        return (
+            EvidenceCategory::TypeIdentity,
+            EvidenceStrength::ExplicitIdentity,
+            EvidenceRole::Primary,
+        );
+    }
+    if matches!(
+        kind,
+        VerificationEvidenceKind::Import | VerificationEvidenceKind::Callee
+    ) {
+        if let Some(rule) = matching_api_rule(value) {
+            return (rule.category, EvidenceStrength::KnownApi, rule.role);
+        }
+    }
+    match kind {
+        VerificationEvidenceKind::String | VerificationEvidenceKind::Constant => (
+            EvidenceCategory::Literal,
+            EvidenceStrength::Literal,
+            EvidenceRole::Secondary,
+        ),
+        VerificationEvidenceKind::Caller
+        | VerificationEvidenceKind::Callee
+        | VerificationEvidenceKind::Callsite => (
+            EvidenceCategory::CallGraph,
+            EvidenceStrength::BehavioralPattern,
+            EvidenceRole::Secondary,
+        ),
+        VerificationEvidenceKind::Pseudocode
+        | VerificationEvidenceKind::Behavior
+        | VerificationEvidenceKind::Global
+        | VerificationEvidenceKind::Import => (
+            EvidenceCategory::Other,
+            EvidenceStrength::BehavioralPattern,
+            EvidenceRole::Primary,
+        ),
+        VerificationEvidenceKind::Rtti => unreachable!("handled above"),
+    }
+}
+
+fn resolved_claim_entry(
+    context: &GenerationContext,
+    claim: &VerificationClaim,
+) -> Option<EvidenceEntry> {
     if let Some(source_id) = claim.source_id.as_deref() {
         return evidence_catalog(context)
             .into_iter()
-            .find(|(id, kind, _)| id == source_id && *kind == claim.kind)
-            .map(|(_, _, value)| value);
+            .find(|entry| entry.id == source_id && entry.kind == claim.kind);
     }
-    claim_exists_in_context_legacy(context, claim).then(|| claim.value.clone())
+    if !claim_exists_in_context_legacy(context, claim) {
+        return None;
+    }
+    if let Some(entry) = evidence_catalog(context)
+        .into_iter()
+        .find(|entry| entry.kind == claim.kind && fact_matches_claim(&entry.value, &claim.value))
+    {
+        return Some(entry);
+    }
+    let (category, strength, role) = default_evidence_metadata(claim.kind, &claim.value);
+    Some(EvidenceEntry {
+        id: "legacy".to_owned(),
+        kind: claim.kind,
+        value: claim.value.clone(),
+        category,
+        strength,
+        role,
+    })
 }
 
 fn claim_exists_in_context_legacy(context: &GenerationContext, claim: &VerificationClaim) -> bool {
@@ -1060,20 +1723,15 @@ fn source_supports_name_token(kind: VerificationEvidenceKind, source: &str, toke
     }
 }
 
-fn independent_evidence_group(kind: VerificationEvidenceKind) -> u8 {
-    match kind {
-        VerificationEvidenceKind::String => 1,
-        VerificationEvidenceKind::Rtti => 2,
-        VerificationEvidenceKind::Caller => 3,
-        // These are different views over the same machine-code behavior and
-        // must not be counted twice as independent corroboration.
-        VerificationEvidenceKind::Pseudocode
-        | VerificationEvidenceKind::Behavior
-        | VerificationEvidenceKind::Import
-        | VerificationEvidenceKind::Callee
-        | VerificationEvidenceKind::Constant
-        | VerificationEvidenceKind::Global
-        | VerificationEvidenceKind::Callsite => 4,
+fn independent_evidence_group(entry: &EvidenceEntry) -> u8 {
+    match (entry.category, entry.kind) {
+        (EvidenceCategory::TypeIdentity, _) => 1,
+        (EvidenceCategory::Literal, _) => 2,
+        (_, VerificationEvidenceKind::Caller) => 3,
+        // Imports, pseudocode and derived patterns are different views over
+        // the same machine-code behavior. Domain labels improve relevance but
+        // must not manufacture independent corroboration.
+        _ => 4,
     }
 }
 
@@ -1090,14 +1748,41 @@ pub fn calibrate_confidence_with_verification(
     let Some(name) = result.suggested_name.as_deref() else {
         result.verification_tier = NameVerificationTier::Unsupported;
         result.verifier_verdict = None;
+        result.calibration_breakdown = Some(CalibrationBreakdown {
+            provider_label: None,
+            formula: "legacy_min_v1".to_owned(),
+            raw_agent_confidence: generator_confidence,
+            verifier_confidence: Some(verification.confidence),
+            evidence_score: 0,
+            final_score: result.confidence,
+            strongest_evidence: None,
+            name_tokens: Vec::new(),
+            covered_tokens: Vec::new(),
+            unsupported_tokens: Vec::new(),
+            independent_source_groups: 0,
+            primary_categories: Vec::new(),
+            secondary_categories: Vec::new(),
+            secondary_only: false,
+            deterministic_contradictions: vec!["no_usable_name".to_owned()],
+            verifier_verdict: None,
+            verifier_disagreement: false,
+            verification_tier: NameVerificationTier::Unsupported,
+        });
         return;
     };
     let tokens = meaningful_name_tokens(name);
     let mut covered = std::collections::HashSet::new();
     let mut kinds = std::collections::HashSet::new();
     let mut valid_claims = 0;
+    let mut strongest = EvidenceStrength::Literal;
+    let mut has_primary_identity = false;
+    let mut has_primary_evidence = false;
+    let mut primary_covered = std::collections::HashSet::new();
+    let mut secondary_covered = std::collections::HashSet::new();
+    let mut primary_categories = std::collections::HashSet::new();
+    let mut secondary_categories = std::collections::HashSet::new();
     for claim in &verification.claims {
-        let Some(source_value) = resolved_claim_value(context, claim) else {
+        let Some(source) = resolved_claim_entry(context, claim) else {
             continue;
         };
         let claim_tokens = meaningful_name_tokens(&claim.name_token);
@@ -1109,15 +1794,29 @@ pub fn calibrate_confidence_with_verification(
             // A valid catalogue ID proves that the source exists. This second
             // deterministic gate proves that its vocabulary/API semantics can
             // actually support the chosen word.
-            let semantically_bound = source_supports_name_token(claim.kind, &source_value, token);
+            let semantically_bound = source_supports_name_token(source.kind, &source.value, token);
             if semantically_bound {
                 covered.insert(token.clone());
                 claim_covered_any = true;
+                strongest = strongest.max(source.strength);
+                has_primary_evidence |= source.role == EvidenceRole::Primary;
+                match source.role {
+                    EvidenceRole::Primary => {
+                        primary_covered.insert(token.clone());
+                        primary_categories.insert(source.category);
+                    }
+                    EvidenceRole::Secondary => {
+                        secondary_covered.insert(token.clone());
+                        secondary_categories.insert(source.category);
+                    }
+                }
+                has_primary_identity |= source.strength == EvidenceStrength::ExplicitIdentity
+                    && source.role == EvidenceRole::Primary;
             }
         }
         if claim_covered_any {
             valid_claims += 1;
-            kinds.insert(independent_evidence_group(claim.kind));
+            kinds.insert(independent_evidence_group(&source));
         }
     }
     // The model is not the authority on whether an API name or literal is
@@ -1127,13 +1826,43 @@ pub fn calibrate_confidence_with_verification(
     // `terminate_process` be verified without trusting free-form prose.
     let catalog = evidence_catalog(context);
     for token in &tokens {
-        for (_, kind, source_value) in &catalog {
-            if source_supports_name_token(*kind, source_value, token) {
+        for source in &catalog {
+            if source_supports_name_token(source.kind, &source.value, token) {
                 covered.insert(token.clone());
-                kinds.insert(independent_evidence_group(*kind));
+                kinds.insert(independent_evidence_group(source));
+                strongest = strongest.max(source.strength);
+                has_primary_evidence |= source.role == EvidenceRole::Primary;
+                match source.role {
+                    EvidenceRole::Primary => {
+                        primary_covered.insert(token.clone());
+                        primary_categories.insert(source.category);
+                    }
+                    EvidenceRole::Secondary => {
+                        secondary_covered.insert(token.clone());
+                        secondary_categories.insert(source.category);
+                    }
+                }
+                has_primary_identity |= source.strength == EvidenceStrength::ExplicitIdentity
+                    && source.role == EvidenceRole::Primary;
             }
         }
     }
+    // If a real primary role exists, words justified only by bookkeeping,
+    // cleanup or another secondary action must not be concatenated into an
+    // automatic name. Keep the proposal visible, but classify those words as
+    // unsupported for automatic use. With no primary role at all, the older
+    // secondary-only path remains a manual Partial suggestion.
+    let secondary_only_tokens = if has_primary_evidence {
+        tokens
+            .iter()
+            .filter(|token| secondary_covered.contains(*token) && !primary_covered.contains(*token))
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+    } else {
+        std::collections::HashSet::new()
+    };
+    covered.retain(|token| !secondary_only_tokens.contains(token));
+
     let mut unsupported = verification
         .unsupported_tokens
         .iter()
@@ -1159,15 +1888,37 @@ pub fn calibrate_confidence_with_verification(
     // result falls into -- gating (auto-apply, second-pass anchors) must use
     // this tier, never a numeric confidence threshold alone, since the cap
     // values are free to be retuned independently later.
-    let (mut cap, tier) = if all_tokens_covered && kinds.len() >= 2 {
-        (85, NameVerificationTier::Strong)
-    } else if all_tokens_covered && kinds.len() == 1 {
-        (70, NameVerificationTier::Supported)
-    } else if valid_claims > 0 || !covered.is_empty() {
+    let (mut cap, tier) = if all_tokens_covered && !has_primary_evidence {
+        // Cleanup registration, logging and compiler bookkeeping may explain
+        // secondary actions, but cannot define an automatic function name by
+        // themselves.
         (60, NameVerificationTier::Partial)
+    } else if all_tokens_covered && kinds.len() >= 2 {
+        (85, NameVerificationTier::Strong)
+    } else if all_tokens_covered {
+        let weighted_cap = match strongest {
+            EvidenceStrength::ExplicitIdentity => 80,
+            EvidenceStrength::KnownApi => 75,
+            EvidenceStrength::BehavioralPattern => 70,
+            EvidenceStrength::Literal => 60,
+        };
+        (weighted_cap, NameVerificationTier::Supported)
+    } else if valid_claims > 0 || !covered.is_empty() {
+        let weighted_cap = match strongest {
+            EvidenceStrength::ExplicitIdentity => 65,
+            EvidenceStrength::KnownApi => 60,
+            EvidenceStrength::BehavioralPattern => 55,
+            EvidenceStrength::Literal => 50,
+        };
+        (weighted_cap, NameVerificationTier::Partial)
     } else {
         (45, NameVerificationTier::Unsupported)
     };
+    // Identity describes what the function acts on; secondary lifecycle or
+    // bookkeeping APIs may corroborate it but can never outrank it.
+    if has_primary_identity && all_tokens_covered {
+        cap = cap.max(80);
+    }
     result.verification_tier = tier;
     result.verifier_verdict = Some(verification.verdict);
     let raw_tokens = name_tokens(name);
@@ -1193,6 +1944,41 @@ pub fn calibrate_confidence_with_verification(
             .min(100)
             .min(cap)
     };
+    let mut name_tokens = tokens.clone();
+    name_tokens.sort();
+    let mut covered_tokens = covered.iter().cloned().collect::<Vec<_>>();
+    covered_tokens.sort();
+    let mut unsupported_tokens = unsupported.iter().cloned().collect::<Vec<_>>();
+    unsupported_tokens.sort();
+    let mut primary_categories = primary_categories.into_iter().collect::<Vec<_>>();
+    primary_categories.sort_by_key(|category| format!("{category:?}"));
+    let mut secondary_categories = secondary_categories.into_iter().collect::<Vec<_>>();
+    secondary_categories.sort_by_key(|category| format!("{category:?}"));
+    let deterministic_contradictions = unsupported_tokens
+        .iter()
+        .map(|token| format!("unsupported_name_token:{token}"))
+        .collect::<Vec<_>>();
+    result.calibration_breakdown = Some(CalibrationBreakdown {
+        provider_label: None,
+        formula: "legacy_min_v1".to_owned(),
+        raw_agent_confidence: generator_confidence,
+        verifier_confidence: Some(verification.confidence),
+        evidence_score: cap,
+        final_score: result.confidence,
+        strongest_evidence: (!covered.is_empty()).then_some(strongest),
+        name_tokens,
+        covered_tokens,
+        unsupported_tokens,
+        independent_source_groups: kinds.len().min(u8::MAX as usize) as u8,
+        primary_categories,
+        secondary_categories,
+        secondary_only: !has_primary_evidence && !covered.is_empty(),
+        deterministic_contradictions,
+        verifier_verdict: Some(verification.verdict),
+        verifier_disagreement: verification.verdict == VerificationVerdict::Unsupported
+            && all_tokens_covered,
+        verification_tier: tier,
+    });
     let summary = format!(
         "Verification contradictoire : {:?}; {}/{} mot(s) justifie(s), {} source(s) reelle(s), {} mot(s) non justifie(s).",
         verification.verdict,
@@ -1255,7 +2041,11 @@ Prefere un nom descriptif prudent fonde sur l'action et l'objet reellement obser
 semantique du nom doit pouvoir etre relie a un import, une chaine, un voisin nomme ou un \
 COMPORTEMENT API DERIVE fourni par Rust. Reutilise en priorite le vocabulaire de ces comportements \
 au lieu d'inventer un synonyme impossible a verifier. N'ajoute jamais Function, Handler, Manager, \
-Data ou Process uniquement pour rendre le nom plus long. Dans \
+Data ou Process uniquement pour rendre le nom plus long. Respecte la hierarchie de preuves fournie \
+par Rust : identite de type explicite > API connue > pattern comportemental > constante ou chaine \
+isolee. Une preuve marquee role=Primary doit guider le nom ; une action role=Secondary (cycle de vie, \
+cleanup, journalisation ou bookkeeping du compilateur) corrobore le role mais ne doit pas etre \
+concatenee au nom si elle n'est pas la finalite principale. Dans \
 reasoning, commence par 'Role observe :'. Chaque evidence doit citer un element vraiment present \
 dans la fiche (appel, chaine, type ou instruction), jamais une impression generale.";
 
@@ -1556,8 +2346,85 @@ fn format_batch_context(context: &GenerationContext) -> String {
         .base
         .decompiled_code
         .as_deref()
-        .map(|code| bounded_text(code, MAX_BATCH_CODE_CHARS));
+        .map(|code| naming_arbitration::semantic_code_excerpt(code, MAX_BATCH_CODE_CHARS));
     format_context(&reduced)
+}
+
+/// Scores whether an abstention is suspicious enough to justify one extra,
+/// targeted model call. This stays deliberately conservative: ordinary
+/// pseudocode alone is not enough. A direct string, resolved import, named
+/// callee, or distinctive control/memory behaviour must be present.
+pub fn abstention_recovery_score(context: &GenerationContext) -> u16 {
+    let Some(code) = context.base.decompiled_code.as_deref() else {
+        return 0;
+    };
+    let meaningful_strings = context
+        .semantic_facts
+        .referenced_strings
+        .iter()
+        .filter(|value| value.trim().chars().count() >= 4)
+        .count()
+        .min(2) as u16;
+    let meaningful_callees = context
+        .semantic_facts
+        .callees
+        .iter()
+        .filter(|callee| !callee.is_generic_name)
+        .count()
+        .min(2) as u16;
+    let lower = code.to_ascii_lowercase();
+    let distinctive_code = [
+        "swi(",
+        "__debugbreak",
+        "throw",
+        "while",
+        "for (",
+        "switch",
+        "vmov",
+        "xmm",
+        "ymm",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+
+    meaningful_strings * 20
+        + context.semantic_facts.imported_symbols.len().min(2) as u16 * 12
+        + meaningful_callees * 10
+        + u16::from(distinctive_code) * 8
+}
+
+/// One bounded recovery for a syntactically valid but semantically
+/// unjustified null. The result still goes through deterministic calibration
+/// and the contradictory verifier; this request does not grant any automatic
+/// authority by itself.
+pub fn build_abstention_recovery_request(
+    context: &GenerationContext,
+    previous_reasoning: &str,
+    model: &str,
+) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "{SYSTEM_PROMPT} Ta premiere reponse s'est abstenue alors que la fiche contient des indices directs. Ignore la casse du nom generique et de l'adresse : FUN_ABC et FUN_abc designent la meme fonction. Propose obligatoirement une hypothese prudente action_objet, meme avec une confiance faible. Le resultat restera soumis aux controles et a la validation manuelle s'il n'est pas assez corrobore. suggested_name ne doit pas etre null et requested_tools doit etre vide."
+                ),
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: format!(
+                    "FICHE DE LA FONCTION:\n{}\n\nABSTENTION PRECEDENTE A CORRIGER:\n{}",
+                    format_batch_context(context),
+                    bounded_text(previous_reasoning, 800)
+                ),
+            },
+        ],
+        temperature: Some(0.0),
+        max_tokens: Some(512),
+        require_json_object: true,
+        response_schema: Some(generation_result_schema(None, true)),
+    }
 }
 
 pub fn build_generation_batch_request(
@@ -2102,6 +2969,7 @@ pub fn parse_generation_batch_response(
                 evidence: item.evidence.clone(),
                 verification_tier: NameVerificationTier::default(),
                 verifier_verdict: None,
+                calibration_breakdown: None,
                 requested_tools: item
                     .requested_tools
                     .iter()
@@ -2307,7 +3175,7 @@ fn is_deliberate_abstention_name(name: &str) -> bool {
 /// Converts only mechanically equivalent spellings into a Ghidra-safe bare
 /// identifier. It never shortens a vague semantic label into a more precise
 /// claim: placeholders and generic names become an explicit abstention.
-fn normalize_model_identifier(name: Option<&str>) -> Result<Option<String>, String> {
+pub(crate) fn normalize_model_identifier(name: Option<&str>) -> Result<Option<String>, String> {
     let Some(original) = name.map(str::trim).filter(|name| !name.is_empty()) else {
         return Ok(None);
     };
@@ -2386,6 +3254,7 @@ pub fn parse_generation_response(
         evidence: parsed.evidence,
         verification_tier: NameVerificationTier::default(),
         verifier_verdict: None,
+        calibration_breakdown: None,
         requested_tools: parsed
             .requested_tools
             .iter()
@@ -2422,6 +3291,7 @@ pub fn parse_repaired_generation_response(
                 evidence: parsed.evidence,
                 verification_tier: NameVerificationTier::default(),
                 verifier_verdict: None,
+                calibration_breakdown: None,
                 requested_tools: Vec::new(),
             })
         }
@@ -2866,6 +3736,49 @@ mod tests {
     }
 
     #[test]
+    fn a_direct_diagnostic_string_makes_a_null_worth_one_recovery() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some(
+            "void FUN_1400013c0(void) { FUN_1400070b4(\"string too long\"); swi(3); }".to_owned(),
+        );
+        context.semantic_facts.decompiled = true;
+        context.semantic_facts.referenced_strings = vec!["string too long".to_owned()];
+        context.semantic_facts.imported_symbols.clear();
+        context.semantic_facts.callees.clear();
+
+        assert!(abstention_recovery_score(&context) >= 20);
+    }
+
+    #[test]
+    fn plain_pseudocode_without_a_discriminating_fact_does_not_spend_a_recovery() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some("void FUN_1(void) { return; }".to_owned());
+        context.semantic_facts.decompiled = true;
+        context.semantic_facts.referenced_strings.clear();
+        context.semantic_facts.imported_symbols.clear();
+        context.semantic_facts.callees.clear();
+
+        assert_eq!(abstention_recovery_score(&context), 0);
+    }
+
+    #[test]
+    fn abstention_recovery_requires_a_name_and_neutralizes_address_casing() {
+        let context = sample_context();
+        let request = build_abstention_recovery_request(
+            &context,
+            "FUN_ABC ne correspond pas a FUN_abc",
+            "qwen2.5-coder:7b",
+        );
+        let system = &request.messages[0].content;
+        let schema = request.response_schema.expect("recovery schema");
+
+        assert!(system.contains("FUN_ABC et FUN_abc designent la meme fonction"));
+        assert!(system.contains("validation manuelle"));
+        assert_eq!(schema["properties"]["suggested_name"]["type"], "string");
+        assert_eq!(request.max_tokens, Some(512));
+    }
+
+    #[test]
     fn a_reserved_entry_point_name_is_rejected_for_a_non_entry_function() {
         let context = sample_context();
         assert!(
@@ -2880,6 +3793,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2903,6 +3817,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -2922,6 +3837,7 @@ mod tests {
                 requested_tools: Vec::new(),
                 verification_tier: NameVerificationTier::default(),
                 verifier_verdict: None,
+                calibration_breakdown: None,
             };
             calibrate_confidence(&context, &mut result);
             assert_eq!(
@@ -2948,6 +3864,7 @@ mod tests {
                 requested_tools: Vec::new(),
                 verification_tier: NameVerificationTier::default(),
                 verifier_verdict: None,
+                calibration_breakdown: None,
             };
             calibrate_confidence(&context, &mut result);
             assert_eq!(
@@ -2968,6 +3885,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(
@@ -2995,6 +3913,7 @@ mod tests {
                 requested_tools: Vec::new(),
                 verification_tier: NameVerificationTier::default(),
                 verifier_verdict: None,
+                calibration_breakdown: None,
             };
             calibrate_confidence(&context, &mut result);
             assert_eq!(
@@ -3015,6 +3934,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(
@@ -3040,6 +3960,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 35);
@@ -3060,6 +3981,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         calibrate_confidence(&context, &mut result);
         assert_eq!(result.confidence, 55);
@@ -3099,6 +4021,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
 
         calibrate_confidence(&context, &mut result);
@@ -3169,6 +4092,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3204,6 +4128,20 @@ mod tests {
             .evidence
             .iter()
             .any(|item| item.contains("2/2 mot(s) justifie(s)")));
+        let breakdown = result
+            .calibration_breakdown
+            .as_ref()
+            .expect("calibration inputs must remain observable");
+        assert_eq!(breakdown.raw_agent_confidence, 95);
+        assert_eq!(breakdown.evidence_score, 85);
+        assert_eq!(breakdown.final_score, 85);
+        assert_eq!(breakdown.covered_tokens.len(), 2);
+        assert_eq!(breakdown.name_tokens.len(), 2);
+        assert_eq!(breakdown.independent_source_groups, 2);
+        assert_eq!(
+            breakdown.verifier_verdict,
+            Some(VerificationVerdict::Supported)
+        );
     }
 
     #[test]
@@ -3224,6 +4162,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3272,6 +4211,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3319,6 +4259,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3355,6 +4296,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3397,6 +4339,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3414,8 +4357,59 @@ mod tests {
 
         calibrate_confidence_with_verification(&context, &mut result, &verification);
 
-        assert_eq!(result.confidence, 70);
+        assert_eq!(result.confidence, 75);
         assert_eq!(result.verification_tier, NameVerificationTier::Supported);
+    }
+
+    #[test]
+    fn calibration_breakdown_observes_raw_confidence_without_changing_legacy_scoring() {
+        let mut context = sample_context();
+        context.semantic_facts.callees.clear();
+        context.semantic_facts.referenced_strings.clear();
+        context.base.callee_names.clear();
+        let mut result = GenerationResult {
+            suggested_name: Some("open_file".to_owned()),
+            reasoning: "Role observe : ouvre un fichier.".to_owned(),
+            confidence: 60,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+            calibration_breakdown: None,
+        };
+        let verification = NameVerificationResult {
+            entry_address: "0x140009a10".to_owned(),
+            verdict: VerificationVerdict::Supported,
+            confidence: 92,
+            claims: vec![VerificationClaim {
+                name_token: "open_file".to_owned(),
+                source_id: None,
+                kind: VerificationEvidenceKind::Import,
+                value: "CreateFileA".to_owned(),
+            }],
+            unsupported_tokens: Vec::new(),
+            reasoning: "Les deux mots sont soutenus par une API connue.".to_owned(),
+        };
+
+        calibrate_confidence_with_verification(&context, &mut result, &verification);
+
+        assert_eq!(result.confidence, 60, "legacy min scoring must not change");
+        let breakdown = result.calibration_breakdown.expect("breakdown");
+        assert_eq!(breakdown.formula, "legacy_min_v1");
+        assert_eq!(breakdown.raw_agent_confidence, 60);
+        assert_eq!(breakdown.verifier_confidence, Some(92));
+        assert_eq!(breakdown.evidence_score, 75);
+        assert_eq!(breakdown.final_score, 60);
+        assert_eq!(
+            breakdown.strongest_evidence,
+            Some(EvidenceStrength::KnownApi)
+        );
+        assert_eq!(breakdown.covered_tokens, vec!["file", "open"]);
+        assert!(breakdown.unsupported_tokens.is_empty());
+        assert_eq!(breakdown.primary_categories, vec![EvidenceCategory::FileIo]);
+        assert!(!breakdown.secondary_only);
+        assert!(breakdown.deterministic_contradictions.is_empty());
+        assert!(!breakdown.verifier_disagreement);
     }
 
     #[test]
@@ -3439,6 +4433,7 @@ mod tests {
 
         assert_eq!(stored.verification_tier, NameVerificationTier::Unsupported);
         assert_eq!(stored.verifier_verdict, None);
+        assert!(stored.calibration_breakdowns.is_empty());
     }
 
     #[test]
@@ -3452,6 +4447,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3478,8 +4474,8 @@ mod tests {
         calibrate_confidence_with_verification(&context, &mut result, &verification);
 
         assert_eq!(
-            result.confidence, 70,
-            "one real source kind remains bounded"
+            result.confidence, 75,
+            "one known API remains bounded below identity-backed evidence"
         );
 
         let mut bad_verification = verification;
@@ -3488,7 +4484,7 @@ mod tests {
         assert!(bad_verification
             .claims
             .iter()
-            .all(|claim| resolved_claim_value(&context, claim).is_none()));
+            .all(|claim| resolved_claim_entry(&context, claim).is_none()));
     }
 
     #[test]
@@ -3507,6 +4503,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3515,6 +4512,221 @@ mod tests {
         assert!(derived_behaviors(&context)
             .iter()
             .any(|value| value == "environment_variables_get_set"));
+    }
+
+    #[test]
+    fn any_explicit_vtable_type_can_drive_a_static_initializer_name() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some(
+            r#"void FUN_1(void) {
+                _global = WidgetRegistry::vftable;
+                atexit(cleanup_global);
+            }"#
+            .to_owned(),
+        );
+        context.semantic_facts.imported_symbols = vec!["atexit".to_owned()];
+        context.semantic_facts.callees = vec![SemanticNeighbor {
+            entry_address: "0x140009a6c".to_owned(),
+            name: "atexit".to_owned(),
+            is_generic_name: false,
+            is_external: true,
+            is_thunk: false,
+            return_type: "int".to_owned(),
+            parameter_types: vec!["void (*)(void)".to_owned()],
+            strings: Vec::new(),
+            imported_library: None,
+        }];
+
+        let catalog = evidence_catalog(&context);
+        let identity = catalog
+            .iter()
+            .find(|entry| entry.id.starts_with("type:"))
+            .expect("the type before any vtable must become identity evidence");
+        assert_eq!(identity.value, "WidgetRegistry");
+        assert_eq!(identity.category, EvidenceCategory::TypeIdentity);
+        assert_eq!(identity.strength, EvidenceStrength::ExplicitIdentity);
+        assert_eq!(identity.role, EvidenceRole::Primary);
+        assert!(catalog
+            .iter()
+            .any(|entry| entry.value == "register_exit_cleanup_callback"
+                && entry.role == EvidenceRole::Secondary));
+        assert!(catalog.iter().any(|entry| {
+            entry.value == "static_initialize_construct_global_object_with_lifecycle_cleanup"
+                && entry.strength == EvidenceStrength::BehavioralPattern
+        }));
+
+        let mut result = GenerationResult {
+            suggested_name: Some("initialize_widget_registry".to_owned()),
+            reasoning: "Role observe : initialise un WidgetRegistry global.".to_owned(),
+            confidence: 88,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+            calibration_breakdown: None,
+        };
+        let verification = NameVerificationResult {
+            entry_address: "0x1".to_owned(),
+            verdict: VerificationVerdict::Supported,
+            confidence: 82,
+            claims: Vec::new(),
+            unsupported_tokens: Vec::new(),
+            reasoning: "Le type et le motif d'initialisation sont explicites.".to_owned(),
+        };
+
+        calibrate_confidence_with_verification(&context, &mut result, &verification);
+
+        assert_eq!(result.verification_tier, NameVerificationTier::Strong);
+        assert_eq!(result.confidence, 85);
+        assert!(result
+            .evidence
+            .iter()
+            .any(|value| value.contains("3/3 mot(s) justifie(s)")));
+    }
+
+    #[test]
+    fn secondary_lifecycle_evidence_alone_never_defines_an_automatic_name() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some("void FUN_1(void) { atexit(cleanup); }".to_owned());
+        context.semantic_facts.imported_symbols = vec!["atexit".to_owned()];
+        context.semantic_facts.callees.clear();
+        context.semantic_facts.rtti_class_names.clear();
+        let mut result = GenerationResult {
+            suggested_name: Some("register_exit_cleanup".to_owned()),
+            reasoning: "Role observe : enregistre un nettoyage.".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+            calibration_breakdown: None,
+        };
+
+        calibrate_confidence_with_deterministic_evidence(&context, &mut result);
+
+        assert_eq!(result.verification_tier, NameVerificationTier::Partial);
+        assert_eq!(result.confidence, 60);
+        let breakdown = result.calibration_breakdown.expect("breakdown");
+        assert_eq!(breakdown.raw_agent_confidence, 90);
+        assert_eq!(breakdown.evidence_score, 60);
+        assert_eq!(breakdown.final_score, 60);
+        assert!(breakdown.primary_categories.is_empty());
+        assert_eq!(
+            breakdown.secondary_categories,
+            vec![EvidenceCategory::Lifecycle]
+        );
+        assert!(breakdown.secondary_only);
+        assert_eq!(breakdown.covered_tokens.len(), breakdown.name_tokens.len());
+    }
+
+    #[test]
+    fn secondary_actions_cannot_be_concatenated_to_a_name_when_a_primary_role_exists() {
+        let mut context = sample_context();
+        context.semantic_facts.imported_symbols =
+            vec!["CreateFileA (KERNEL32.DLL)".to_owned(), "atexit".to_owned()];
+        context.base.decompiled_code =
+            Some("void FUN_1(char *path) { CreateFileA(path, ...); atexit(cleanup); }".to_owned());
+        let mut result = GenerationResult {
+            suggested_name: Some("open_file_register_exit_cleanup".to_owned()),
+            reasoning: "Role observe : ouvre un fichier puis enregistre un nettoyage.".to_owned(),
+            confidence: 90,
+            evidence: Vec::new(),
+            requested_tools: Vec::new(),
+            verification_tier: NameVerificationTier::default(),
+            verifier_verdict: None,
+            calibration_breakdown: None,
+        };
+
+        calibrate_confidence_with_deterministic_evidence(&context, &mut result);
+
+        assert_eq!(result.verification_tier, NameVerificationTier::Partial);
+        let breakdown = result.calibration_breakdown.expect("breakdown");
+        assert!(breakdown
+            .primary_categories
+            .contains(&EvidenceCategory::FileIo));
+        assert!(breakdown
+            .secondary_categories
+            .contains(&EvidenceCategory::Lifecycle));
+        assert!(breakdown.covered_tokens.contains(&"open".to_owned()));
+        assert!(breakdown.covered_tokens.contains(&"file".to_owned()));
+        assert!(breakdown
+            .unsupported_tokens
+            .contains(&"register".to_owned()));
+        assert!(breakdown.unsupported_tokens.contains(&"exit".to_owned()));
+        assert!(breakdown.unsupported_tokens.contains(&"cleanup".to_owned()));
+    }
+
+    #[test]
+    fn api_taxonomy_covers_reusable_domains_without_function_specific_branches() {
+        for (symbol, category) in [
+            ("memmove", EvidenceCategory::Memory),
+            ("CreateFileW", EvidenceCategory::FileIo),
+            ("WSARecv", EvidenceCategory::Network),
+            ("EnterCriticalSection", EvidenceCategory::Synchronization),
+            ("RaiseException", EvidenceCategory::ErrorException),
+            ("BCryptEncrypt", EvidenceCategory::CryptoEncoding),
+            ("CreateThread", EvidenceCategory::ProcessThread),
+            ("RegOpenKeyExW", EvidenceCategory::WindowsSystem),
+        ] {
+            let rule = matching_api_rule(symbol).expect("known API family");
+            assert_eq!(rule.category, category, "wrong category for {symbol}");
+        }
+        assert!(matching_api_rule("SendMessageW").is_none());
+        assert_ne!(
+            matching_api_rule("FreeLibrary").map(|rule| rule.category),
+            Some(EvidenceCategory::Memory),
+            "a short token such as free must not misclassify an unrelated API"
+        );
+    }
+
+    #[test]
+    fn explicit_type_extraction_is_generic_for_templates_structures_and_vtables() {
+        let mut context = sample_context();
+        context.base.return_type = "acme::Result<int>".to_owned();
+        context.base.parameters = vec!["struct PacketHeader *header".to_owned()];
+        context.base.decompiled_code =
+            Some("void FUN_1(void) { _object = VendorWidget::vftable; }".to_owned());
+
+        let identities = explicit_type_identities(&context);
+
+        assert!(identities.iter().any(|value| value == "acme::Result<int>"));
+        assert!(identities
+            .iter()
+            .any(|value| value == "struct PacketHeader"));
+        assert!(identities.iter().any(|value| value == "VendorWidget"));
+    }
+
+    #[test]
+    fn low_level_patterns_are_categorized_without_claiming_a_specific_algorithm() {
+        let mut context = sample_context();
+        context.base.decompiled_code = Some(
+            "void FUN_1(char *param_1, char *param_2) { for (;;) { if (param_1 < param_2) { xmm0 = vmovdqu(*param_1); } } }"
+                .to_owned(),
+        );
+
+        let patterns = pattern_evidence(&context);
+
+        assert!(patterns.iter().any(|entry| {
+            entry.category == EvidenceCategory::ControlFlow
+                && entry.value == "iterative_loop_control_flow"
+        }));
+        assert!(patterns.iter().any(|entry| {
+            entry.category == EvidenceCategory::Memory
+                && entry.value == "simd_vectorized_memory_or_numeric_operations"
+        }));
+        assert!(patterns.iter().all(|entry| {
+            entry.strength == EvidenceStrength::BehavioralPattern
+                && entry.strength < EvidenceStrength::KnownApi
+        }));
+    }
+
+    #[test]
+    fn evidence_strength_order_is_identity_then_api_then_pattern_then_literal() {
+        assert!(EvidenceStrength::ExplicitIdentity > EvidenceStrength::KnownApi);
+        assert!(EvidenceStrength::KnownApi > EvidenceStrength::BehavioralPattern);
+        assert!(EvidenceStrength::BehavioralPattern > EvidenceStrength::Literal);
+        assert!(SYSTEM_PROMPT.contains("identite de type explicite > API connue"));
+        assert!(SYSTEM_PROMPT.contains("role=Secondary"));
     }
 
     #[test]
@@ -3533,6 +4745,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3553,6 +4766,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
 
         calibrate_confidence_with_deterministic_evidence(&context, &mut result);
@@ -3573,6 +4787,7 @@ mod tests {
             requested_tools: Vec::new(),
             verification_tier: NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdown: None,
         };
         let verification = NameVerificationResult {
             entry_address: "0x140009a10".to_owned(),
@@ -3590,7 +4805,7 @@ mod tests {
 
         calibrate_confidence_with_verification(&context, &mut result, &verification);
 
-        assert_eq!(result.confidence, 60);
+        assert_eq!(result.confidence, 50);
         assert!(result
             .evidence
             .iter()

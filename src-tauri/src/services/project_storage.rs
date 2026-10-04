@@ -1611,6 +1611,7 @@ mod tests {
             evidence: vec!["appelant cohérent".to_owned()],
             context_complete: true,
             agent_version: crate::services::naming_arbitration::NAMING_PIPELINE_VERSION,
+            semantic_fallback: None,
         }
     }
 
@@ -1633,9 +1634,20 @@ mod tests {
         let export = sample_export("sample.exe");
         let saved = save_project_at(&root, "Arbitrated", &export, None).expect("saving");
 
+        let mut fallback = sample_arbitration("0x140001090", None);
+        fallback.semantic_fallback = Some(
+            crate::services::naming_arbitration::SemanticFallbackOutcome {
+                suggested_name: Some("memmove".to_owned()),
+                reasoning: "copie arrière en cas de chevauchement".to_owned(),
+                provider_label: "Ollama (local)".to_owned(),
+                confidence: 91,
+                evidence: vec!["comparaison des plages mémoire".to_owned()],
+                manual_review_required: true,
+            },
+        );
         let results = vec![
             sample_arbitration("0x1400016b0", Some("NtCurrentTeb")),
-            sample_arbitration("0x140001090", None),
+            fallback,
         ];
         replace_project_arbitration_at(&root, &saved.id, &results)
             .expect("storing arbitration results should succeed");
@@ -1742,6 +1754,7 @@ mod tests {
             analysis_pass: 1,
             verification_tier: crate::services::naming_generation::NameVerificationTier::default(),
             verifier_verdict: None,
+            calibration_breakdowns: Vec::new(),
         }
     }
 
@@ -1835,7 +1848,10 @@ mod tests {
 
     #[test]
     fn the_verification_tier_survives_a_project_save_and_reopen() {
-        use crate::services::naming_generation::NameVerificationTier;
+        use crate::services::naming_generation::{
+            CalibrationBreakdown, EvidenceCategory, EvidenceStrength, NameVerificationTier,
+            VerificationVerdict,
+        };
 
         // sample_generation() always uses the default tier, which would not
         // catch a round trip that silently resets the field back to that
@@ -1846,6 +1862,26 @@ mod tests {
 
         let mut strong = sample_generation("0x140009a10", Some("open_config_file"));
         strong.verification_tier = NameVerificationTier::Strong;
+        strong.calibration_breakdowns = vec![CalibrationBreakdown {
+            provider_label: Some("Ollama (local)".to_owned()),
+            formula: "legacy_min_v1".to_owned(),
+            raw_agent_confidence: 60,
+            verifier_confidence: Some(92),
+            evidence_score: 75,
+            final_score: 60,
+            strongest_evidence: Some(EvidenceStrength::KnownApi),
+            name_tokens: vec!["file".to_owned(), "open".to_owned()],
+            covered_tokens: vec!["file".to_owned(), "open".to_owned()],
+            unsupported_tokens: Vec::new(),
+            independent_source_groups: 1,
+            primary_categories: vec![EvidenceCategory::FileIo],
+            secondary_categories: Vec::new(),
+            secondary_only: false,
+            deterministic_contradictions: Vec::new(),
+            verifier_verdict: Some(VerificationVerdict::Supported),
+            verifier_disagreement: false,
+            verification_tier: NameVerificationTier::Supported,
+        }];
         let mut partial = sample_generation("0x140009a40", Some("guess_name"));
         partial.verification_tier = NameVerificationTier::Partial;
         replace_project_generation_at(&root, &saved.id, &[strong.clone(), partial.clone()])
@@ -1868,6 +1904,10 @@ mod tests {
         assert_eq!(
             reloaded_partial.verification_tier,
             NameVerificationTier::Partial
+        );
+        assert_eq!(
+            reloaded_strong.calibration_breakdowns,
+            strong.calibration_breakdowns
         );
 
         fs::remove_dir_all(&root).expect("the isolated test directory should be removed");

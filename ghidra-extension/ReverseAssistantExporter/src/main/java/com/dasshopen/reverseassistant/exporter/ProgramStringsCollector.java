@@ -39,7 +39,11 @@ public final class ProgramStringsCollector {
             monitor.checkCancelled();
             Data data = definedData.next();
 
-            if (data.hasStringValue()) {
+            // ELF debug/comment sections can live in separate, non-loaded
+            // address spaces, each starting at offset zero. They are metadata,
+            // not runtime strings. The wire format carries virtual addresses,
+            // so flattening those spaces to an offset would invent collisions.
+            if (data.getAddress().isLoadedMemoryAddress() && data.hasStringValue()) {
                 stringData.add(data);
             }
         }
@@ -69,7 +73,12 @@ public final class ProgramStringsCollector {
             List<Reference> sortedReferences = new ArrayList<>();
 
             while (references.hasNext()) {
-                sortedReferences.add(references.next());
+                Reference reference = references.next();
+                // Do not turn debug-section references into code addresses or
+                // use them as semantic evidence for the naming agent.
+                if (reference.getFromAddress().isLoadedMemoryAddress()) {
+                    sortedReferences.add(reference);
+                }
             }
 
             if (sortedReferences.isEmpty()) {

@@ -8,6 +8,36 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Personal settings and credentials.
+.claude/
+.codex/
+.aws/
+.ssh/
+ai_providers.json
+ghidra-installation.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local samples, analysis results and diagnostics.
+/test-binaries/
+/ghidra-analysis/
+/analysis-results/
+/reports/
+/.publication-private/
+# One-off local investigation tools; reusable tests remain published.
+/src-tauri/src/bin/serpentine-diagnose.rs
+/src-tauri/src/bin/serpentine-gate-audit.rs
+/bsim-corpus/scripts/InspectBsimMatch.java
+*.log
+*.log.*
+*.dmp
+*.stackdump
+*.bak
+*.tmp
 # Ghidra extension build artifacts
 ghidra-extension/**/.gradle/
 ghidra-extension/**/build/

@@ -46,6 +46,11 @@ $toolchain = Join-Path $buildDir "toolchain.txt"
 #include <thread>
 #include <vector>
 
+// Keep the real statically linked CRT implementations in the reference
+// binary. Without this, /O2 may inline the tiny call sites and the corpus
+// never learns memcpy/memmove themselves even though <cstring> is included.
+#pragma function(memcpy, memmove, memset)
+
 static volatile std::size_t ra_sink = 0;
 
 __declspec(noinline) void ra_reference_stdio(const char* path) {
@@ -91,6 +96,16 @@ __declspec(noinline) void ra_reference_conversion(const char* value) {
     ra_sink += static_cast<std::size_t>(rendered.ptr - output);
 }
 
+__declspec(noinline) void ra_reference_memory(char* destination, const char* source, std::size_t size) {
+    if (destination == nullptr || source == nullptr) return;
+    std::memset(destination, 0, size);
+    std::memcpy(destination, source, size);
+    // Deliberately overlap the ranges so the linked memmove implementation
+    // is retained as a distinct, symbol-backed corpus function.
+    if (size > 1) std::memmove(destination + 1, destination, size - 1);
+    ra_sink += static_cast<unsigned char>(destination[size == 0 ? 0 : size - 1]);
+}
+
 __declspec(noinline) void ra_reference_synchronization() {
     std::mutex mutex;
     std::condition_variable condition;
@@ -126,6 +141,9 @@ int main(int argc, char** argv) {
     ra_reference_containers(argc);
     ra_reference_filesystem(input);
     ra_reference_conversion(input);
+    char memory[128]{};
+    const std::size_t memorySize = (std::min)(std::strlen(input), sizeof(memory) - 1);
+    ra_reference_memory(memory, input, memorySize);
     ra_reference_synchronization();
     ra_reference_exceptions(argc - 2);
     return static_cast<int>(ra_sink & 0xffu);
