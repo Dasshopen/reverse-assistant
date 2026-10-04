@@ -1,109 +1,92 @@
 # Reverse Assistant
 
-A local-first reverse-engineering desktop application built with Rust, Tauri 2,
-Svelte 5 and TypeScript, connecting Ghidra with function identification and
-optional AI-assisted naming.
+Understand compiled programs and give unidentified functions meaningful names.
 
-## Install from GitHub
+Reverse Assistant is a desktop application that brings Ghidra analysis,
+reference-library matching and optional AI assistance into one workspace.
+Explore assembly and pseudocode, inspect the evidence behind each suggested
+name, and decide which changes to apply.
 
-**Start here: [step-by-step Windows installation guide](docs/INSTALLATION_WINDOWS.md).**
-Use the packaged Windows installer and complete the application's guided setup.
-AI is optional. End users do not need development tools or corpus compilation.
+## Get started
 
-The first installer is being prepared for testing. Check
-[Releases](https://github.com/Dasshopen/reverse-assistant/releases) for packaged
-downloads; the source ZIP is not an installer.
-Developers: follow [Build from source](docs/BUILD_FROM_SOURCE.md).
+**Windows x64 · Early alpha · AI optional**
 
-## Status and features
+1. Download the Windows **`-setup.exe`** from [GitHub Releases](https://github.com/Dasshopen/reverse-assistant/releases).
+2. Install and open Reverse Assistant.
+3. Complete the guided setup, then open a binary you are authorized to analyze.
 
-**Early alpha, primarily tested on Windows.** Only analyze software you are
-authorized to inspect. Naming suggestions are not ground truth.
+**Download status:** a Windows test installer has been built locally. It has
+not yet been published in Releases or validated on a clean Windows machine.
+If no setup executable is attached to a release, there is no packaged download
+available. **The “Source code” ZIP is not an installer.**
 
-- Automatic Ghidra Headless analysis and import of JSON exports (schemas v1/v2).
-- Function explorer, assembly, pseudocode, strings, types, imports/exports,
-  call graphs, comparison and reporting tools.
-- Symbols, RTTI, FunctionID (FID) and BSim reference matches before AI naming.
-- Arbitration of ambiguous matches and manual review of unconfirmed hypotheses.
-- Confirmed renaming in the local Ghidra project, saved projects and reopening.
-- Combined assembly/pseudocode loading in the Code Browser, without BSim work
-  just to display code, plus local caching.
+The packaged installer includes the reference corpus and Ghidra extension.
+First-time setup downloads Java and Ghidra when needed. You do not need to
+install development tools or compile the corpus yourself. AI setup is separate.
 
-FID uses reference fingerprints; BSim compares function features with a reference
-database. Both have limited coverage. AI confidence is a signal, not a calibrated
-probability, and the AI layer does not replace evidence.
+[Installation guide](docs/INSTALLATION_WINDOWS.md) ·
+[Using the application](docs/USER_GUIDE.md) ·
+[Help and troubleshooting](docs/TROUBLESHOOTING.md)
 
-## Privacy
+## What you can do
 
-Analysis runs locally. With local Ollama, AI prompts can also remain local.
-**A configured remote provider receives analysis context, including pseudocode
-and strings.** Review its policy before using confidential binaries.
-See [SECURITY.md](SECURITY.md) for data boundaries and publication precautions.
+- Inspect functions, assembly, pseudocode, strings and imports/exports.
+- Explore detected types, call graphs and program comparisons.
+- Identify known functions using symbols, RTTI, Function ID and BSim.
+- Ask an optional AI provider to examine unresolved or ambiguous functions.
+- Compare suggested names with their evidence and review uncertain cases.
+- Apply renames to the local Ghidra project, save your work and reopen it.
+- Generate local analysis reports.
 
-## Development setup (Windows)
+## How suggested names are produced
 
-Prerequisites:
+| Source | What it contributes |
+| --- | --- |
+| Existing symbols and RTTI | Names and C++ type information already present in the binary. |
+| Function ID (FID) | Function fingerprints compared with available reference databases. |
+| BSim | Similarity matches against functions from known reference programs. |
+| Optional AI | Context-based proposals and assistance with ambiguous candidates. |
 
-- Node.js/npm and stable Rust with the MSVC toolchain.
-- Microsoft C++ Build Tools, Windows SDK and WebView2.
-- Ghidra 12.1.2 and Java 21 for the current integration. The setup assistant can
-  help configure these tools and the Reverse Assistant extension.
-- Optional Ollama with a downloaded model, or an OpenAI-compatible AI provider.
+Reference matching comes before AI-generated naming. A close BSim match can
+still have several plausible names, and AI can make mistakes. Automatic naming
+uses additional checks; other proposals remain available for manual review.
+**Confidence scores are not guarantees or calibrated probabilities.**
 
-From the repository root:
+## Local analysis and optional AI
 
-For a source checkout, first follow the build-from-source guide, including
-the corpus generation step. The short commands below are not a complete
-first-install procedure.
+Ghidra analyzes the binary locally without executing the target program.
+AI is not required to explore code or use reference matching.
 
-```powershell
-npm.cmd ci
-npm.cmd run tauri dev
-```
+Use a local Ollama model to keep AI requests on your machine. A configured
+remote provider receives the selected analysis context, including pseudocode
+and strings. Read [Privacy and security](SECURITY.md) before working with
+confidential or untrusted files.
 
-Configure Ghidra through the setup assistant. Manual extension deployment is
-available in [scripts/deploy-ghidra-extension.ps1](scripts/deploy-ghidra-extension.ps1).
+[Configure optional AI](docs/AI_SETUP.md)
 
-### BSim corpus and installers
+## Before you use the alpha
 
-Downloaded sources, reference binaries and generated databases are not committed.
-Build scripts, pinned hashes and license metadata are documented in
-[bsim-corpus/README.md](bsim-corpus/README.md).
+- Analyze only software you are authorized to inspect.
+- Corpus coverage is limited: some functions will remain unidentified.
+- Imported functions may have no local implementation to display.
+- Initial analysis and first code loads can take time; cached loads are faster.
+- Local AI models can abstain, time out or return unusable responses.
+- The test installer is unsigned; inspect its source and checksum before use.
+- Windows is the primary tested platform. Linux ELF analysis from Windows is
+  supported by the pipeline; a Linux desktop release is not established here.
+- The current application interface is primarily French. This documentation
+  is in English; translated control names are explained where needed.
 
-The Tauri bundle currently expects `bsim-corpus/build/reverse-assistant-seed.mv.db`.
-Generate it with the documented pipeline before packaging. Use
-`scripts/build-windows-installer.ps1` for customer installers; see the
-[release checklist](docs/RELEASE_CHECKLIST.md).
-A clean checkout does not include this generated resource. Verify third-party
-redistribution rights before publishing corpus assets or reference binaries.
+## Documentation
 
-## Checks
+Find all guides in the [documentation index](docs/README.md).
 
-```powershell
-npm.cmd run check
-cargo check --manifest-path src-tauri/Cargo.toml --all-targets
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-.\scripts\audit-publication.ps1 -IncludeHistory
-```
-
-Close a running development app before rebuilding its executable on Windows.
-Real Ghidra checks are documented in [tests/ghidra/README.md](tests/ghidra/README.md).
-The publication scanner is a read-only heuristic, not a security certification.
-
-## Known limitations
-
-- Cold code display starts Ghidra and can take several seconds; cached loads
-  are much faster.
-- Imported functions have no local implementation. Only their local relay can
-  be displayed when present.
-- Corpus coverage is limited; similar matches can remain ambiguous.
-- Local models can abstain or return malformed/truncated responses. Review
-  diagnostics instead of assuming every function will receive a name.
-- Provider keys are stored in local app-data settings, not an encrypted vault.
-  Never share those settings.
+For developers: [Build from source](docs/BUILD_FROM_SOURCE.md) and
+[Contributing](CONTRIBUTING.md). The repository folders contain application
+source, reference-build tooling and regression tests. End users do not need
+to run those tools or tests.
 
 ## License
 
-Application source: [MIT](LICENSE). Tools, models, reference libraries and corpus
-artifacts retain their own licenses.
+Application source: [MIT](LICENSE). Third-party tools, models and reference
+components retain their own licenses. Release packages include third-party notices.

@@ -1,5 +1,8 @@
 # Local naming agent v3
 
+Technical design note. For current user workflows, read the
+[user guide](../USER_GUIDE.md). This note is not a release validation report.
+
 The v3 agent keeps Ghidra, RTTI, FunctionID and BSim as authoritative evidence.
 It changes only the reasoning layer used for functions that remain unnamed or
 ambiguous.

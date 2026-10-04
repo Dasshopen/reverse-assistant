@@ -1,5 +1,10 @@
 # BSim seed corpus
 
+**Maintainer documentation.** Packaged users receive a prebuilt corpus and do
+not run these build scripts. Start with the
+[installation guide](../docs/INSTALLATION_WINDOWS.md) to use the application,
+or [Build from source](../docs/BUILD_FROM_SOURCE.md) for development.
+
 Ghidra's BSim (binary similarity) database ships **empty** — nothing matches
 until reference binaries are analyzed and their signatures ingested. This
 directory holds the reproducible pipeline that builds a small seed corpus,

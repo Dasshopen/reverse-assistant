@@ -1,5 +1,8 @@
 # Naming benchmark
 
+Developer methodology, not an end-user setup step. See the
+[documentation index](../README.md) for user guides.
+
 The naming benchmark deliberately separates coverage from correctness. A new
 pipeline is not considered better merely because it proposes more names.
 

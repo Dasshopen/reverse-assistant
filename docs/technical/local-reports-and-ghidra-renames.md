@@ -1,5 +1,8 @@
 # Local reports and Ghidra round-trip
 
+Technical implementation note. For application usage, read the
+[user guide](../USER_GUIDE.md).
+
 ## PDF reports
 
 Reports are generated entirely locally from the canonical analysis already loaded by the Rust

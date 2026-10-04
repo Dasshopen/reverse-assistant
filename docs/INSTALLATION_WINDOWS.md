@@ -6,7 +6,8 @@ Open [GitHub Releases](https://github.com/Dasshopen/reverse-assistant/releases)
 and download the Windows x64 file ending in **`-setup.exe`** from the selected
 release. Download the installer, not the “Source code” ZIP.
 
-**Release status:** the first installer is being prepared for testing. If no
+**Release status:** the first test installer has been built locally, but has not
+been published in Releases or validated on clean Windows. If no
 setup executable is attached to a release, no packaged download is available
 yet. The source archive is not a replacement installer.
 
@@ -55,7 +56,7 @@ will receive a proposed name.
 You can use the application without AI. To enable local AI, install
 [Ollama](https://ollama.com/download/windows), download a model, and add its
 connection in the application's provider settings. See
-[local AI configuration](BUILD_FROM_SOURCE.md#5-enable-local-ai-optional).
+[local AI configuration](AI_SETUP.md).
 Ollama and model downloads are not forced during first setup.
 
 Remote AI providers receive submitted analysis context. Read
@@ -65,4 +66,6 @@ Remote AI providers receive submitted analysis context. Read
 
 Include the application version, Windows version and complete error message
 when reporting a problem. Never share API keys or confidential binaries.
+Read [the user guide](USER_GUIDE.md) to understand proposals and review modes,
+or [Troubleshooting](TROUBLESHOOTING.md) for common problems.
 Developers: read [Build from source](BUILD_FROM_SOURCE.md).

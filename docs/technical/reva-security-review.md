@@ -1,5 +1,9 @@
 # ReVa security review
 
+Historical review of a specific upstream snapshot. Its findings do not certify
+Reverse Assistant or later upstream versions. For current data boundaries,
+read [SECURITY.md](../../SECURITY.md).
+
 Review date: 2026-07-27
 
 Upstream reviewed: `cyberkaida/reverse-engineering-assistant`, commit
