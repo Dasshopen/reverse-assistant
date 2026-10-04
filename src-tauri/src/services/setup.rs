@@ -24,7 +24,7 @@ const TEMURIN_DOWNLOAD_URL: &str =
     "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse";
 const EXTENSION_RESOURCE: &str = "managed/ReverseAssistantExporter.zip";
 const EXTENSION_SOURCE_RESOURCE: &str = "managed/extension-source";
-const EXTENSION_SHA256: &str = "0d20b2808a4074bcd17e2913df6eda0b36450e505bf4e262110bfd2ec02833b5";
+const EXTENSION_CHECKSUM_RESOURCE: &str = "managed/ReverseAssistantExporter.sha256";
 const BSIM_RESOURCE: &str = "managed/reverse-assistant-seed.mv.db";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -386,22 +386,25 @@ fn extension_archive(app: &AppHandle) -> Result<PathBuf, String> {
         .resolve(EXTENSION_RESOURCE, BaseDirectory::Resource)
     {
         if resource.is_file() {
-            verify_file(&resource, EXTENSION_SHA256)?;
+            let checksum = app
+                .path()
+                .resolve(EXTENSION_CHECKSUM_RESOURCE, BaseDirectory::Resource)
+                .map_err(|error| format!("unable to resolve extension checksum: {error}"))?;
+            verify_packaged_extension(&resource, &checksum)?;
             return Ok(resource);
         }
     }
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("ghidra-extension")
-        .join("ReverseAssistantExporter")
-        .join("dist")
-        .join("ghidra_12.1.2_PUBLIC_20260723_ReverseAssistantExporter.zip");
-    if development.is_file() {
-        verify_file(&development, EXTENSION_SHA256)?;
-        Ok(development)
-    } else {
-        Err("the bundled Reverse Assistant Ghidra extension is missing".to_owned())
+    Err("the bundled Reverse Assistant Ghidra extension is missing".to_owned())
+}
+
+fn verify_packaged_extension(archive: &Path, checksum: &Path) -> Result<(), String> {
+    let expected = fs::read_to_string(checksum)
+        .map_err(|error| format!("unable to read packaged extension checksum: {error}"))?;
+    let expected = expected.trim();
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("the packaged extension checksum is invalid".to_owned());
     }
+    verify_file(archive, expected)
 }
 
 fn extension_source(app: &AppHandle) -> Result<PathBuf, String> {
@@ -412,6 +415,9 @@ fn extension_source(app: &AppHandle) -> Result<PathBuf, String> {
         if resource.join("build.gradle").is_file() {
             return Ok(resource);
         }
+    }
+    if !cfg!(debug_assertions) {
+        return Err("extension source builds are available only in development".to_owned());
     }
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -534,6 +540,9 @@ pub(crate) fn install_bsim_corpus(app: &AppHandle) -> Result<Option<PathBuf>, St
         .ok()
         .filter(|path| path.is_file())
         .or_else(|| {
+            if !cfg!(debug_assertions) {
+                return None;
+            }
             let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
                 .join("bsim-corpus")
@@ -599,8 +608,18 @@ fn install_extension(
     version_label: &str,
     java_home: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let archive =
-        extension_archive(app).or_else(|_| build_extension_archive(app, install_dir, java_home))?;
+    // Customer installers must never require Gradle or silently fall back after
+    // a failed integrity check. Source builds remain available for development.
+    let packaged = app
+        .path()
+        .resolve(EXTENSION_RESOURCE, BaseDirectory::Resource)
+        .ok()
+        .is_some_and(|path| path.is_file());
+    let archive = if packaged || !cfg!(debug_assertions) {
+        extension_archive(app)?
+    } else {
+        build_extension_archive(app, install_dir, java_home)?
+    };
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -750,7 +769,12 @@ pub fn install_managed_setup(
         .iter()
         .any(|component| component.id == "java" && component.state == SetupComponentState::Ready);
     let managed_java = if java_ready {
-        None
+        // A managed JDK is not on the system PATH. Preserve it during repair.
+        before
+            .components
+            .iter()
+            .find(|component| component.id == "java")
+            .and_then(|component| component.path.clone())
     } else {
         Some(install_java(app, &before.managed_root)?)
     };
@@ -761,7 +785,7 @@ pub fn install_managed_setup(
             && path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("ghidra_12."))
+                .is_some_and(|name| name == GHIDRA_VERSION_LABEL)
     });
     let install_dir = if base_is_usable {
         configured_dir.expect("checked as present")
@@ -1117,6 +1141,23 @@ mod tests {
             .expect("clock should be after the Unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("reverse-assistant-setup-{name}-{unique}"))
+    }
+
+    #[test]
+    fn packaged_extension_checksum_rejects_missing_invalid_and_tampered_files() {
+        let root = isolated_directory("extension-integrity");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("extension.zip");
+        let checksum = root.join("extension.sha256");
+        fs::write(&archive, b"packaged-extension").unwrap();
+        assert!(verify_packaged_extension(&archive, &checksum).is_err());
+        fs::write(&checksum, "not-a-sha256").unwrap();
+        assert!(verify_packaged_extension(&archive, &checksum).is_err());
+        fs::write(&checksum, hash_file(&archive).unwrap()).unwrap();
+        verify_packaged_extension(&archive, &checksum).unwrap();
+        fs::write(&archive, b"tampered-extension").unwrap();
+        assert!(verify_packaged_extension(&archive, &checksum).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1,0 +1,22 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": {
+      "../ghidra-extension/ReverseAssistantExporter/build.gradle": null,
+      "../ghidra-extension/ReverseAssistantExporter/extension.properties": null,
+      "../ghidra-extension/ReverseAssistantExporter/Module.manifest": null,
+      "../ghidra-extension/ReverseAssistantExporter/src": null,
+      "../ghidra-extension/ReverseAssistantExporter/ghidra_scripts": null,
+      "../bsim-corpus/build/reverse-assistant-seed.mv.db": null,
+      "../.release-assets/reverse-assistant-seed.mv.db": "managed/reverse-assistant-seed.mv.db",
+      "../.release-assets/ReverseAssistantExporter.zip": "managed/ReverseAssistantExporter.zip",
+      "../.release-assets/ReverseAssistantExporter.sha256": "managed/ReverseAssistantExporter.sha256",
+      "../.release-assets/THIRD_PARTY_NOTICES.txt": "managed/THIRD_PARTY_NOTICES.txt",
+      "../bsim-corpus/manifest.json": "managed/corpus-manifest.json"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": { "installMode": "currentUser", "languages": ["English"], "displayLanguageSelector": false }
+    }
+  }
+}

@@ -316,6 +316,9 @@ fn locate_default_corpus(app: &AppHandle, app_data_dir: &Path) -> Result<Option<
             )
         });
     }
+    if !cfg!(debug_assertions) {
+        return Ok(None);
+    }
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("bsim-corpus")

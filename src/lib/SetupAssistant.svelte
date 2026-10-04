@@ -149,6 +149,9 @@
             L’application peut installer et configurer seule les outils nécessaires. Rien ne sera
             ajouté au système avant ton accord.
           </p>
+          <p>Java et Ghidra seront téléchargés si nécessaire. L’extension et le corpus sont inclus
+            dans l’installateur. Aucun outil de développement n’est nécessaire. L’IA est facultative
+            et peut être configurée plus tard.</p>
         </div>
       </header>
 
@@ -188,7 +191,7 @@
             {#each plan.items as item (item.id)}
               <li>
                 <div><strong>{item.label}</strong> <span>{item.version}</span></div>
-                <small>{item.source} · {item.license}</small>
+                <small>{item.source} · <a href={item.license_url} target="_blank" rel="noreferrer">{item.license}</a></small>
               </li>
             {/each}
           </ul>

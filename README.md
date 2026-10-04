@@ -7,12 +7,13 @@ optional AI-assisted naming.
 ## Install from GitHub
 
 **Start here: [step-by-step Windows installation guide](docs/INSTALLATION_WINDOWS.md).**
-Follow the guide to install prerequisites, download or clone the project,
-generate the BSim corpus, configure Ghidra and Ollama, and run your first test.
-Troubleshooting instructions are included.
+Use the packaged Windows installer and complete the application's guided setup.
+AI is optional. End users do not need development tools or corpus compilation.
 
-This repository contains **source code**, not a ready-to-run installer.
-The generated BSim corpus is not included in the GitHub download.
+The first installer is being prepared for testing. Check
+[Releases](https://github.com/Dasshopen/reverse-assistant/releases) for packaged
+downloads; the source ZIP is not an installer.
+Developers: follow [Build from source](docs/BUILD_FROM_SOURCE.md).
 
 ## Status and features
 
@@ -51,7 +52,7 @@ Prerequisites:
 
 From the repository root:
 
-For a fresh download, first follow the installation guide above, including
+For a source checkout, first follow the build-from-source guide, including
 the corpus generation step. The short commands below are not a complete
 first-install procedure.
 
@@ -70,7 +71,9 @@ Build scripts, pinned hashes and license metadata are documented in
 [bsim-corpus/README.md](bsim-corpus/README.md).
 
 The Tauri bundle currently expects `bsim-corpus/build/reverse-assistant-seed.mv.db`.
-Generate it with the documented pipeline before `npm.cmd run tauri build`.
+Generate it with the documented pipeline before packaging. Use
+`scripts/build-windows-installer.ps1` for customer installers; see the
+[release checklist](docs/RELEASE_CHECKLIST.md).
 A clean checkout does not include this generated resource. Verify third-party
 redistribution rights before publishing corpus assets or reference binaries.
 
