@@ -1,7 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { UpdateController } from "../../src/lib/updates.ts";
 import { buildUpdateManifest } from "../../scripts/update-manifest.mjs";
+
+test("published feed uses the GitHub asset filename and a matching signed version", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../../updates/latest.json", import.meta.url), "utf8"));
+  const platform = manifest.platforms["windows-x86_64"];
+  const expected = buildUpdateManifest({
+    version: manifest.version, tag: `v${manifest.version}-alpha.1`,
+    filename: `Reverse.Assistant_${manifest.version}_x64-setup.exe`,
+    signature: platform.signature, notes: manifest.notes, date: manifest.pub_date,
+  });
+  assert.deepEqual(manifest, expected);
+});
 
 function fixture(overrides = {}, fetcher) {
   const calls = [];

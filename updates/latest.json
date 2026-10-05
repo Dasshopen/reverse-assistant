@@ -1,0 +1,11 @@
+{
+  "version": "0.1.3",
+  "notes": "Reverse Assistant 0.1.3 Alpha\n\nAdds application update checks with verified signatures and explicit installation confirmation, readable C++ naming proposals, and hidden Windows analysis helpers. Includes the automatic Java setup fix.\n\nWindows x64 Alpha build. Installation, analysis and renaming have been tested by the maintainer in a Windows VM. A full upgrade from an older updater-enabled build remains to be tested.\n\nUpdates are not installed silently. Windows may warn because the installer has no Authenticode certificate. Back up important projects before testing an Alpha upgrade.",
+  "pub_date": "2026-10-05T11:48:50.978Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRNmRUSERyYmJadUtwZGFDbGVOVUduSEZJTTA5YWxXcFRBQ0ZNczM0WWRPdXJTTzAzTzEvK0lzSEY3NGNWK2hiZkJhS3ZRckJldXU0TmVwM3JEc1Nra01xa0FLeUNGeVFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjAwOTMwCWZpbGU6UmV2ZXJzZSBBc3Npc3RhbnRfMC4xLjNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4zClpUMld0eEJJWExRN2RHMjIvandxVFU1TWh3U2hOenh0cnhYSjdjMkMzUzRBMk90VnRTSVNzQ1Rtc1F5dnc5OGx2N3M0MDZpem9nejFRTGtMTDlQMEFBPT0K",
+      "url": "https://github.com/Dasshopen/reverse-assistant/releases/download/v0.1.3-alpha.1/Reverse.Assistant_0.1.3_x64-setup.exe"
+    }
+  }
+}
