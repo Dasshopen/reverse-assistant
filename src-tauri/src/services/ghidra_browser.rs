@@ -1,5 +1,6 @@
 //! Interactive code display: one JVM/project open, no BSim work.
-use std::{fs, path::Path, process::Command};
+use crate::services::background_process::background_command;
+use std::{fs, path::Path};
 
 use serde::Serialize;
 use tauri::AppHandle;
@@ -100,7 +101,7 @@ pub fn run_browser_function(
             details.is_none(),
             disassembly.is_none(),
         );
-        let mut command = Command::new(&invocation.program);
+        let mut command = background_command(&invocation.program);
         command
             .args(invocation.args)
             .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);

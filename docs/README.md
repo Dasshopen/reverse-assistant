@@ -7,6 +7,7 @@
 | [Install on Windows](INSTALLATION_WINDOWS.md) | Download the installer and complete first-time setup. |
 | [User guide](USER_GUIDE.md) | Open a binary, understand proposals, rename functions and save work. |
 | [Optional AI](AI_SETUP.md) | Connect a local Ollama model or a remote provider. |
+| [Application updates](APP_UPDATES.md) | Check, download and install signed updates. |
 | [Help and troubleshooting](TROUBLESHOOTING.md) | Understand missing matches, delays and setup failures. |
 | [Privacy and security](../SECURITY.md) | Understand local data, remote AI and safe sample handling. |
 
@@ -21,6 +22,8 @@ Do not confuse a source archive with a packaged application.
 - [Clean Windows VM acceptance test](WINDOWS_VM_TEST.md).
 - [Prepared alpha release notes](RELEASE_NOTES_0.1.0_ALPHA.md).
 - [0.1.1 setup hotfix notes](RELEASE_NOTES_0.1.1_ALPHA.md).
+- [0.1.2 background-process hotfix notes](RELEASE_NOTES_0.1.2_ALPHA.md).
+- [0.1.3 updater and readable-name notes](RELEASE_NOTES_0.1.3_ALPHA.md).
 - [Reference corpus tooling](../bsim-corpus/README.md).
 - [Ghidra regression checks](../tests/ghidra/README.md).
 
@@ -45,6 +48,7 @@ instructions and do not establish the current release's validation status.
 | `bsim-corpus/` | Reference manifests and scripts for maintainers to build the corpus. |
 | `scripts/` | Maintainer setup, packaging and publication checks. |
 | `tests/ghidra/` | Ghidra regression scripts, not challenge binaries or required user steps. |
+| `tests/ui/` | Frontend helper regression tests, not required for installation. |
 | `static/` | Application web assets. |
 | `.vscode/` | Editor settings for development. |
 

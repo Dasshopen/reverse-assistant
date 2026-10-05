@@ -18,11 +18,12 @@
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use crate::services::background_process::background_command;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -71,17 +72,12 @@ fn ollama_executable() -> Option<PathBuf> {
 }
 
 fn spawn_ollama_server(executable: &PathBuf) -> io::Result<()> {
-    let mut command = Command::new(executable);
+    let mut command = background_command(executable);
     command
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
     command.spawn().map(|_| ())
 }
 

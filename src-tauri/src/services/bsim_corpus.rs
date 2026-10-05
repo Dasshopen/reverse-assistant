@@ -1,8 +1,9 @@
+use crate::services::background_process::background_command;
 use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -534,7 +535,7 @@ pub fn build_corpus_from_library(
     let database_url = database_url(&database)?;
     let project_name = format!("reference_{stem}");
 
-    let mut create = Command::new(&bsim);
+    let mut create = background_command(&bsim);
     configure_java_environment(&mut create, &installation);
     let output = create
         .arg("createdatabase")
@@ -546,7 +547,7 @@ pub fn build_corpus_from_library(
         return Err(command_error("Ghidra BSim database creation", &output));
     }
 
-    let mut analyze = Command::new(&analyze_headless);
+    let mut analyze = background_command(&analyze_headless);
     configure_java_environment(&mut analyze, &installation);
     analyze.env("GHIDRA_HEADLESS_MAXMEM", "8G");
     let output = analyze
@@ -565,7 +566,7 @@ pub fn build_corpus_from_library(
         project_dir.to_string_lossy().replace('\\', "/"),
         project_name
     );
-    let mut generate = Command::new(&bsim);
+    let mut generate = background_command(&bsim);
     configure_java_environment(&mut generate, &installation);
     let output = generate
         .arg("generatesigs")

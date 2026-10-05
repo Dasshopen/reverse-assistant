@@ -1,5 +1,6 @@
 pub mod ai_provider;
 pub mod ai_providers;
+pub(crate) mod background_process;
 pub mod bsim_corpus;
 pub mod call_graph;
 pub mod comparison;
@@ -22,3 +23,4 @@ pub mod project_storage;
 pub mod report;
 pub mod semantic_memory;
 pub mod setup;
+pub mod symbol_names;

@@ -1,6 +1,6 @@
+use crate::services::background_process::background_command;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -173,7 +173,7 @@ fn read_cached_or_run(
         let _ = fs::remove_file(destination_json);
     }
 
-    let mut command = Command::new(&invocation.program);
+    let mut command = background_command(&invocation.program);
     command
         .args(&invocation.args)
         .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);

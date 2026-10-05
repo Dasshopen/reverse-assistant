@@ -1,6 +1,6 @@
+use crate::services::background_process::background_command;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -238,7 +238,7 @@ pub fn run_decompile_function(
         &bsim_arguments,
     );
 
-    let mut command = Command::new(&invocation.program);
+    let mut command = background_command(&invocation.program);
     command
         .args(&invocation.args)
         .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);
@@ -330,7 +330,7 @@ pub fn prepare_function_contexts(
     }
 
     let scripts_dir = installation.extensions_dir.join("ghidra_scripts");
-    let mut command = Command::new(
+    let mut command = background_command(
         installation
             .install_dir
             .join("support")

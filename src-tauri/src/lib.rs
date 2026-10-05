@@ -99,6 +99,13 @@ fn get_backend_status() -> String {
     String::from("Reverse Assistant Rust backend ready")
 }
 
+#[tauri::command(async)]
+fn get_symbol_presentations(
+    names: Vec<String>,
+) -> Result<Vec<services::symbol_names::SymbolPresentation>, String> {
+    services::symbol_names::present_symbols(&names)
+}
+
 #[tauri::command]
 fn import_ghidra_export_summary(
     app: AppHandle,
@@ -2429,6 +2436,7 @@ fn disassemble_functions(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Keep the writable app-data copy in sync with the corpus bundled
             // by this exact application build. Without this startup refresh,
@@ -2446,6 +2454,7 @@ pub fn run() {
         .manage(DecompileCoordinator::default())
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
+            get_symbol_presentations,
             import_ghidra_export_summary,
             import_ghidra_export_details,
             configure_ghidra_installation,

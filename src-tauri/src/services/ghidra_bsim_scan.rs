@@ -1,5 +1,5 @@
+use crate::services::background_process::background_command;
 use std::fs;
-use std::process::Command;
 
 use tauri::AppHandle;
 
@@ -27,7 +27,7 @@ pub fn scan_unnamed_functions(
 
     let destination = session.project_dir.join("bsim-identifications.json");
     let scripts_dir = installation.extensions_dir.join("ghidra_scripts");
-    let mut command = Command::new(
+    let mut command = background_command(
         installation
             .install_dir
             .join("support")

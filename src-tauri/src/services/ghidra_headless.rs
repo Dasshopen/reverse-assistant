@@ -1,6 +1,6 @@
+use crate::services::background_process::background_command;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -200,7 +200,7 @@ pub fn run_headless_analysis(
         &identifications_json,
     );
 
-    let mut command = Command::new(&invocation.program);
+    let mut command = background_command(&invocation.program);
     command
         .args(&invocation.args)
         .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);

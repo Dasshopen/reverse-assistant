@@ -1,7 +1,7 @@
+use crate::services::background_process::background_command;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -188,7 +188,7 @@ pub fn run_apply_renames(
             &result_path,
             &refreshed_export_path,
         );
-        let mut command = Command::new(&invocation.program);
+        let mut command = background_command(&invocation.program);
         command
             .args(&invocation.args)
             .env("GHIDRA_HEADLESS_MAXMEM", HEADLESS_MAX_HEAP);

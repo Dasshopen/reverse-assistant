@@ -47,9 +47,10 @@
 
   interface Props {
     onready?: () => void | Promise<void>;
+    onbusychange?: (busy: boolean) => void;
   }
 
-  let { onready }: Props = $props();
+  let { onready, onbusychange }: Props = $props();
   let overview = $state<SetupOverview | null>(null);
   let plan = $state<SetupInstallPlan | null>(null);
   let progress = $state<SetupProgress | null>(null);
@@ -58,6 +59,7 @@
   let installing = $state(false);
   let configuringExisting = $state(false);
   let licensesAccepted = $state(false);
+  $effect(() => { onbusychange?.(loading || installing || configuringExisting); });
 
   onMount(() => {
     let unlisten: UnlistenFn | undefined;

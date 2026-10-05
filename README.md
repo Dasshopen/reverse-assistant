@@ -16,7 +16,7 @@ name, and decide which changes to apply.
 3. Complete the guided setup, then open a binary you are authorized to analyze.
 
 **Download status:** clean-Windows acceptance testing is in progress. The 0.1.0
-installer has a known automatic Java setup failure; use the corrected 0.1.1
+installer has a known automatic Java setup failure; use the corrected 0.1.3
 candidate when its setup executable is available in Releases. If no setup
 executable is attached to a release, there is no packaged download available.
 **The “Source code” ZIP is not an installer.**
@@ -52,6 +52,16 @@ Reference matching comes before AI-generated naming. A close BSim match can
 still have several plausible names, and AI can make mistakes. Automatic naming
 uses additional checks; other proposals remain available for manual review.
 **Confidence scores are not guarantees or calibrated probabilities.**
+
+## Application updates
+
+Updater-enabled builds check for new versions at startup. Download and install
+signed updates from **Settings → Application updates**; installation requires
+your confirmation and waits for current operations to finish. The first
+updater-enabled build must be installed manually once. Availability depends on
+the public Alpha update feed being published.
+
+[Update guide](docs/APP_UPDATES.md)
 
 ## Local analysis and optional AI
 

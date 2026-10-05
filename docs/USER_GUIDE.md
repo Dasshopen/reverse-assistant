@@ -77,6 +77,23 @@ Changing a profile does not improve the underlying analysis.
 Manual mode can show more proposals than the automatic batch because it also
 shows alternatives and hypotheses that did not pass automatic checks.
 
+### Readable C++ proposals
+
+Encoded MSVC and GCC/Clang C++ symbols are decoded locally for display. For
+example, a deleting-destructor symbol appears as
+`CVideoCaptureTerminal::scalar_deleting_destructor` rather than an encoded
+string. No AI request is needed for this conversion.
+
+Open **Signature and raw symbol** (`Signature et symbole brut`) to inspect the
+full decoded signature, original symbol and flat name prepared for Ghidra.
+Overloaded functions retain their distinct original symbols and signatures.
+Ghidra's rename action uses a flat identifier; it does not recreate C++
+namespaces or function prototypes. If decoding fails, the original symbol
+remains visible and no replacement is guessed.
+
+A readable name does not prove a correct match. Confidence, source evidence,
+ambiguity and automatic naming checks still apply.
+
 ## 5. Review the remaining cases
 
 Open **Review required** (`Révision nécessaire`). Cases can have several
@@ -106,3 +123,10 @@ information. Review them before sharing them.
 You can complete the steps above without configuring AI. To add it later,
 follow [AI setup](AI_SETUP.md). AI analysis may continue in the background;
 inspect its status and diagnostics rather than assuming every request succeeded.
+
+## Application updates
+
+Open **Settings → Application updates** to check for a newer version. Startup
+checks can be disabled there. Downloading and installation are separate actions;
+installation requires confirmation and waits for current operations to finish.
+Read [Application updates](APP_UPDATES.md) for first-install and security details.

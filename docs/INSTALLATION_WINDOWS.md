@@ -7,7 +7,7 @@ and download the Windows x64 file ending in **`-setup.exe`** from the selected
 release. Download the installer, not the “Source code” ZIP.
 
 **Release status:** clean-Windows acceptance testing is in progress. Use the
-0.1.1 candidate when available; automatic Java setup in 0.1.0 has a known
+0.1.3 candidate when available; automatic Java setup in 0.1.0 has a known
 checksum-redirect failure. If no setup executable is attached to a release,
 no packaged download is available yet. The source archive is not a replacement
 installer.

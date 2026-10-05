@@ -2,9 +2,12 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { open, save } from "@tauri-apps/plugin-dialog";
-  import { onMount } from "svelte";
+  import { onMount, untrack, tick } from "svelte";
   import SetupAssistant from "$lib/SetupAssistant.svelte";
   import ProgressRing from "$lib/ProgressRing.svelte";
+  import SymbolDetails from "$lib/SymbolDetails.svelte";
+  import UpdateCenter from "$lib/UpdateCenter.svelte";
+  import { SymbolPresentationQueue, isEncodedCppName, displaySymbolName, decodedRenameName, type SymbolPresentation } from "$lib/symbolNames";
 
   interface GhidraImportSummary {
     function_count: number;
@@ -398,6 +401,7 @@ interface FunctionIdentification {
 interface AutomaticRenameChoice {
   func: GhidraFunction;
   name: string;
+  rawName?: string;
   source: "rtti" | "function_id" | "bsim" | "arbitration" | "generation" | "semantic_fallback";
   scoreLabel: string;
   evidenceLabel: string;
@@ -898,7 +902,7 @@ interface ApplyRenamesResult {
       if (!query) return true;
       const fidNames = identifications.get(func.entry_address)?.map((candidate) => candidate.name) ?? [];
       const bsimNames = bsimMatchesForAddress(func.entry_address).map((candidate) => candidate.name);
-      return [func.name, func.entry_address, ...fidNames, ...bsimNames]
+      return [func.name, func.entry_address, ...fidNames, ...bsimNames, ...fidNames.map(displayCandidateName), ...bsimNames.map(displayCandidateName)]
         .some((value) => value.toLowerCase().includes(query));
     });
     return sortIdentificationFunctions(filtered);
@@ -935,6 +939,8 @@ interface ApplyRenamesResult {
   let isConfiguringGhidra = $state(false);
   let analyzeError = $state("");
   let isAnalyzing = $state(false);
+  let updateInstallationLocked = $state(false);
+  let setupBusy = $state(true);
   let analysisProgress = $state<AnalysisProgress | null>(null);
   let analysisProgressVisible = $state(false);
   let analysisProgressMinimized = $state(false);
@@ -1157,26 +1163,11 @@ interface ApplyRenamesResult {
   }
 
   function normalizedAutomaticSymbolName(name: string): string | null {
+    // Decode locally before preparing a flat rename. Opaque/failed C++ names
+    // must never be guessed by stripping punctuation. Existing score, evidence,
+    // verifier and collision gates remain unchanged.
+    if (isEncodedCppName(name)) return decodedRenameName(name, symbolPresentations.get(name));
     if (isSafeAutomaticSymbolName(name)) return name;
-
-    const deletingDestructor = name.match(/^\?\?_G([^@]+)@(.+?)@@/);
-    if (deletingDestructor) {
-      const scope = deletingDestructor[2].split("@").filter(Boolean).reverse().join("_");
-      return `${scope}_${deletingDestructor[1]}_deleting_destructor`;
-    }
-
-    const constructor = name.match(/^\?\?0([^@]+)@(.+?)@@(.*)$/);
-    if (constructor) {
-      const suffix = constructor[3];
-      const scope = constructor[2].split("@").filter(Boolean).reverse().join("_");
-      return `${scope}_${constructor[1]}_${suffix.includes("AEBV") ? "copy_constructor" : "constructor"}`;
-    }
-
-    if (/^\?\?2@/.test(name)) return "operator_new";
-    if (/^\?\?3@/.test(name)) return "operator_delete";
-
-    const globalFunction = name.match(/^\?([A-Za-z_][A-Za-z0-9_]*)@@/);
-    if (globalFunction) return globalFunction[1];
 
     // BSim commonly returns already-demangled C++ names. Ghidra's flat rename
     // command cannot create namespaces here, so preserve every readable scope
@@ -1298,26 +1289,40 @@ interface ApplyRenamesResult {
   }
 
   function displayCandidateName(name: string): string {
-    // Display-only decoding for common MSVC constructors/destructors. This is
-    // never written back because correct C++ application also needs namespace
-    // and overload support in the Ghidra edit contract.
-    const deletingDestructor = name.match(/^\?\?_G([^@]+)@(.+?)@@/);
-    if (deletingDestructor) {
-      const scope = deletingDestructor[2].split("@").filter(Boolean).reverse().join("::");
-      return `${scope}::${deletingDestructor[1]}::~${deletingDestructor[1]} (destructeur C++ décoré)`;
-    }
-    const special = name.match(/^\?\?([01])([^@]+)@(.+?)@@/);
-    if (special) {
-      const [, kind, className, rawScope] = special;
-      const scope = rawScope.split("@").filter(Boolean).reverse().join("::");
-      return kind === "0"
-        ? `${scope}::${className}::${className} (nom C++ décoré)`
-        : `${scope}::${className}::~${className} (nom C++ décoré)`;
-    }
-    const member = name.match(/^\?([^@]+)@([^@]+)@@/);
-    if (member) return `${member[2]}::${member[1]} (nom C++ décoré)`;
-    return name;
+    return displaySymbolName(name, symbolPresentations.get(name));
   }
+
+  let symbolPresentations = $state(new Map<string, SymbolPresentation>());
+  let symbolPresentationProgram: string | null = null;
+  const symbolPresentationQueue = new SymbolPresentationQueue(
+    (names) => invoke<SymbolPresentation[]>("get_symbol_presentations", { names }),
+    (results) => {
+      const next = new Map(symbolPresentations);
+      for (const result of results) next.set(result.raw_name, result);
+      symbolPresentations = next;
+    },
+  );
+
+  $effect(() => {
+    const program = importedExport?.program.sha256 ?? null;
+    const names = new Set<string>();
+    for (const candidates of identifications.values()) for (const candidate of candidates) names.add(candidate.name);
+    for (const result of backgroundBsimResults.values()) for (const candidate of result.matches) names.add(candidate.name);
+    for (const candidate of enrichedDetails?.bsim?.matches ?? []) names.add(candidate.name);
+    for (const result of arbitrationResults.values()) if (result.chosen_name) names.add(result.chosen_name);
+    for (const result of generationResults.values()) if (result.suggested_name) names.add(result.suggested_name);
+    for (const result of semanticFallbackResults.values()) if (result.suggested_name) names.add(result.suggested_name);
+    // Cache writes must not become dependencies of this collection effect.
+    // One request per unique symbol, reused across every proposal view.
+    untrack(() => {
+      if (program !== symbolPresentationProgram) {
+        symbolPresentationProgram = program;
+        symbolPresentationQueue.reset();
+        symbolPresentations = new Map();
+      }
+      symbolPresentationQueue.request(names);
+    });
+  });
 
   // Extracts "Namespace::ClassName" from a common MSVC mangled
   // constructor (??0) or destructor (??1 / ??_G scalar deleting
@@ -1370,6 +1375,7 @@ interface ApplyRenamesResult {
       func,
       name: safeName,
       source: "arbitration",
+      rawName: arbitration.chosen_name,
       scoreLabel: "agent IA",
       evidenceLabel: `${arbitration.provider_label} · confiance ${arbitration.confidence}% : ${arbitration.reasoning}`,
       alternativeCount: Math.max(0, tiedCandidatesFor(func.entry_address).length - 1),
@@ -1524,6 +1530,7 @@ interface ApplyRenamesResult {
             func,
             name: safeName,
             source: "rtti",
+            rawName: func.rtti_class_names[0],
             scoreLabel: "RTTI",
             evidenceLabel: `Classe confirmée par les métadonnées RTTI du binaire : ${func.rtti_class_names[0]}`,
             alternativeCount: 0,
@@ -1549,6 +1556,7 @@ interface ApplyRenamesResult {
             func,
             name: safeName,
             source: "rtti",
+            rawName: func.rtti_class_names[0],
             scoreLabel: "RTTI",
             evidenceLabel: `${func.rtti_class_names.length} classes confirmées par RTTI, toutes également réelles : ${func.rtti_class_names.join(", ")}`,
             alternativeCount: func.rtti_class_names.length - 1,
@@ -1598,6 +1606,7 @@ interface ApplyRenamesResult {
               func,
               name: normalizedName,
               source: "generation",
+              rawName: generation.suggested_name,
               scoreLabel: "invention IA",
               evidenceLabel: `${generation.provider_label} · confiance calibrée ${generation.confidence}% : ${generation.reasoning}${generation.evidence.length > 0 ? ` · Indices : ${generation.evidence.join(" ; ")}` : ""}`,
               alternativeCount: 0,
@@ -1668,6 +1677,7 @@ interface ApplyRenamesResult {
             func,
             name: safeName,
             source: "function_id",
+            rawName: selectedFid.name,
             scoreLabel: `score ${selectedFid.overall_score.toFixed(1)}`,
             evidenceLabel: corroboratedFid && bestBsim
               ? `${selectedFid.library_family} ${selectedFid.library_version} · confirmé par ${bestBsim.corpus} (BSim ${bestBsim.similarity.toFixed(3)})`
@@ -1751,6 +1761,7 @@ interface ApplyRenamesResult {
             func,
             name: safeName,
             source: "bsim",
+            rawName: bestBsim.name,
             scoreLabel: `similarité ${bestBsim.similarity.toFixed(3)}`,
             evidenceLabel: corroborationLabel
               ? `${bestBsim.corpus} · ${corroborationLabel}`
@@ -1842,6 +1853,7 @@ interface ApplyRenamesResult {
         func,
         name: normalizedName,
         source: "generation",
+        rawName: generation.suggested_name,
         scoreLabel: "hypothèse IA non validée",
         evidenceLabel: `${generation.provider_label} · confiance calibrée ${generation.confidence}% : ${generation.reasoning}`,
         alternativeCount: 0,
@@ -1919,8 +1931,8 @@ interface ApplyRenamesResult {
       items.push({
         category: choice.ambiguous ? "ambiguous" : "insufficient",
         func: choice.func,
-        candidateName: choice.name,
-        candidateRawName: null,
+        candidateName: displayCandidateName(choice.rawName ?? choice.name),
+        candidateRawName: choice.rawName ?? null,
         source: choice.source,
         evidenceLabel: choice.evidenceLabel,
         reason: choice.ambiguous
@@ -1937,13 +1949,13 @@ interface ApplyRenamesResult {
         normalizedReason.includes("ex æquo") || normalizedReason.includes("ambigu");
       const fallback = semanticFallbackResults.get(rejection.func.entry_address);
       const fallbackName = fallback?.suggested_name
-        ? (normalizedAutomaticSymbolName(fallback.suggested_name) ?? fallback.suggested_name)
+        ? displayCandidateName(fallback.suggested_name)
         : null;
       items.push({
         category: isAmbiguous ? "ambiguous" : "insufficient",
         func: rejection.func,
         candidateName: fallbackName ?? rejection.candidateDisplayName,
-        candidateRawName: fallbackName ? null : rejection.candidateName,
+        candidateRawName: fallbackName ? fallback!.suggested_name : rejection.candidateName,
         source: fallbackName ? "semantic_fallback" : rejection.source,
         evidenceLabel: fallbackName
           ? `${fallback!.provider_label} · hypothèse sémantique · confiance ${fallback!.confidence}% · vérification manuelle obligatoire`
@@ -1964,7 +1976,7 @@ interface ApplyRenamesResult {
       if (coveredAddresses.has(func.entry_address)) continue;
       const fallback = semanticFallbackResults.get(func.entry_address);
       if (!fallback?.suggested_name) continue;
-      const displayedName = normalizedAutomaticSymbolName(fallback.suggested_name) ?? fallback.suggested_name;
+      const displayedName = displayCandidateName(fallback.suggested_name);
       coveredAddresses.add(func.entry_address);
       items.push({
         category: "ambiguous",
@@ -1989,8 +2001,7 @@ interface ApplyRenamesResult {
       const generation = generationResults.get(func.entry_address);
       if (!generation?.suggested_name) continue;
 
-      const normalizedName = normalizedAutomaticSymbolName(generation.suggested_name);
-      const displayedName = normalizedName ?? generation.suggested_name;
+      const displayedName = displayCandidateName(generation.suggested_name);
       const tierLabel = generation.verification_tier === "strong"
         ? "fort"
         : generation.verification_tier === "supported"
@@ -5458,8 +5469,12 @@ interface ApplyRenamesResult {
   />
 </svelte:head>
 
-<main class="app-shell">
-  <SetupAssistant onready={refreshEnvironmentConfiguration} />
+<UpdateCenter showPanel={activeWorkspaceView === "settings"}
+  isBusy={() => setupBusy || isAnalyzing || isImporting || isConfiguringGhidra || isManagingBsimCorpus || isManagingAiProvider || isApplyingFunctionRename || isApplyingAutomaticRenames || isBackgroundAiRunning || isBackgroundArbitrating || isBackgroundGenerating || isBackgroundRefining || isBackgroundSemanticFallback || generatingAddresses.size > 0 || arbitratingAddresses.size > 0 || pendingDecompiles.size > 0 || pendingDisassemblies.size > 0 || isLoadingProgramListingPage || isExportingPdfReport || isLoadingSavedProjects || isComparingProjects || isLoadingGlobalStrings || isLoadingImports || isLoadingExternalEntryPoints || isLoadingDetectedTypes || isLoadingProgramOverview || isLoadingCallGraph}
+  onOpen={() => { activeWorkspaceView = "settings"; }}
+  onLock={async (locked) => { updateInstallationLocked = locked; await tick(); }} />
+<main class="app-shell" inert={updateInstallationLocked}>
+  <SetupAssistant onready={refreshEnvironmentConfiguration} onbusychange={(busy) => { setupBusy = busy; }} />
   {#if analysisProgressVisible && analysisProgress}
     {#if analysisProgressMinimized}
       <button
@@ -6708,7 +6723,7 @@ interface ApplyRenamesResult {
                       <tr class:excluded={excludedAutomaticRenameAddresses.has(item.func.entry_address)}>
                         <td><input type="checkbox" aria-label={`Inclure ${item.func.name}`} checked={!excludedAutomaticRenameAddresses.has(item.func.entry_address)} onchange={() => toggleAutomaticBatchChoice(item.func.entry_address)} /></td>
                         <td><strong>{item.func.name}</strong><code>{item.func.entry_address}</code></td>
-                        <td><strong>{item.name}</strong><small>{item.source === "generation" ? "Hypothèse IA contrôlée" : item.decisionLabel}</small></td>
+                        <td><strong>{displayCandidateName(item.rawName ?? item.name)}</strong><small>{item.source === "generation" ? "Hypothèse IA contrôlée" : item.decisionLabel}</small>{#if displayCandidateName(item.rawName ?? item.name) !== item.name}<small>Nom appliqué : {item.name}</small>{/if}<SymbolDetails name={item.rawName ?? item.name} presentation={symbolPresentations.get(item.rawName ?? item.name)} /></td>
                         <td><span>{identificationSourceLabel(item.source)} · {item.scoreLabel}</span><small>{item.evidenceLabel}</small></td>
                         <td><b>{item.confidence}%</b><small>{item.alternativeCount > 0 ? `${item.alternativeCount} autre(s)` : "Choix unique"}</small></td>
                       </tr>
@@ -6778,11 +6793,12 @@ interface ApplyRenamesResult {
                   <header><div><small>Fonction à départager</small><h3>{reviewItem.func.name}</h3><code>{reviewItem.func.entry_address}</code></div><span class={`review-category-badge ${reviewItem.category}`}>{reviewItem.category === "ambiguous" ? "Ambiguë" : reviewItem.category === "insufficient" ? "Preuve faible" : "Sans piste"}</span></header>
                   <div class="automatic-review-primary-reason">
                     <strong>{reviewItem.candidateName ?? "Aucun nom suffisamment défendable"}</strong>
+                    {#if reviewItem.candidateRawName}<SymbolDetails name={reviewItem.candidateRawName} presentation={symbolPresentations.get(reviewItem.candidateRawName)} />{/if}
                     <p>{reviewItem.reason}</p>
                     {#if reviewItem.evidenceLabel}<small>{reviewItem.evidenceLabel}</small>{/if}
                   </div>
                   <div class="automatic-candidate-stack">
-                    {#if reviewFidCandidates.length > 0}<h4>FunctionID</h4>{#each reviewFidCandidates.slice(0, 5) as candidate}<article><strong>{displayCandidateName(candidate.name)}</strong><span>score {candidate.overall_score.toFixed(1)}</span><small>{candidate.library_family} {candidate.library_version} · {candidate.match_mode}</small></article>{/each}{/if}
+                    {#if reviewFidCandidates.length > 0}<h4>FunctionID</h4>{#each reviewFidCandidates.slice(0, 5) as candidate}<article><strong>{displayCandidateName(candidate.name)}</strong><span>score {candidate.overall_score.toFixed(1)}</span><small>{candidate.library_family} {candidate.library_version} · {candidate.match_mode}</small><SymbolDetails name={candidate.name} presentation={symbolPresentations.get(candidate.name)} /></article>{/each}{/if}
                     {#if reviewBsimCandidates.length > 0}
                       {@const reviewBsimFamilies = bsimCandidateFamilies(reviewBsimCandidates)}
                       <h4>BSim · {reviewBsimFamilies.length} famille(s), {reviewBsimCandidates.length} symbole(s) brut(s)</h4>
@@ -6790,16 +6806,15 @@ interface ApplyRenamesResult {
                         <article>
                           <strong>{family.label}</strong><span>{family.representative.similarity.toFixed(3)}</span>
                           <small>{family.representative.corpus} · significativité {family.representative.significance.toFixed(1)} · {family.variants.length} variante(s)</small>
-                          {#if family.variants.length > 1}
-                            <details class="bsim-family-details"><summary>Voir les symboles bruts</summary><ul>{#each family.variants as variant}<li><code>{variant.name}</code> · {variant.executable}</li>{/each}</ul></details>
-                          {/if}
+                          <details class="bsim-family-details"><summary>Voir les variantes et signatures</summary><ul>{#each family.variants as variant}<li><strong>{displayCandidateName(variant.name)}</strong> · {variant.executable}<SymbolDetails name={variant.name} presentation={symbolPresentations.get(variant.name)} />{#if !isEncodedCppName(variant.name)}<code>{variant.name}</code>{/if}</li>{/each}</ul></details>
                         </article>
                       {/each}
                     {/if}
                     {#if reviewGeneration?.suggested_name}
                       <h4>Analyse IA</h4>
                       <article class="generation">
-                        <strong>{reviewGeneration.suggested_name}</strong><span>{reviewGeneration.confidence}%</span><small>{reviewGeneration.reasoning}</small>
+                        <strong>{displayCandidateName(reviewGeneration.suggested_name)}</strong><span>{reviewGeneration.confidence}%</span><small>{reviewGeneration.reasoning}</small>
+                        <SymbolDetails name={reviewGeneration.suggested_name} presentation={symbolPresentations.get(reviewGeneration.suggested_name)} />
                         {#if reviewGeneration.calibration_breakdowns.length > 0}
                           <details class="calibration-breakdown">
                             <summary>Voir la calibration</summary>
@@ -6825,8 +6840,8 @@ interface ApplyRenamesResult {
                         {/if}
                       </article>
                     {/if}
-                    {#if reviewArbitration && (reviewArbitration.reasoning || reviewArbitration.evidence.length > 0)}<h4>Arbitrage</h4><article class="arbitration"><strong>{reviewArbitration.chosen_name ?? "Abstention de l'agent"}</strong><span>{reviewArbitration.confidence}%</span><small>{reviewArbitration.reasoning}</small>{#if reviewArbitration.evidence.length > 0}<ul>{#each reviewArbitration.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}</article>{/if}
-                    {#if reviewSemanticFallback?.suggested_name}<h4>Fallback sémantique · manuel uniquement</h4><article class="semantic-fallback"><strong>{reviewSemanticFallback.suggested_name}</strong><span>{reviewSemanticFallback.confidence}%</span><small>{reviewSemanticFallback.reasoning}</small>{#if reviewSemanticFallback.evidence.length > 0}<ul>{#each reviewSemanticFallback.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}<small>Hypothèse ouverte — vérification manuelle requise, jamais incluse automatiquement.</small></article>{/if}
+                    {#if reviewArbitration && (reviewArbitration.reasoning || reviewArbitration.evidence.length > 0)}<h4>Arbitrage</h4><article class="arbitration"><strong>{reviewArbitration.chosen_name ? displayCandidateName(reviewArbitration.chosen_name) : "Abstention de l'agent"}</strong><span>{reviewArbitration.confidence}%</span><small>{reviewArbitration.reasoning}</small>{#if reviewArbitration.chosen_name}<SymbolDetails name={reviewArbitration.chosen_name} presentation={symbolPresentations.get(reviewArbitration.chosen_name)} />{/if}{#if reviewArbitration.evidence.length > 0}<ul>{#each reviewArbitration.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}</article>{/if}
+                    {#if reviewSemanticFallback?.suggested_name}<h4>Fallback sémantique · manuel uniquement</h4><article class="semantic-fallback"><strong>{displayCandidateName(reviewSemanticFallback.suggested_name)}</strong><span>{reviewSemanticFallback.confidence}%</span><small>{reviewSemanticFallback.reasoning}</small><SymbolDetails name={reviewSemanticFallback.suggested_name} presentation={symbolPresentations.get(reviewSemanticFallback.suggested_name)} />{#if reviewSemanticFallback.evidence.length > 0}<ul>{#each reviewSemanticFallback.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}<small>Hypothèse ouverte — vérification manuelle requise, jamais incluse automatiquement.</small></article>{/if}
                     {#if reviewFidCandidates.length === 0 && reviewBsimCandidates.length === 0 && !reviewGeneration?.suggested_name}<div class="automatic-review-empty">Aucun candidat nommé. Le pseudocode reste disponible pour une analyse manuelle.</div>{/if}
                   </div>
                   <footer><button type="button" onclick={() => reviewIdentificationFunction(reviewItem.func.entry_address)}>Passer en validation manuelle</button></footer>
@@ -6941,15 +6956,15 @@ interface ApplyRenamesResult {
                     >
                       <span><strong>{func.name}</strong><code>{func.entry_address}</code></span>
                       {#if preparedChoice}
-                        <span class:ambiguous={!automaticChoice} class="queue-candidate"><small>{automaticChoice ? `Prêt auto · ${preparedChoice.confidence}%` : `À vérifier · ${preparedChoice.confidence}%`}</small><b>{preparedChoice.name}</b></span>
+                        <span class:ambiguous={!automaticChoice} class="queue-candidate"><small>{automaticChoice ? `Prêt auto · ${preparedChoice.confidence}%` : `À vérifier · ${preparedChoice.confidence}%`}</small><b>{displayCandidateName(preparedChoice.rawName ?? preparedChoice.name)}</b></span>
                       {:else if tiedEvidenceCount > 1}
                         <span class="queue-candidate ambiguous"><small>{tiedEvidenceCount} noms ex æquo</small><b>Arbitrage requis</b></span>
                       {:else if candidate}
-                        <span class="queue-candidate"><small>Proposition nettoyée</small><b>{normalizedAutomaticSymbolName(candidate.name) ?? candidate.name}</b></span>
+                        <span class="queue-candidate"><small>FunctionID</small><b>{displayCandidateName(candidate.name)}</b></span>
                       {:else if topBsimCandidate}
-                        <span class="queue-candidate"><small>BSim · {topBsimCandidate.similarity.toFixed(3)}</small><b>{normalizedAutomaticSymbolName(topBsimCandidate.name) ?? topBsimCandidate.name}</b></span>
+                        <span class="queue-candidate"><small>BSim · {topBsimCandidate.similarity.toFixed(3)}</small><b>{displayCandidateName(topBsimCandidate.name)}</b></span>
                       {:else if generatedSuggestion}
-                        <span class="queue-candidate"><small>Suggestion IA</small><b>{generatedSuggestion}</b></span>
+                        <span class="queue-candidate"><small>Suggestion IA</small><b>{displayCandidateName(generatedSuggestion)}</b></span>
                       {:else}
                         <span class="queue-no-evidence">Sans correspondance</span>
                       {/if}
@@ -7018,11 +7033,12 @@ interface ApplyRenamesResult {
                           {:else if currentResult}
                             {@const chosenName = currentResult.chosen_name}
                             {@const chosenDisplayName = chosenName ? displayCandidateName(chosenName) : null}
-                            {@const chosenSafeName = chosenName ? (normalizedAutomaticSymbolName(chosenName) ?? chosenName) : null}
+                            {@const chosenSafeName = chosenName ? normalizedAutomaticSymbolName(chosenName) : null}
                             <div class="arbitration-result">
-                              {#if chosenDisplayName && chosenSafeName}
+                              {#if chosenDisplayName && chosenName}
                                 <strong>Choix de l'agent : {chosenDisplayName}</strong>
-                                <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(chosenSafeName)}>Utiliser ce nom ({chosenSafeName})</button>
+                                <button type="button" class="link-button" disabled={!chosenSafeName} onclick={() => { if (chosenSafeName) selectFunctionRenameSuggestion(chosenSafeName); }}>{chosenSafeName ? `Utiliser ce nom (${chosenSafeName})` : "Aucun nom de renommage valide"}</button>
+                                <SymbolDetails name={chosenName} presentation={symbolPresentations.get(chosenName)} />
                               {:else}
                                 <strong>L'agent reste incertain</strong>
                               {/if}
@@ -7042,11 +7058,12 @@ interface ApplyRenamesResult {
                           {#if currentSemanticFallback?.suggested_name}
                             {@const fallbackSafeName = normalizedAutomaticSymbolName(currentSemanticFallback.suggested_name) ?? currentSemanticFallback.suggested_name}
                             <div class="arbitration-result semantic-fallback-result">
-                              <strong>{fallbackSafeName} — hypothèse sémantique — vérification manuelle requise</strong>
+                              <strong>{displayCandidateName(currentSemanticFallback.suggested_name)} — hypothèse sémantique — vérification manuelle requise</strong>
+                              <SymbolDetails name={currentSemanticFallback.suggested_name} presentation={symbolPresentations.get(currentSemanticFallback.suggested_name)} />
                               <p>{currentSemanticFallback.reasoning}</p>
                               {#if currentSemanticFallback.evidence.length > 0}<ul>{#each currentSemanticFallback.evidence as evidence}<li>{evidence}</li>{/each}</ul>{/if}
                               <small>Confiance : {currentSemanticFallback.confidence}% · {currentSemanticFallback.provider_label} · jamais appliqué automatiquement</small>
-                              <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(fallbackSafeName)}>Préparer ce nom pour vérification</button>
+                              <button type="button" class="link-button" disabled={!isSafeAutomaticSymbolName(fallbackSafeName)} onclick={() => selectFunctionRenameSuggestion(fallbackSafeName)}>Préparer ce nom pour vérification</button>
                             </div>
                           {/if}
                         </div>
@@ -7079,15 +7096,18 @@ interface ApplyRenamesResult {
                           {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "function_id")}
                           {@const proposedName = automaticChoice && candidate.name === selectedIdentificationCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
                           {@const corroborated = isCorroboratedByRtti(candidate.name, knownRealClassNames)}
-                          <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
+                          <div class="candidate-symbol-option">
+                          <button type="button" disabled={!isSafeAutomaticSymbolName(proposedName)} class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
                             <span>
                               <strong>{displayedName}</strong>
                               {#if corroborated}<span class="rtti-corroboration-badge">confirmé par RTTI ailleurs</span>{/if}
-                              <small>Nom propre proposé : {proposedName}</small>
+                              <small>Nom de renommage : {isSafeAutomaticSymbolName(proposedName) ? proposedName : "indisponible"}</small>
                               <small>{candidate.library_family} {candidate.library_version} {candidate.library_variant}</small>
                             </span>
                             <span><code>score {candidate.overall_score.toFixed(1)}</code><small>{candidate.match_mode}</small></span>
                           </button>
+                          <SymbolDetails name={candidate.name} presentation={symbolPresentations.get(candidate.name)} />
+                          </div>
                           {/each}
                         </details>
                       </div>
@@ -7108,10 +7128,13 @@ interface ApplyRenamesResult {
                               {#each family.variants as candidate}
                                 {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction.entry_address && choice.source === "bsim")}
                                 {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
-                                <button type="button" class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
-                                  <span><strong>{candidate.name}</strong><small>Nom propre proposé : {proposedName}</small><small>{candidate.matchingExecutables.join(", ")}</small></span>
+                                <div class="candidate-symbol-option">
+                                <button type="button" disabled={!isSafeAutomaticSymbolName(proposedName)} class:selected={functionRenameDraft === proposedName} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
+                                  <span><strong>{displayCandidateName(candidate.name)}</strong><small>Nom de renommage : {isSafeAutomaticSymbolName(proposedName) ? proposedName : "indisponible"}</small><small>{candidate.matchingExecutables.join(", ")}</small></span>
                                   <span><code>{candidate.similarity.toFixed(3)}</code><small>{candidate.significance.toFixed(1)}</small></span>
                                 </button>
+                                <SymbolDetails name={candidate.name} presentation={symbolPresentations.get(candidate.name)} />
+                                </div>
                               {/each}
                             </div>
                           </details>
@@ -7136,11 +7159,12 @@ interface ApplyRenamesResult {
                             {:else if currentResult}
                               {@const suggestedName = currentResult.suggested_name}
                               {@const suggestedDisplayName = suggestedName ? displayCandidateName(suggestedName) : null}
-                              {@const suggestedSafeName = suggestedName ? (normalizedAutomaticSymbolName(suggestedName) ?? suggestedName) : null}
+                              {@const suggestedSafeName = suggestedName ? normalizedAutomaticSymbolName(suggestedName) : null}
                               <div class="arbitration-result">
-                                {#if suggestedDisplayName && suggestedSafeName}
+                                {#if suggestedDisplayName && suggestedName}
                                   <strong>Suggestion de l'agent : {suggestedDisplayName}</strong>
-                                  <button type="button" class="link-button" onclick={() => selectFunctionRenameSuggestion(suggestedSafeName)}>Utiliser ce nom ({suggestedSafeName})</button>
+                                  <button type="button" class="link-button" disabled={!suggestedSafeName} onclick={() => { if (suggestedSafeName) selectFunctionRenameSuggestion(suggestedSafeName); }}>{suggestedSafeName ? `Utiliser ce nom (${suggestedSafeName})` : "Aucun nom de renommage valide"}</button>
+                                  <SymbolDetails name={suggestedName} presentation={symbolPresentations.get(suggestedName)} />
                                 {:else}
                                   <strong>L'agent n'a proposé aucun nom</strong>
                                 {/if}
@@ -8010,13 +8034,14 @@ interface ApplyRenamesResult {
                         <button
                           type="button"
                           class="rename-suggestion"
-                          title={`Use ${candidate.name} as the proposed Ghidra name`}
+                          title={`Use ${displayedName} as the proposed Ghidra name`}
+                          disabled={!isSafeAutomaticSymbolName(proposedName)}
                           onclick={() => selectFunctionRenameSuggestion(proposedName)}
                         >
                           <span>
                             {displayedName}
                             {#if corroborated}<span class="rtti-corroboration-badge">confirmé par RTTI ailleurs</span>{/if}
-                            <small>Nom propre proposé : {proposedName}</small>
+                            <small>Nom de renommage : {isSafeAutomaticSymbolName(proposedName) ? proposedName : "indisponible"}</small>
                             <em>
                               ({candidate.library_family} {candidate.library_version}
                               {candidate.library_variant}, {candidate.match_mode})
@@ -8024,6 +8049,7 @@ interface ApplyRenamesResult {
                           </span>
                           <code>score {candidate.overall_score.toFixed(1)}</code>
                         </button>
+                        <SymbolDetails name={candidate.name} presentation={symbolPresentations.get(candidate.name)} />
                       </li>
                     {/each}
                   </ul>
@@ -8049,12 +8075,13 @@ interface ApplyRenamesResult {
                               <ul>
                                 {#each family.variants as candidate}
                                   {@const automaticChoice = automaticRenameCandidates.find((choice) => choice.func.entry_address === selectedFunction?.entry_address && choice.source === "bsim")}
-                                  {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : candidate.name}
+                                  {@const proposedName = automaticChoice && candidate.name === mergedBsimCandidates[0]?.name ? automaticChoice.name : (normalizedAutomaticSymbolName(candidate.name) ?? candidate.name)}
                                   <li class="rename-suggestion-item" class:selected={functionRenameDraft === proposedName}>
-                                    <button type="button" class="rename-suggestion" title={`Use ${candidate.name} as the proposed Ghidra name`} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
-                                      <span>{candidate.name}<em>({candidate.corpus} · {candidate.matchingExecutables.join(", ")})</em></span>
+                                    <button type="button" disabled={!isSafeAutomaticSymbolName(proposedName)} class="rename-suggestion" title={`Use ${displayCandidateName(candidate.name)} as the proposed Ghidra name`} onclick={() => selectFunctionRenameSuggestion(proposedName)}>
+                                      <span>{displayCandidateName(candidate.name)}<em>({candidate.corpus} · {candidate.matchingExecutables.join(", ")})</em></span>
                                       <code>similarity {candidate.similarity.toFixed(3)} · significance {candidate.significance.toFixed(1)}</code>
                                     </button>
+                                    <SymbolDetails name={candidate.name} presentation={symbolPresentations.get(candidate.name)} />
                                   </li>
                                 {/each}
                               </ul>
@@ -11641,7 +11668,8 @@ interface ApplyRenamesResult {
   .evidence-source-group button.selected { border-color: #8b5cf6; box-shadow: 0 0 0 1px #8b5cf6; background: #241b48; }
   .evidence-source-group button > span { display: grid; min-width: 0; gap: 0.12rem; }
   .evidence-source-group button > span:last-child { flex: 0 0 auto; text-align: right; }
-  .evidence-source-group strong { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+  .evidence-source-group strong { font-size: 0.7rem; overflow-wrap: anywhere; white-space: normal; }
+  .candidate-symbol-option { min-width: 0; }
   .bsim-family { border: 1px solid #2d405b; border-radius: 7px; background: #0d192a; }
   .bsim-family > summary { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; padding: 0.55rem; color: #dbeafe; cursor: pointer; }
   .bsim-family > summary > span { display: grid; gap: 0.12rem; }

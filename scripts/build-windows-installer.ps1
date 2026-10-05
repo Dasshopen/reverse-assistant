@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$GhidraInstallDir
+    [Parameter(Mandatory = $true)][string]$GhidraInstallDir,
+    [string]$ReleaseTag = '',
+    [string]$ReleaseNotesFile = ''
 )
 
 # Maintainer-only packaging. Customers do not run this script.
@@ -21,7 +23,15 @@ if (-not (Test-Path -LiteralPath $gradle -PathType Leaf)) {
 [void](New-Item -ItemType Directory -Path $assets -Force)
 Push-Location $repository
 $originalPackagingRustFlags = $env:RUSTFLAGS
+$originalSigningKey = $env:TAURI_SIGNING_PRIVATE_KEY
 try {
+    if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+        $localSigningKey = Join-Path $env:USERPROFILE '.tauri\reverse-assistant\updater.key'
+        if (-not (Test-Path -LiteralPath $localSigningKey -PathType Leaf)) {
+            throw 'Set TAURI_SIGNING_PRIVATE_KEY to your private updater signing key before packaging. Never commit the key.'
+        }
+        $env:TAURI_SIGNING_PRIVATE_KEY = $localSigningKey
+    }
     $extensionBuildStarted = (Get-Date).AddSeconds(-2)
     & $gradle -p $extensionDirectory "-PGHIDRA_INSTALL_DIR=$ghidraDirectory" clean buildExtension --rerun-tasks
     if ($LASTEXITCODE -ne 0) { throw 'Extension build failed.' }
@@ -62,6 +72,7 @@ try {
     [void]$notices.AppendLine('Reverse Assistant - Third-party notices')
     [void]$notices.AppendLine('Application source: MIT. Tools and reference data retain their own licenses.')
     [void]$notices.AppendLine([System.IO.File]::ReadAllText((Join-Path $repository 'LICENSE')))
+    [void]$notices.AppendLine([System.IO.File]::ReadAllText((Join-Path $repository 'docs\THIRD_PARTY_DEMANGLERS.txt')))
     [void]$notices.AppendLine('Java and Ghidra are downloaded from upstream during setup; their distributions include notices.')
     [void]$notices.AppendLine('The corpus contains function signatures, not the reference executables or PDB files.')
     [void]$notices.AppendLine('MSVC runtime references were built with the local Microsoft toolchain. Review redistribution rights before release.')
@@ -88,7 +99,7 @@ try {
     # Hide maintainer paths in compiler-generated locations and dependency code.
     $normalizedUserProfile = $env:USERPROFILE.Replace('\', '/')
     $env:RUSTFLAGS = "$originalPackagingRustFlags --remap-path-prefix=$normalizedUserProfile=C:/build-user"
-    & npm.cmd run tauri build -- --config src-tauri/tauri.release.conf.json
+    & npm.cmd run tauri build -- --ci --config src-tauri/tauri.release.conf.json
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
     foreach ($packagedFile in @($packagedCorpus, (Join-Path $repository 'src-tauri\target\release\reverse-assistant.exe'))) {
         $packagedBytes = [System.IO.File]::ReadAllBytes($packagedFile)
@@ -104,13 +115,20 @@ try {
     $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter "*_${applicationVersion}_x64-setup.exe" -File)
     if ($installers.Count -ne 1) { throw 'Expected exactly one Windows setup executable.' }
     $installer = $installers[0]
-    $installerHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    [System.IO.File]::WriteAllText((Join-Path $installerDirectory 'SHA256SUMS.txt'), "$installerHash  $($installer.Name)`n")
-    Copy-Item -LiteralPath (Join-Path $assets 'THIRD_PARTY_NOTICES.txt') -Destination $installerDirectory -Force
+    if (-not (Test-Path -LiteralPath "$($installer.FullName).sig" -PathType Leaf)) {
+        throw 'Signed updater artifact is missing. Do not publish an unsigned update.'
+    }
+    if (-not $ReleaseTag) { $ReleaseTag = "v$applicationVersion-alpha.1" }
+    $manifestArguments = @('scripts/update-manifest.mjs', $installer.FullName, $ReleaseTag, (Join-Path $installerDirectory 'latest.json'))
+    if ($ReleaseNotesFile) { $manifestArguments += (Resolve-Path -LiteralPath $ReleaseNotesFile).Path }
+    & node @manifestArguments
+    if ($LASTEXITCODE -ne 0) { throw 'Signed update manifest generation failed.' }
     Write-Output "Installer prepared: $($installer.FullName)"
     Write-Output 'Release gate: validate on clean Windows and review corpus redistribution rights before publishing.'
+    Write-Output 'Upload the installer, its .sig, SHA256SUMS.txt and notices to the matching release. Publish updates/latest.json only after the assets are accessible and tested.'
 }
 finally {
     $env:RUSTFLAGS = $originalPackagingRustFlags
+    $env:TAURI_SIGNING_PRIVATE_KEY = $originalSigningKey
     Pop-Location
 }

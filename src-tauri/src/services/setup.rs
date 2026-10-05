@@ -1,8 +1,8 @@
+use crate::services::background_process::background_command;
 use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -555,7 +555,7 @@ fn build_extension_archive(
             gradle.display()
         ));
     }
-    let mut command = Command::new(&gradle);
+    let mut command = background_command(&gradle);
     command
         .arg("-p")
         .arg(&build_source)
@@ -966,7 +966,7 @@ fn java_executable(java_home: &Path) -> PathBuf {
 }
 
 fn inspect_java_command(program: &Path, java_home: Option<&Path>) -> SetupComponent {
-    let mut command = Command::new(program);
+    let mut command = background_command(program);
     command.arg("-version");
     if let Some(home) = java_home {
         command.env("JAVA_HOME", home);

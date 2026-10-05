@@ -12,14 +12,14 @@ test has passed.
 3. Take a snapshot before installing Reverse Assistant.
 4. Transfer these three files from the same build: the `-setup.exe`,
    `SHA256SUMS.txt`, and `THIRD_PARTY_NOTICES.txt`.
-5. In PowerShell, run `Get-FileHash -LiteralPath '.\Reverse Assistant_0.1.1_x64-setup.exe' -Algorithm SHA256`
+5. In PowerShell, run `Get-FileHash -LiteralPath '.\Reverse Assistant_0.1.3_x64-setup.exe' -Algorithm SHA256`
    from the download folder. Compare the hash with `SHA256SUMS.txt`.
    Do not run the installer if they differ.
 
 The current candidate is unsigned. Do not disable antivirus or other Windows
 security protections. Record any warning or blocked installation.
-Use the 0.1.1 candidate for this retest: automatic Java setup in 0.1.0 failed
-on GitHub CDN checksum redirects.
+Use the 0.1.2 candidate for the current retest. It includes the Java-download
+fix from 0.1.1 and requests background execution without a helper console.
 
 ## Run the acceptance checks
 
@@ -35,6 +35,7 @@ target binary; import it into Reverse Assistant only. Start without AI.
 | Restart after setup | Tools remain detected and the corpus loads without errors. | Not tested |
 | Import a small binary | Analysis completes and the function list appears. | Not tested |
 | Inspect local code | Assembly and pseudocode appear; switching functions remains responsive. | Not tested |
+| Background helper windows | Analysis, code loading and renaming do not open a terminal window. | Not tested |
 | Inspect an import | Missing external implementation is explained without a stuck loading indicator. | Not tested |
 | Reference matching | Available matches have source/evidence; missing matches are not treated as failures. | Not tested |
 | Review controls | Review tabs, prudence levels and selection controls respond consistently. | Not tested |
@@ -47,6 +48,18 @@ Restore the clean snapshot for a separate interrupted-download test: interrupt
 first-time tool setup, restore connectivity, retry and restart the application.
 Verify setup recovers without manual cache edits. Test upgrade separately once
 a second installer is available. Test AI only after the non-AI cycle passes.
+
+## Signed update acceptance
+
+Install the first updater-enabled build manually. Publish its tested feed only
+after the corresponding release assets are accessible. Test a second,
+higher-version signed build through **Settings → Application updates**.
+
+Check notification, download progress, cancelled confirmation, installation
+blocked during analysis, restart to the new version, and preserved projects.
+Offline or missing-feed checks must say unavailable, not up to date. Record
+these as separate results; successful first installation does not validate an
+upgrade. See [Application updates](APP_UPDATES.md).
 
 ## Record and report
 
